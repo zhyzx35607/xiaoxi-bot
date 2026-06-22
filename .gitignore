@@ -14,5 +14,9 @@ config.json
 data/
 docs/
 
+CLAUDE.md
+.claude/
+memory/
+
 .env
 .env.*
