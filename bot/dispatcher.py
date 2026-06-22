@@ -49,9 +49,6 @@ class Dispatcher:
         runtime = config.get("runtime", {})
         self._max_background_tasks = int(runtime.get("max_background_tasks", 16))
         self._background_tasks = set()
-        self._ai_sem = asyncio.Semaphore(int(runtime.get("ai_concurrency", 2)))
-        self._search_sem = asyncio.Semaphore(int(runtime.get("search_concurrency", 1)))
-        self._vision_sem = asyncio.Semaphore(int(runtime.get("vision_concurrency", 1)))
         self._web_search_cache = {}
         self._group_last_ai_judge = {}
         self._group_conversation_state = defaultdict(self._new_conversation_state)
@@ -1093,7 +1090,8 @@ class Dispatcher:
             add(-32, "消息太短")
         if self._is_low_signal_text(text):
             add(-35, "更像语气词或表情")
-        if self._ai_sem.locked():
+        from .ai import is_ai_busy
+        if is_ai_busy():
             add(-28, "AI正在忙")
         if len(self._background_tasks) >= max(2, self._max_background_tasks // 2):
             add(-18, "后台任务较多")

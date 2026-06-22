@@ -359,6 +359,11 @@ def _get_semaphore(name, limit):
     return current
 
 
+def is_ai_busy():
+    """Check whether the AI semaphore is currently exhausted (all slots taken)."""
+    return _AI_SEM is not None and _AI_SEM.locked()
+
+
 async def _call_deepseek(config, messages, max_tokens=400, temperature=0.7, session=None):
     runtime = config.get("runtime", {})
     async with _get_semaphore("ai", runtime.get("ai_concurrency", 1)):
@@ -381,34 +386,26 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
         "temperature": temperature,
     }
     url = f"{config.get('deepseek_base_url', 'https://api.deepseek.com')}/v1/chat/completions"
+
+    async def _do_post(sess):
+        async with sess.post(url, headers=headers, json=payload,
+                            timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                content_text = data["choices"][0]["message"]["content"].strip()
+                if not content_text:
+                    log.warning("DeepSeek returned empty content. finish_reason=%s",
+                               data["choices"][0].get("finish_reason", "?"))
+                return content_text
+            else:
+                body = await resp.text()
+                log.warning("DeepSeek API returned %d: %s", resp.status, body[:200])
+
     try:
         if session:
-            async with session.post(url, headers=headers, json=payload,
-                                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    content_text = data["choices"][0]["message"]["content"].strip()
-                    if not content_text:
-                        log.warning("DeepSeek returned empty content. finish_reason=%s", 
-                                   data["choices"][0].get("finish_reason", "?"))
-                    return content_text
-                else:
-                    body = await resp.text()
-                    log.warning("DeepSeek API returned %d: %s", resp.status, body[:200])
-        else:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(url, headers=headers, json=payload,
-                                  timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        content_text = data["choices"][0]["message"]["content"].strip()
-                        if not content_text:
-                            log.warning("DeepSeek returned empty content. finish_reason=%s",
-                                       data["choices"][0].get("finish_reason", "?"))
-                        return content_text
-                    else:
-                        body = await resp.text()
-                        log.warning("DeepSeek API returned %d: %s", resp.status, body[:200])
+            return await _do_post(session)
+        async with aiohttp.ClientSession() as s:
+            return await _do_post(s)
     except asyncio.TimeoutError:
         log.warning("DeepSeek API timeout")
     except Exception as e:
@@ -427,20 +424,20 @@ async def _call_vision_api(config, image_url, session=None):
 
 
 async def _call_vision_api_inner(config, image_url, session=None):
-    """Call jeniya.cn vision API to describe an image."""
+    """Call vision API (OpenAI-compatible) to describe an image."""
     vision_cfg = config.get("vision_api", {})
     if not vision_cfg:
         return None
     api_key = _get_vision_api_key(config)
     if not api_key:
         return None
-    
+
     headers = {
         "Authorization": "Bearer " + api_key,
         "Content-Type": "application/json"
     }
     payload = {
-        "model": vision_cfg.get("model", "gemini-3.1-flash-image-preview"),
+        "model": vision_cfg.get("model", "qwen-vl-plus"),
         "messages": [{
             "role": "user",
             "content": [
@@ -451,32 +448,25 @@ async def _call_vision_api_inner(config, image_url, session=None):
         "max_tokens": 60,
         "temperature": 0.3,
     }
-    url = vision_cfg.get("base_url", "https://jeniya.cn/v1") + "/chat/completions"
-    
+    url = vision_cfg.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1") + "/chat/completions"
+
+    async def _do_post(sess):
+        async with sess.post(url, headers=headers, json=payload,
+                            timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+            else:
+                body = await resp.text()
+                log.warning("Vision API returned %d: %s", resp.status, body[:200])
+                if "Arrearage" in body or "quota" in body.lower() or "insufficient" in body.lower() or "limit" in body.lower():
+                    log.warning("Vision API quota likely exhausted - check Alibaba Cloud balance")
+
     try:
         if session:
-            async with session.post(url, headers=headers, json=payload,
-                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
-                else:
-                    body = await resp.text()
-                    log.warning("Vision API returned %d: %s", resp.status, body[:200])
-                    if "Arrearage" in body or "quota" in body.lower() or "insufficient" in body.lower() or "limit" in body.lower():
-                        log.warning("Vision API quota likely exhausted - check Alibaba Cloud balance")
-        else:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(url, headers=headers, json=payload,
-                                  timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data["choices"][0]["message"]["content"].strip()
-                    else:
-                        body = await resp.text()
-                        log.warning("Vision API returned %d: %s", resp.status, body[:200])
-                        if "Arrearage" in body or "quota" in body.lower() or "insufficient" in body.lower() or "limit" in body.lower():
-                            log.warning("Vision API quota likely exhausted - check Alibaba Cloud balance")
+            return await _do_post(session)
+        async with aiohttp.ClientSession() as s:
+            return await _do_post(s)
     except asyncio.TimeoutError:
         log.warning("Vision API timeout for image: %s", image_url[:60])
     except Exception as e:
@@ -877,18 +867,16 @@ def _parse_reply_actions(reply, member_map):
 # ========== IMAGE DESCRIPTION (识图) ==========
 
 async def describe_image(dispatcher, group_id, file_id, sub_type, summary=""):
-    """Describe image content. Uses jeniya.cn vision API, falls back to QQ summary."""
+    """Describe image content. Vision API (Qwen) first, QQ summary as fallback."""
     config = dispatcher.config
     import html as _html
-    
-    # Try QQ summary first (fast, no API call)
+
+    # Decode QQ summary for potential fallback use
+    qq_summary = ""
     if summary:
-        decoded = _html.unescape(summary)
-        if decoded.strip():
-            log.info("Image via summary: %s -> %s", file_id[:16], decoded[:50])
-            return decoded
-    
-    # Try vision API
+        qq_summary = _html.unescape(summary).strip()
+
+    # Try vision API first
     image_url = None
     try:
         result = await dispatcher.client.call("get_image", {"file": file_id})
@@ -897,14 +885,19 @@ async def describe_image(dispatcher, group_id, file_id, sub_type, summary=""):
             image_url = data.get("url") or data.get("file")
     except Exception as e:
         log.error("get_image failed: %s", e)
-    
+
     if image_url:
         log.info("Vision API: describing %s", file_id[:16])
         desc = await _call_vision_api(config, image_url, session=dispatcher.client.session)
         if desc:
             log.info("Vision result: %s -> %s", file_id[:16], desc[:50])
             return desc
-    
+
+    # Fallback: use QQ summary if vision API failed or image URL unavailable
+    if qq_summary:
+        log.info("Image via summary (fallback): %s -> %s", file_id[:16], qq_summary[:50])
+        return qq_summary
+
     # Ultimate fallback
     if sub_type and str(sub_type) != "0":
         return "[表情/贴纸]"
@@ -1024,23 +1017,22 @@ async def _analyze_sticker_vision_inner(config, image_url, session=None):
         "temperature": 0.3,
     }
     url = vision_cfg.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1") + "/chat/completions"
+
+    async def _do_post(sess):
+        async with sess.post(url, headers=headers, json=payload,
+                            timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+            else:
+                body = await resp.text()
+                log.warning("Vision API sticker returned %d: %s", resp.status, body[:150])
+
     try:
         if session:
-            async with session.post(url, headers=headers, json=payload,
-                                    timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
-                else:
-                    body = await resp.text()
-                    log.warning("Vision API sticker returned %d: %s", resp.status, body[:150])
-        else:
-            async with aiohttp.ClientSession() as s:
-                async with s.post(url, headers=headers, json=payload,
-                                  timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data["choices"][0]["message"]["content"].strip()
+            return await _do_post(session)
+        async with aiohttp.ClientSession() as s:
+            return await _do_post(s)
     except Exception as e:
         log.error("Sticker vision analysis failed: %s", e)
     return None
@@ -1141,11 +1133,7 @@ async def _pick_best_sticker(dispatcher, group_id, stickers):
 
 # ---- Send sticker ----
 async def _maybe_send_sticker(dispatcher, group_id, is_private=False):
-    """Send a contextual sticker — private chat only (groups disabled by policy)."""
-    # Groups: never send stickers
-    if not is_private and group_id:
-        return
-
+    """Send a contextual sticker in private or group chat."""
     sticker_cfg = dispatcher.config.get("sticker_mode", {})
     if not sticker_cfg.get("enabled", True):
         return
