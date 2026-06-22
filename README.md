@@ -1,294 +1,196 @@
-# 小汐 (Xiao Xi) — QQ 群聊机器人
+# 小汐 — QQ 群聊机器人
 
-基于 [OneBot v11](https://github.com/botuniverse/onebot-11) 反向 WebSocket 协议，连接 [NapCat](https://github.com/NapNeko/NapCatQQ) 客户端的多功能 QQ 群聊机器人。
+一个跑在 [NapCat](https://github.com/NapNeko/NapCatQQ) 上的 QQ 机器人，OneBot v11 协议。
 
-小汐是一个 20 岁女大学生人设的 AI 群友，能自然参与群聊、执行管理命令、收集表情包、识别图片内容，还能在私聊中与你聊天。
+小汐的人设是一个 20 岁的女大学生，爱刷手机爱追番。她能在群里闲聊接话、帮忙管群、收表情包、认图片里的字，私聊也能聊。后端用的 DeepSeek，费用很低，几块钱能用好久。
 
-## 功能特性
+## 她能干什么
 
-### 🤖 AI 聊天
-- **DeepSeek 驱动**：自然语言理解与生成，像真人一样参与群聊
-- **多级触发**：@机器人 / 叫名字"小汐" / 智能判断语境自动插话 / 追问链式对话
-- **联网搜索**：自动检测事实类问题，通过 Bing 搜索核实后回答
-- **图片理解**：支持 OCR 文字识别 + Vision API 图片内容描述
-- **合并转发**：能阅读合并转发消息并参与讨论
-- **语音消息**：能识别语音消息（转文字）
+**聊天方面：**
+- 群里 @她或者叫"小汐"，她就会回你
+- 有时候她会自己判断语境插话——比如有人在问问题、聊到她懂的话题，她可能就冒出来了
+- 遇到她不确定的事实性问题，会自动去网上搜一下再回答（用的 Bing，免费）
+- 能看懂图片：你发张图她可以说说是什么，也能 OCR 提取上面的文字
+- 能看合并转发的内容
+- 能记住最近聊了什么（短期 20 条），太久远的会压缩成摘要存下来
 
-### 🛡️ 群管理
-- **入群欢迎**：自定义欢迎语模板，支持 `{nickname}` 占位符
-- **违禁词检测**：支持普通匹配和正则匹配，自动撤回 + 警告
-- **黑名单系统**：按群隔离，时间到期自动解除
-- **R18 内容拦截**：AI 自动识别色情/骚扰内容，三次警告自动拉黑 48 小时
-- **URL 安全检查**：调用 QQ 安全接口检测链接，危险链接自动撤回 + 禁言
+**管群方面：**
+- 有人进群自动欢迎，欢迎语可以自定义
+- 违禁词检测，自动撤回加警告
+- 黑名单系统，按群分开，到期自动解
+- 链接安全检查，危险链接自动撤回去禁言
+- R18 内容识别，三次警告自动拉黑 48 小时
 
-### 🎮 互动功能
-- **今日运势**：AI 生成趣味运势（每人每天一次）
-- **点赞排行**：统计群内发言量排行
-- **戳一戳**：被戳自动回戳
-- **点赞秒回**：任何人给你的资料卡点赞，一秒内回赞满（SVIP 20 次，普通 10 次）
-- **复读机**：群友重复同一句话达到阈值，概率跟风复读
-- **点歌**：自然语言触发音乐搜索
+**互动娱乐：**
+- 今日运势（AI 生成的，每人每天一次）
+- 发言排行
+- 戳一戳自动回戳
+- 点赞秒回：有人给你点赞，一秒回满（SVIP 回 20 个，普通号回 10 个）
+- 复读机：群友好几个人发同一句话，她概率跟风
+- 点歌：说"来首 xxx"就能搜
 
-### 📦 表情包管理
-- **自动收集**：群内图片自动存入表情库
-- **智能标签**：可选 AI 视觉分析，自动打标签、分类、标注适用场景
-- **上下文发送**：AI 回复后可选择最合适的表情包追加发送
+**私聊：**
+- 好友私聊可以跟 AI 自由聊天，有频率限制防刷
+- Bot 主人可以在私聊里用管理命令、看日志、处理加群申请
 
-### 💬 私聊功能
-- **AI 聊天**：任何好友私聊都能和 AI 自由聊天
-- **管理面板**：Bot 主人在私聊中可使用全部管理命令，支持跨群操作
-- **限流保护**：非主人私聊限制 20 条/10 分钟
+## 怎么跑起来
 
-### 🔐 权限系统
-五级权限层级：`Bot 主人` > `Bot QQ 号` > `群主(Level 4)` > `群管理员(Level 2)` > `群成员(Level 1)`
+先装 NapCat，让它开个 WebSocket 服务端监听 `ws://127.0.0.1:3001`。
 
-命令可按角色控制访问：
-- `admin_only` — 需要群内管理员身份
-- `bot_admin_required` — Bot 自身需要是群管理员
-- `bot_owner_required` — Bot 自身需要是群主
-- `bot_owner` — Bot 主人、Bot QQ 或群主
-- `bot_owner_only` — 仅 Bot 主人
-
-## 架构
-
-```
-main.py                        # 入口：配置加载/迁移，启动 Client + Dispatcher，信号处理
-└── bot/
-    ├── client.py              # OneBot v11 WS 客户端 — 连接管理、所有 API 封装、PID 锁
-    ├── dispatcher.py          # 中央调度器 — 事件路由、AI 聊天门控、频率限制
-    ├── commands.py            # 斜杠命令处理器 (/kick, /help, /fortune 等)
-    ├── ai.py                  # DeepSeek LLM 集成、人设、短/长期记忆、联网搜索、表情分析
-    ├── natural_triggers.py    # 无前缀自然语言触发（"踢了"、"禁言"等）
-    ├── notice_handler.py      # 群事件处理（加群、退群、戳一戳、管理员变更、违禁词等）
-    ├── permission.py          # 权限层级系统
-    ├── guard.py               # 黑名单与 R18 警告系统（按群隔离、时间过期）
-    ├── security.py            # URL 安全检查、灰条审计日志
-    ├── request_handler.py     # 好友/群加群请求存储与审批流
-    ├── media.py               # 消息分段解析：图片(OCR+视觉)、转发、语音、文件
-    ├── memory.py              # 从聊天中提取用户名称、兴趣等长期记忆信号
-    ├── scheduler.py           # 可选定时任务（默认关闭）
-    └── utils.py               # 原子化 JSON 写入工具
-```
-
-## 快速开始
-
-### 前置条件
-
-1. **NapCat QQ 客户端**：[安装 NapCat](https://github.com/NapNeko/NapCatQQ)，配置 WebSocket 服务端监听 `ws://127.0.0.1:3001`
-2. **Python 3.8+** 和虚拟环境
-3. **DeepSeek API Key**：[DeepSeek 开放平台](https://platform.deepseek.com/) 注册获取
-4. （可选）**Vision API**：用于图片理解，支持 OpenAI 兼容接口
-
-### 安装
+然后：
 
 ```bash
-# 克隆仓库
 git clone https://github.com/zhyzx35607/xiaoxi-bot.git
 cd xiaoxi-bot
-
-# 创建虚拟环境并安装依赖
 python3 -m venv venv
 source venv/bin/activate
 pip install websockets aiohttp
-
-# 创建配置（从模板）
-cp config.example.json config.json
-# 编辑 config.json 填入群号和功能开关
 ```
 
-### 配置环境变量
-
-API 密钥通过环境变量加载，**不要写入 config.json**：
+配置就靠环境变量，密钥不要写进 config.json：
 
 ```bash
-export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"
-export QQBOT_WS_URL="ws://127.0.0.1:3001"      # NapCat WebSocket 地址
-export QQBOT_TOKEN=""                            # OneBot access_token（如需要）
-export VISION_API_KEY="sk-xxxxxxxxxxxxxxxx"      # 可选：视觉识别 API
-export VISION_API_BASE_URL="https://your-api.com/v1"  # 可选
-export VISION_API_MODEL="qwen-vl-plus"           # 可选
+export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"    # DeepSeek 的 key，注册就有
+export QQBOT_WS_URL="ws://127.0.0.1:3001"        # NapCat 的 WS 地址
+export QQBOT_TOKEN=""                             # OneBot access token，没设就不填
 ```
 
-### 运行
+如果要用图片识别功能，再配 Vision API（可选）：
 
 ```bash
-# 直接运行（会停止已有的 systemd 服务）
-sudo systemctl stop qqbot.service
+export VISION_API_KEY="sk-xxxxxxxxxxxxxxxx"
+export VISION_API_BASE_URL="https://your-api.com/v1"
+export VISION_API_MODEL="qwen-vl-plus"
+```
+
+启动：
+
+```bash
 python main.py
+```
 
-# 作为 systemd 服务运行
+用 systemd 托管更稳：
+
+```bash
 sudo cp qqbot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now qqbot.service
 ```
 
-## 命令列表
+config.json 里可以按群开关各种功能，调整 AI 插话的积极性、频率限制等等。用到的时候看看文件里的注释就行。
 
-### 通用命令（所有群成员可用）
+## 命令一览
 
-| 命令 | 说明 |
-|------|------|
-| `/help` | 查看可用命令 |
-| `/fortune` | 今日运势 |
-| `/like @用户` | 给用户点赞 |
-| `/rank` | 群内发言排行 |
-| `/weather 城市` | 查询天气 |
-| `/translate 文本` | 翻译文本 |
-| `/calc 表达式` | 计算器（如 `/calc 1+2*3`） |
-| `/ocr` | 识别图片文字（回复图片使用） |
-| `/转发摘要` | 总结合并转发内容 |
-| `/info [@用户或QQ号]` | 查看成员信息 |
-| `/history [数量]` | 查看最近消息 |
-| `/精华列表` | 查看群精华消息 |
-| `/群荣誉` | 查看群荣誉信息 |
-| `/群文件 [关键词]` | 查看/搜索群文件 |
-| `/文件链接 file_id busid` | 获取群文件的下载链接 |
-| `/禁言列表` | 查看当前被禁言的群友 |
-| `/已读` | 标记消息为已读 |
-| `/转发` | 转发消息（需回复目标消息） |
-| `/点赞信息` | 查看机器人的点赞统计 |
+群里用 `/` 前缀，也有些话不带前缀也能触发。
 
-### 管理命令（需群管理员 + Bot 有管理权限）
+**所有人都能用：**
 
-| 命令 | 说明 |
-|------|------|
-| `/kick @用户` | 踢出群成员 |
-| `/ban @用户 [分钟]` | 禁言群成员（默认 30 分钟） |
-| `/unban @用户` | 解除禁言 |
-| `/allban on/off` | 全员禁言开关 |
-| `/welcome` | 入群欢迎语设置 |
-| `/badword` | 违禁词设置（支持普通匹配和正则 `re:xxx`） |
-| `/admin add/del @用户` | 设置/取消群管理员 |
-| `/精华` | 将回复的消息设为精华 |
-| `/删精华` | 删除精华消息 |
-| `/公告` | 发布/查看群公告 |
-| `/setgroupavatar` | 设置群头像（回复图片使用） |
-| `/安全 status/log` | 查看安全功能状态和日志 |
+`/help` — 看有哪些命令
+`/fortune` — 今日运势
+`/like @xxx` — 点赞
+`/rank` — 发言排行
+`/weather 城市` — 天气
+`/translate 文本` — 翻译
+`/calc 1+2*3` — 计算器
+`/ocr` — 识别图片文字（回复那张图发）
+`/info @xxx` 或 `/info QQ号` — 查成员资料
+`/history [条数]` — 最近消息
+`/精华列表` — 群精华
+`/群荣誉` — 龙王/群火之类的荣誉
+`/群文件 [关键词]` — 搜群文件
+`/文件链接 file_id busid` — 取文件下载链接
+`/禁言列表` — 看谁在被禁言
+`/已读` — 标记消息已读
+`/转发` — 转发消息（回复目标消息发）
+`/点赞信息` — 看机器人的点赞数据
 
-### 群主专属命令
+**管理用的（要群管 + Bot 也得是管理）：**
 
-| 命令 | 说明 |
-|------|------|
-| `/title @用户 头衔` | 设置专属头衔（需 Bot 为群主） |
-| `/enable` / `/disable` | 开启/关闭本群机器人功能 |
-| `/clearai` | 清除本群 AI 记忆和表情包数据 |
+`/kick @xxx` — 踢人
+`/ban @xxx [分钟]` — 禁言
+`/unban @xxx` — 解禁
+`/allban on/off` — 全员禁言
+`/welcome` — 设置欢迎语
+`/badword` — 违禁词管理
+`/admin add/del @xxx` — 上/下管理
+`/精华` — 设精华（回复那条消息）
+`/删精华` — 取消精华
+`/公告` — 群公告
+`/setgroupavatar` — 换群头像（回复图片）
+`/安全 status/log` — 安全功能状态和日志
 
-### Bot 主人私聊命令（在私聊中发送给机器人）
+**群主才能用的：**
 
-| 命令 | 说明 |
-|------|------|
-| `/status` | 查看运行状态、内存、在线时长 |
-| `/list` | 查看所有群组数据概览 |
-| `/log [N]` | 查看最近 N 条日志 |
-| `/bl list/add/remove` | 黑名单管理 |
-| `/group enable/disable/list 群号` | 群组开关管理 |
-| `/memory 群号` | 查看群的 AI 记忆 |
-| `/memory clear 群号` | 清除群的 AI 记忆 |
-| `/sticker 群号` | 查看表情包数量 |
-| `/sticker clear 群号` | 清除表情包记录 |
-| `/sysmsg` | 查看入群申请/邀请 |
-| `/approve flag尾号` | 通过加群申请 |
-| `/reject flag尾号 原因` | 拒绝加群申请 |
-| `/clearai 群号` | 清除群的完整数据 |
-| `/health` | 运行健康检查 |
+`/title @xxx 头衔` — 设专属头衔（Bot 得是群主）
+`/enable` `/disable` — 开关本群的 Bot 功能
+`/clearai` — 清掉本群的 AI 记忆和表情包
 
-私聊跨群管理：大部分管理命令可通过 `/<命令> 群号 参数` 格式跨群操作。
+**Bot 主人的私聊命令（在私聊窗口发给 Bot）：**
 
-### 自然语言触发（无需 `/` 前缀）
+`/status` — 看运行状态、内存、在线时间
+`/list` — 所有群的概览
+`/log [N]` — 看最近 N 条日志
+`/bl list/add/remove` — 黑名单管理
+`/group enable/disable/list 群号` — 开关群
+`/memory 群号` — 看群的 AI 记忆
+`/memory clear 群号` — 清掉
+`/sticker 群号` — 看收了多少表情包
+`/sysmsg` — 看加群申请
+`/approve flag尾号` — 同意加群
+`/reject flag尾号 原因` — 拒绝
+`/health` — 健康检查
 
-| 说法 | 效果 |
-|------|------|
-| "踢了 @某人" / "把 @某人 踢了" | 踢出成员 |
-| "禁言 @某人" / "把 @某人 禁言了" | 禁言成员 |
-| "解禁 @某人" | 解除禁言 |
-| "来看看"/"来测测"/"运势" | 今日运势 |
-| "点歌 歌名" / "来首 歌名" | 音乐搜索 |
+跨群管理：大部分命令可以用 `/<命令> 群号 参数` 的格式跨群操作，比如 `/kick 123456 @xxx`。
 
-## 配置说明
+**不用前缀也能触发的：**
 
-### config.json 结构
+- "踢了 @xxx" / "把 @xxx 踢了" → 踢人
+- "禁言 @xxx" / "把 @xxx 禁言了" → 禁言
+- "解禁 @xxx" → 解禁
+- "来看看" / "运势" → 今日运势
+- "点歌 xxx" / "来首 xxx" → 搜歌
 
-```json
-{
-  "bot_qq": 机器人QQ号,
-  "bot_owner": 主人QQ号,
-  "group_defaults": { /* 新群的默认设置 */ },
-  "groups": {
-    "群号": {
-      "enabled": true,
-      "masters": [],
-      "features": {
-        "ai_chat": true,        // AI 聊天
-        "interject": true,      // 智能插话
-        "repeat": true,         // 复读机
-        "music": true,          // 点歌
-        "fortune": true,        // 运势
-        "admin_cmds": true,     // 管理命令
-        "voice_reply": false,   // AI 语音回复
-        "auto_poke": true,      // 自动回戳
-        "auto_essence": false   // 自动设精华
-      }
-    }
-  },
-  "runtime": {
-    "ai_concurrency": 1,        // AI 并发数（低配服务器建议 1）
-    "enable_scheduler": false,  // 定时任务（低配建议关）
-    "ws_queue_size": 50         // WS 消息队列大小
-  }
-}
+## 代码结构
+
+```
+main.py                    入口，负责启动、配置迁移、信号处理
+bot/
+ ├── client.py             OneBot WS 连接、所有 API 调用
+ ├── dispatcher.py         事件调度中心，AI 插话决策也在这
+ ├── commands.py           所有 / 命令的处理逻辑
+ ├── ai.py                 DeepSeek 调用、人设、记忆、联网搜索
+ ├── natural_triggers.py   自然语言触发（不带 / 的命令）
+ ├── notice_handler.py     群事件：加群退群、戳一戳、违禁词等
+ ├── permission.py         权限判断
+ ├── guard.py              黑名单和 R18 警告
+ ├── security.py           链接安全和灰条审计
+ ├── request_handler.py    好友/加群申请的存取
+ ├── media.py              消息解析：图片 OCR、转发、语音、文件
+ ├── memory.py             从聊天里提取用户信息
+ ├── scheduler.py          定时任务（默认关着）
+ └── utils.py              原子化写 JSON 的工具
 ```
 
-所有敏感字段（API 密钥、Token）必须通过环境变量设置，见上方「配置环境变量」。
+## 数据存哪
 
-## 环境变量参考
-
-| 变量 | 对应配置 | 说明 |
-|------|----------|------|
-| `DEEPSEEK_API_KEY` | `deepseek_api_key` | DeepSeek API 密钥（必填） |
-| `QQBOT_DEEPSEEK_API_KEY` | `deepseek_api_key` | 同上（备选变量名） |
-| `DEEPSEEK_BASE_URL` | `deepseek_base_url` | DeepSeek API 地址（默认官方） |
-| `DEEPSEEK_MODEL` | `deepseek_model` | 模型名（默认 deepseek-chat） |
-| `QQBOT_WS_URL` | `ws_url` | NapCat WebSocket 地址 |
-| `QQBOT_TOKEN` | `token` | OneBot access_token |
-| `ONEBOT_ACCESS_TOKEN` | `token` | 同上（备选变量名） |
-| `VISION_API_KEY` | `vision_api.api_key` | 视觉识别 API 密钥（可选） |
-| `VISION_API_BASE_URL` | `vision_api.base_url` | 视觉 API 地址 |
-| `VISION_API_MODEL` | `vision_api.model` | 视觉模型名 |
-| `QQBOT_CONSOLE_LOG` | — | 设为 `1` 开启控制台日志 |
-
-## 数据存储
-
-数据保存在 `data/` 目录下（已在 `.gitignore` 中排除）：
+都在 `data/` 下面，已经在 `.gitignore` 里忽略了：
 
 ```
 data/
-├── memories/           # AI 对话记忆（短期 20 条上限，长期 10 条上限）
-│   ├── group_*.json
-│   ├── group_*_long.json
-│   └── group_*_u*.json  # 用户个人记忆
-├── stickers/           # 表情包收集
-│   └── group_*.json
-├── blacklist.json      # 黑名单
-├── r18_warnings.json   # R18 警告计数
-├── security_events.json # 安全事件日志
-└── runtime_state.json  # 运行时状态（每日重置）
+├── memories/           短期记忆 + 长期摘要 + 按用户的记忆
+├── stickers/           收集的表情包
+├── blacklist.json      黑名单
+├── r18_warnings.json   R18 警告次数
+├── security_events.json 安全事件记录
+└── runtime_state.json  运行状态
 ```
 
-## 系统要求
+## 服务器要求
 
-| 项目 | 最低配置 | 推荐配置 |
-|------|----------|----------|
-| CPU | 1 核 | 2 核 |
-| 内存 | 512MB（仅 bot）| 1.5GB+（含 NapCat QQ） |
-| 磁盘 | 100MB | 1GB |
-| Python | 3.8+ | 3.10+ |
+我自己跑在阿里云 1.6G 内存的机器上，Bot 本身只占三四十兆，但 NapCat 的 QQ 客户端要吃掉五六百兆。建议至少 1.5G 内存。
 
-> **注意**：NapCat QQ 客户端本身需要约 500MB-900MB 内存。整体部署建议 1.5GB 以上内存的服务器。
-
-## License
-
-MIT
+Python 3.8 就行，依赖就 `websockets` 和 `aiohttp` 两个包。
 
 ---
 
-**Contributors**: [zhyzx35607](https://github.com/zhyzx35607)
+有问题提 issue 就行。
