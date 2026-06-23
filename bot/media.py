@@ -74,31 +74,46 @@ async def describe_image_with_ocr(dispatcher, group_id, seg):
     sub_type = data.get("sub_type", "")
     summary = _clean_text(data.get("summary", ""))
     parts = []
+    has_good_desc = False
     if file_id:
-        try:
-            from .ai import describe_image
-            desc = await describe_image(dispatcher, group_id, file_id, sub_type, summary)
-            if desc:
-                parts.append("图片：" + _clean_text(desc)[:120])
-        except Exception:
-            log.exception("Image description failed")
+        # Check dispatcher cache first (populated by _enhance_image_cache)
+        cache = getattr(dispatcher, "_image_desc_cache", None)
+        if cache and file_id in cache:
+            cached = cache[file_id]
+            cached_desc = cached if isinstance(cached, str) else cached.get("desc", "")
+            if cached_desc:
+                parts.append("图片：" + _clean_text(cached_desc)[:120])
+                has_good_desc = True
+        else:
+            try:
+                from .ai import describe_image
+                desc = await describe_image(dispatcher, group_id, file_id, sub_type, summary)
+                if desc and desc not in ("[图片]", "[表情/贴纸]"):
+                    parts.append("图片：" + _clean_text(desc)[:120])
+                    has_good_desc = True
+                elif desc:
+                    parts.append("图片：" + _clean_text(desc)[:120])
+            except Exception:
+                log.exception("Image description failed")
     elif summary:
         parts.append("图片：" + summary[:120])
 
-    image_ref = data.get("url") or file_id
-    if image_ref:
-        for api_name in ("ocr_image", "ocr_image_enhanced"):
-            try:
-                api = getattr(dispatcher.client, api_name)
-                result = await api(image_ref)
-                if result.get("status") != "ok":
+    # Only run OCR if vision API didn't give a good description
+    if not has_good_desc:
+        image_ref = data.get("url") or file_id
+        if image_ref:
+            for api_name in ("ocr_image", "ocr_image_enhanced"):
+                try:
+                    api = getattr(dispatcher.client, api_name)
+                    result = await api(image_ref)
+                    if result.get("status") != "ok":
+                        continue
+                    ocr_text = _extract_ocr_text(result.get("data"))
+                    if ocr_text:
+                        parts.append("OCR文字：" + ocr_text[:180])
+                        break
+                except Exception:
                     continue
-                ocr_text = _extract_ocr_text(result.get("data"))
-                if ocr_text:
-                    parts.append("OCR文字：" + ocr_text[:180])
-                    break
-            except Exception:
-                continue
     return "；".join(parts)
 
 

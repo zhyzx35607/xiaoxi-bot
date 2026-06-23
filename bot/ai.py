@@ -149,6 +149,13 @@ def _save_memory(group_id, memory, config=None, session=None):
     for e in memory:
         if "ts" not in e:
             e["ts"] = now
+    # Periodic cleanup: evict groups not accessed in > 2 hours
+    stale = [g for g, ts in _memory_timestamps.items() if now - ts > 7200]
+    for g in stale:
+        _memories.pop(g, None)
+        _memory_timestamps.pop(g, None)
+    if stale:
+        log.debug("Memory cleanup: evicted %d stale group caches", len(stale))
     # Cap at 20 entries
     if len(memory) > 20:
         overflow = memory[:len(memory)-20]
@@ -189,22 +196,24 @@ def _load_user_memory(group_id, user_id):
             cutoff = now - 7 * 86400
             fresh = [e for e in data if e.get("ts", 0) > cutoff]
             if fresh != data:
-                _save_user_memory(group_id, user_id, fresh)
+                _save_user_memory(group_id, user_id, fresh, None)
             return fresh
         except Exception:
             pass
     return []
 
-def _save_user_memory(group_id, user_id, memory):
+def _save_user_memory(group_id, user_id, memory, config=None):
     now = time.time()
     for e in memory:
         if "ts" not in e:
             e["ts"] = now
     # Cap at user_memory_max from config (default 15)
-    if len(memory) > 15:
-        # Compress oldest 8 entries into a summary
-        oldest = memory[:8]
-        recent = memory[8:]
+    max_entries = int((config or {}).get("user_memory_max", 15))
+    if len(memory) > max_entries:
+        # Compress oldest entries into a summary
+        split = max(1, max_entries // 2)
+        oldest = memory[:split]
+        recent = memory[split:]
         summary_parts = []
         for e in oldest:
             c = (e.get("content") or "")[:60].replace("\n", " ")
@@ -213,7 +222,7 @@ def _save_user_memory(group_id, user_id, memory):
         if summary_parts:
             summary = {"role": "system", "content": "[记忆压缩] " + "; ".join(summary_parts[-4:]), "ts": now}
             recent.insert(0, summary)
-        memory = recent[-15:]
+        memory = recent[-max_entries:]
     path = _user_memory_file(group_id, user_id)
     atomic_write_json(path, memory)
 
@@ -249,6 +258,70 @@ def _save_long_memory(group_id, entries):
     if len(entries) > 10:
         entries = entries[-10:]
     atomic_write_json(path, entries)
+
+# ========== PRIVATE CHAT LONG-TERM MEMORY ==========
+
+def _private_long_memory_file(user_id):
+    return os.path.join(MEMORY_DIR, "private_{}_long.json".format(user_id))
+
+def _load_private_long_memory(user_id):
+    path = _private_long_memory_file(user_id)
+    now = time.time()
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            # 30 day TTL
+            cutoff = now - 30 * 86400
+            fresh = [e for e in data if e.get("ts", 0) > cutoff]
+            return fresh
+        except Exception:
+            pass
+    return []
+
+def _save_private_long_memory(user_id, entries):
+    path = _private_long_memory_file(user_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if len(entries) > 8:
+        entries = entries[-8:]
+    atomic_write_json(path, entries)
+
+async def _compress_private_to_long(user_id, old_entries, config, session):
+    """Summarize old private chat memory into long-term memory."""
+    if not old_entries or len(old_entries) < 4:
+        return
+    parts = []
+    for e in old_entries:
+        role = "对方" if e.get("role") == "user" else "小汐"
+        c = (e.get("content") or "")[:100].replace("\n", " ")
+        parts.append("{}: {}".format(role, c))
+
+    prompt = (
+        "将以下私聊对话摘要为1-2句话，用中文，只描述讨论的话题内容，不评价：\n\n"
+        + "\n".join(parts[-8:])
+    )
+    try:
+        headers = {"Authorization": "Bearer {}".format(config["deepseek_api_key"]), "Content-Type": "application/json"}
+        payload = {
+            "model": config.get("deepseek_model", "deepseek-chat"),
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 80, "temperature": 0.3,
+        }
+        if session:
+            async with session.post(
+                "{}/v1/chat/completions".format(config.get("deepseek_base_url", "https://api.deepseek.com")),
+                headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    summary = data["choices"][0]["message"]["content"].strip()
+                    if summary and len(summary) > 5:
+                        long = _load_private_long_memory(user_id)
+                        long.append({"ts": time.time(), "content": summary})
+                        _save_private_long_memory(user_id, long)
+                        log.info("Private long-term memory saved for user %s: %s", user_id, summary[:60])
+    except Exception as e:
+        log.error("Private long-term compression failed: %s", e)
 
 async def _compress_to_long_term(group_id, old_entries, config, session):
     # Summarize old working memory into long-term memory
@@ -380,7 +453,7 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
         "Content-Type": "application/json"
     }
     payload = {
-        "model": config.get("deepseek_model", "deepseek-v4-flash"),
+        "model": config.get("deepseek_model", "deepseek-chat"),
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -543,13 +616,21 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 else:
                     user_mem_ctx = "【你和 {} 之前的私聊记录】\n".format(sender_name if sender_name else "此人") + "\n".join(ulines)
     
-    # Load long-term memory
-    long_mem = _load_long_memory(group_id) if group_id else []
-    long_mem_ctx = ""
-    if long_mem:
-        long_lines = ["- " + e["content"][:120] for e in long_mem[-5:]]
-        if long_lines:
-            long_mem_ctx = "【本群历史话题摘要】\n" + "\n".join(long_lines)
+    # Load long-term memory (group or private)
+    if group_id:
+        long_mem = _load_long_memory(group_id)
+        long_mem_ctx = ""
+        if long_mem:
+            long_lines = ["- " + e["content"][:120] for e in long_mem[-5:]]
+            if long_lines:
+                long_mem_ctx = "【本群历史话题摘要】\n" + "\n".join(long_lines)
+    else:
+        long_mem = _load_private_long_memory(user_id) if user_id else []
+        long_mem_ctx = ""
+        if long_mem:
+            long_lines = ["- " + e["content"][:120] for e in long_mem[-5:]]
+            if long_lines:
+                long_mem_ctx = "【你和对方的历史话题摘要】\n" + "\n".join(long_lines)
 
     # Web search for unknown topics
     web_text = ""
@@ -622,6 +703,25 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         messages.append({"role": "user", "content": f"{sender_name}: {clean_msg}"})
 
     temperature = 0.65
+
+    # Human-like delay: only when no external API (vision/search) was used
+    has_image = bool(image_context)
+    has_search = bool(web_search_results or web_text)
+    if not has_image and not has_search:
+        delay = random.uniform(1.0, 10.0)
+        log.debug("Human-like delay: %.1fs for user %s in group %s", delay, user_id, group_id)
+        # Show "typing..." during delay
+        try:
+            if group_id:
+                await dispatcher.client.call("set_input_status", {
+                    "group_id": group_id, "event_type": 1})
+            else:
+                await dispatcher.client.call("set_input_status", {
+                    "user_id": user_id, "event_type": 1})
+        except Exception:
+            pass
+        await asyncio.sleep(delay)
+
     reply = await _call_deepseek(config, messages, max_tokens=400,
                                   temperature=temperature, session=dispatcher.client.session)
 
@@ -712,19 +812,33 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             user_mem.append({"role": "system", "content": info, "ts": now})
         user_mem.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text), "ts": now})
         user_mem.append({"role": "assistant", "content": reply, "ts": now})
-        _save_user_memory(group_id, user_id, user_mem)
+        _save_user_memory(group_id, user_id, user_mem, config)
 
         memory.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text)})
         memory.append({"role": "assistant", "content": reply})
         _save_memory(group_id, memory, config, dispatcher.client.session)
     else:
-        # === Private chat memory ===
+        # === Private chat memory (deeper: 30 entries + API long-term compression) ===
         user_mem = _load_user_memory(0, user_id)
         for info in learned:
             user_mem.append({"role": "system", "content": info, "ts": now})
         user_mem.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text), "ts": now})
         user_mem.append({"role": "assistant", "content": reply, "ts": now})
-        _save_user_memory(0, user_id, user_mem)
+        for e in user_mem:
+            if "ts" not in e:
+                e["ts"] = now
+        private_max = 30
+        if len(user_mem) > private_max:
+            overflow = user_mem[:len(user_mem) - private_max]
+            user_mem = user_mem[-private_max:]
+            if config and dispatcher.client.session and len(overflow) >= 4:
+                import asyncio as _asyncio_priv
+                try:
+                    _asyncio_priv.create_task(
+                        _compress_private_to_long(user_id, overflow, config, dispatcher.client.session))
+                except RuntimeError:
+                    pass
+        atomic_write_json(_user_memory_file(0, user_id), user_mem)
 
     await _maybe_send_sticker(dispatcher, group_id or user_id, is_private=(not group_id))
     return True
@@ -934,6 +1048,13 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
         import html as _html_st
         description = _html_st.unescape(summary)[:50]
 
+    # Reuse dispatcher image cache if available (avoid duplicate vision API call)
+    cached_desc = None
+    img_cache = getattr(dispatcher, "_image_desc_cache", None)
+    if img_cache and file_id in img_cache:
+        entry = img_cache[file_id]
+        cached_desc = entry if isinstance(entry, str) else entry.get("desc", "") if isinstance(entry, dict) else ""
+
     # Get image URL for vision API only when explicitly enabled and needed.
     image_url = None
     if not description and sticker_cfg.get("vision_analyze", False):
@@ -945,8 +1066,10 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
         except Exception:
             pass
 
-    # Call vision API for detailed analysis
-    if image_url:
+    # Call vision API for detailed analysis (or use cached description)
+    if cached_desc and not description:
+        description = cached_desc[:50]
+    elif image_url:
         desc = await _analyze_sticker_vision(dispatcher.config, image_url,
                                               session=dispatcher.client.session)
         if desc:
@@ -1037,43 +1160,6 @@ async def _analyze_sticker_vision_inner(config, image_url, session=None):
         log.error("Sticker vision analysis failed: %s", e)
     return None
 
-
-# Keep old sync collect for backward compat (dispatcher uses sync)
-def collect_sticker(group_id, file_id, sub_type, summary=""):
-    """Sync wrapper - actual analysis is deferred to async."""
-    import json as _json_fix
-    try:
-        with open(os.path.join(_ROOT, "config.json"), encoding="utf-8") as _f:
-            _conf = _json_fix.load(_f)
-    except Exception:
-        return
-    if not _conf.get("sticker_mode", {}).get("collect", True):
-        return
-    path = os.path.join(STICKER_DIR, f"group_{group_id}.json")
-    stickers = []
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                stickers = json.load(f)
-        except Exception:
-            pass
-    if any(s.get("file") == file_id for s in stickers):
-        return
-    import html as _html_s
-    desc = _html_s.unescape(summary)[:50] if summary else ""
-    stickers.append({
-        "file": file_id,
-        "sub_type": sub_type,
-        "description": desc,
-        "tags": [],
-        "category": "other",
-        "usage": "",
-        "ts": time.time()
-    })
-    max_stickers = 50
-    if len(stickers) > max_stickers:
-        stickers = stickers[-max_stickers:]
-    atomic_write_json(path, stickers)
 
 # ---- Best sticker picker ----
 async def _pick_best_sticker(dispatcher, group_id, stickers):
@@ -1223,8 +1309,13 @@ async def search_web(dispatcher, query):
     now = time.time()
     if cache is not None:
         cached = cache.get(cache_key)
-        if cached and now - cached.get("ts", 0) < _SEARCH_CACHE_TTL:
-            return cached.get("value", "")
+        if cached:
+            age = now - cached.get("ts", 0)
+            hit_value = cached.get("value", "")
+            # Successful results: full TTL. Empty/failed results: short TTL (120s).
+            effective_ttl = _SEARCH_CACHE_TTL if hit_value else 120
+            if age < effective_ttl:
+                return hit_value
     
     try:
         async with dispatcher._search_sem:
@@ -1262,22 +1353,23 @@ async def search_web(dispatcher, query):
     return ""
 
 def _parse_bing_results(html, query):
-    """Parse Bing HTML search results."""
+    """Parse Bing HTML search results with multi-layer fallback."""
     import re as _re_b
-    
+
     results = []
-    # Find result blocks
+
+    # Layer 1: standard b_algo blocks
     blocks = _re_b.findall(r'<li class="b_algo"[^>]*>(.*?)</li>', html, re.DOTALL)
-    
+
     for block in blocks[:3]:
         title_m = _re_b.search(r'<h2[^>]*><a[^>]*>(.*?)</a>', block, re.DOTALL)
         snippet_m = _re_b.search(r'<p[^>]*>(.*?)</p>', block, re.DOTALL)
-        
+
         if title_m:
             title = _re_b.sub(r'<[^>]+>', '', title_m.group(1)).strip()
             title = title.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
             title = title.replace("&ensp;", " ").replace("&emsp;", " ")
-            
+
             snippet = ""
             if snippet_m:
                 snippet = _re_b.sub(r'<[^>]+>', '', snippet_m.group(1)).strip()
@@ -1285,15 +1377,34 @@ def _parse_bing_results(html, query):
                 snippet = snippet.replace("&ensp;", " ").replace("&emsp;", " ")
                 # Remove date prefixes like "2025年12月15日"
                 snippet = _re_b.sub(r'^\d{4}年\d{1,2}月\d{1,2}日\s*', '', snippet)
-            
+
             line = title[:100]
             if snippet:
                 line += "\n  " + snippet[:150]
             results.append(line)
-    
+
+    # Layer 2: fallback to b_caption / generic result snippets
+    if not results:
+        alt_blocks = _re_b.findall(r'<li class="b_caption"[^>]*>(.*?)</li>', html, re.DOTALL)
+        if not alt_blocks:
+            alt_blocks = _re_b.findall(r'<div class="b_caption"[^>]*>(.*?)</div>', html, re.DOTALL)
+        for block in alt_blocks[:3]:
+            text = _re_b.sub(r'<[^>]+>', ' ', block)
+            text = _re_b.sub(r'\s+', ' ', text).strip()
+            if len(text) > 20:
+                results.append(text[:250])
+
+    # Layer 3: extract page title as confirmation search worked
+    if not results:
+        title_m = _re_b.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE)
+        if title_m:
+            title = title_m.group(1).strip()
+            if "No results" not in title and "没有结果" not in title:
+                results.append("搜索已完成，但未能解析详情")
+
     if not results:
         return ""
-    
+
     return "\n".join(results[:3])
 
 # ========== POST-PROCESSING ==========

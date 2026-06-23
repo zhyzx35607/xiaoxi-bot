@@ -57,7 +57,7 @@ async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
         if r.get("status") == "ok":
             data = r.get("data", {})
             real_role = data.get("role", sender_role_hint or "member")
-            log.info("get_user_level: user=%s group=%s api_role=%s hint=%s",
+            log.debug("get_user_level: user=%s group=%s api_role=%s hint=%s",
                      user_id, group_id, real_role, sender_role_hint)
             return role_map.get(real_role, (LEVEL_MEMBER, "member"))
     except Exception as e:
@@ -69,6 +69,7 @@ async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
 # Role cache (per-group, 60s TTL)
 _bot_role_cache = {}
 _bot_role_cache_ttl = 60
+_BOT_ROLE_CACHE_MAX_AGE = 300  # hard eviction after 5 minutes
 
 
 async def get_bot_role(dispatcher, group_id):
@@ -76,6 +77,10 @@ async def get_bot_role(dispatcher, group_id):
         log.warning('get_bot_role: no group_id')
         return 'member', 'member'
     now = time.time()
+    # Periodic cleanup of stale cache entries
+    stale = [g for g, v in _bot_role_cache.items() if now - v.get('ts', 0) > _BOT_ROLE_CACHE_MAX_AGE]
+    for g in stale:
+        del _bot_role_cache[g]
     cached = _bot_role_cache.get(group_id)
     if cached and (now - cached['ts']) < _bot_role_cache_ttl:
         return cached['role'], cached['role']

@@ -211,11 +211,11 @@ async def amain():
     await client.stop()
     await dispatcher.stop_background_tasks()
     try:
-        await asyncio.wait_for(client_task, timeout=4)
+        await asyncio.wait_for(client_task, timeout=15)
     except asyncio.TimeoutError:
         client_task.cancel()
         try:
-            await asyncio.wait_for(client_task, timeout=2)
+            await asyncio.wait_for(client_task, timeout=5)
         except asyncio.CancelledError:
             pass
         except asyncio.TimeoutError:
