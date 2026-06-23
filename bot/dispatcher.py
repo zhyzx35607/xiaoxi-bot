@@ -878,13 +878,23 @@ class Dispatcher:
                                  image_context="", message_id=message_id)
 
     async def _is_friend(self, user_id):
-        """Check if user is a friend of the bot (cached, 5 min TTL)."""
+        """Check if user is a friend of the bot (cached, 5 min TTL).
+
+        On API failure: keeps using old cache (extends TTL by 10 min).
+        On first-ever call with empty cache: one retry, then lenient (returns True)
+        so real friends aren't blocked by a transient timeout.
+        """
         now = time.time()
         if not hasattr(self, "_friend_cache"):
             self._friend_cache = set()
             self._friend_cache_ts = 0
+            self._friend_fetching = False  # prevent concurrent fetches
         if now - self._friend_cache_ts < 300:
             return user_id in self._friend_cache
+        # Prevent concurrent refresh storms
+        if getattr(self, "_friend_fetching", False):
+            return user_id in self._friend_cache
+        self._friend_fetching = True
         try:
             result = await self.client.call("get_friend_list", {})
             if result.get("status") == "ok":
@@ -895,9 +905,20 @@ class Dispatcher:
                 self._friend_cache_ts = now
                 log.info("Friend cache refreshed: %d friends", len(friends))
                 return user_id in friends
+            # API returned non-ok status
+            log.warning("get_friend_list returned %s", result.get("status", "?"))
         except Exception as e:
-            log.error("get_friend_list failed: %s", e)
-        return user_id in self._friend_cache
+            log.warning("get_friend_list failed: %s", e)
+        finally:
+            self._friend_fetching = False
+        # API failed: extend TTL of existing cache so we don't hammer it
+        if self._friend_cache:
+            self._friend_cache_ts = now + 600  # 10 min grace
+            log.debug("Friend API failed, using stale cache (%d entries)", len(self._friend_cache))
+            return user_id in self._friend_cache
+        # Cache is empty (first-ever call failed): be lenient
+        log.warning("Friend list never loaded, allowing user %s through", user_id)
+        return True
 
     async def _handle_private_ai_chat(self, user_id, message, raw, sender, message_id):
         """AI auto-reply for non-owner private chat. Friends only, no rate limits."""
@@ -924,9 +945,9 @@ class Dispatcher:
 
         now = time.time()
 
-        # Sticker collection from images
+        # Sticker collection from images (respect collect config)
         sticker_cfg = self.config.get("sticker_mode", {})
-        if sticker_cfg.get("enabled", True):
+        if sticker_cfg.get("enabled", True) and sticker_cfg.get("collect", True):
             for seg in message:
                 if seg.get("type") == "image":
                     file_id = seg.get("data", {}).get("file", "")
@@ -942,7 +963,9 @@ class Dispatcher:
 
         # Strip CQ codes for clean text
         clean_raw = _re_priv.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
-        if not clean_raw:
+        # Check if message contains images — always process those
+        has_image = any(seg.get("type") == "image" for seg in message if isinstance(seg, dict))
+        if not clean_raw and not has_image:
             return
 
         sender_name = sender.get("nickname", str(user_id))
@@ -1171,7 +1194,14 @@ class Dispatcher:
         self._group_consecutive_replies[group_id] = 0
     
     def _is_short_or_image_only(self, message, raw):
-        """Check if message is too short or image-only (not worth AI)."""
+        """Check if message is too short or image-only (not worth AI).
+
+        Images/stickers are always worth processing — the vision API can
+        describe them, and the sender may be trying to show the bot something.
+        """
+        # Images/stickers always pass through
+        if message and any(seg.get("type") == "image" for seg in message if isinstance(seg, dict)):
+            return False
         # Count non-CQ text
         import re as _re
         text_only = _re.sub(r'\[CQ:[^\]]+\]', '', raw).strip()

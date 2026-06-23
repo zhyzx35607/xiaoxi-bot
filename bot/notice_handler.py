@@ -292,9 +292,15 @@ async def handle_group_msg_emoji_like(dispatcher, event):
 
 
 async def handle_friend_add(dispatcher, event):
-    """好友添加通知"""
+    """好友添加通知 — 刷新好友缓存让新好友立即可用"""
     user_id = event.get("user_id", 0)
     log.info("Friend added: u=%s", user_id)
+    # Invalidate friend cache so the new friend is recognised immediately
+    if hasattr(dispatcher, '_friend_cache'):
+        dispatcher._friend_cache.add(int(user_id))
+        # Extend TTL so it doesn't re-fetch right away
+        dispatcher._friend_cache_ts = time.time() + 300
+        log.info("Friend cache updated: added u=%s", user_id)
 
 
 async def handle_bot_offline(dispatcher, event):
