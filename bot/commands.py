@@ -250,6 +250,18 @@ async def cmd_translate(d, group_id, user_id, args, role, sender_card, message):
     if not text:
         await d._reply(group_id, user_id, "这样用：/translate 要翻译的文本")
         return
+    # Try NapCat native translation first (free, fast)
+    try:
+        result = await d.client.call("translate_en2zh", {"text": text})
+        if result.get("status") == "ok":
+            data = result.get("data", {})
+            translated = data.get("result") or data.get("text") or data.get("translated") or ""
+            if translated:
+                await d._reply(group_id, user_id, translated[:500])
+                return
+    except Exception:
+        pass
+    # Fallback to DeepSeek
     from .ai import deepseek_chat
     reply = await deepseek_chat(d, "请将以下文本翻译成中文，只给出翻译结果：" + text)
     await d._reply(group_id, user_id, reply)

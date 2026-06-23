@@ -31,8 +31,8 @@ class Dispatcher:
         self._group_interject_ts = {}  # last interjection timestamp per group
         self._group_followup_count = {}  # count consecutive followup replies per group
         self._group_at_others_ts = {}  # last time someone @-others (for skip window)
-        self._seen_msg_ids = set()
-        self._seen_msg_ids_maxlen = 3000
+        self._seen_msg_ids = {}  # message_id -> timestamp
+        self._seen_msg_ids_maxlen = 2000
         self._daily_likes = {}
         self._daily_fortunes = {}
         self._state_path = os.path.join(_ROOT, "data", "runtime_state.json")
@@ -43,13 +43,13 @@ class Dispatcher:
         self._group_reply_timestamps = {}  # rate limit: group_id -> deque of timestamps
         # Chat limits tracking
         self._group_consecutive_replies = {}  # group_id -> int
-        self._user_reply_tracker = {}  # (group_id, user_id) -> [timestamps]
         self._group_member_cache = {}  # group_id -> {nickname: qq_id}
         self._member_cache_ts = {}  # group_id -> timestamp
         runtime = config.get("runtime", {})
         self._max_background_tasks = int(runtime.get("max_background_tasks", 16))
         self._background_tasks = set()
         self._web_search_cache = {}
+        self._search_sem = asyncio.Semaphore(max(1, int(runtime.get("search_concurrency", 1))))
         self._group_last_ai_judge = {}
         self._group_conversation_state = defaultdict(self._new_conversation_state)
         self._load_runtime_state()
@@ -101,6 +101,96 @@ class Dispatcher:
         atomic_write_json(self._state_path, state, indent=2)
         self._state_dirty = False
         self._last_state_save = now
+        # Periodic cleanup of stale state (runs with save cycle, no extra timer needed)
+        self._cleanup_stale_state()
+
+    def _cleanup_stale_state(self):
+        """Purge data for disabled groups and expired entries to prevent unbounded growth."""
+        now = time.time()
+        groups_cfg = self.config.get("groups", {})
+        enabled_gids = {gid for gid, cfg in groups_cfg.items() if cfg.get("enabled", False)}
+
+        # --- A: Remove data for disabled/non-existent groups ---
+        all_tracked_gids = set()
+        for src in (self._group_msg_counts, self._group_msg_buffer, self._group_repeat_tracker,
+                     self._group_last_interject, self._group_last_at_bot, self._group_last_name_reply,
+                     self._group_interject_ts, self._group_followup_count, self._group_at_others_ts,
+                     self._group_reply_timestamps, self._group_consecutive_replies,
+                     self._group_member_cache, self._member_cache_ts,
+                     self._group_last_ai_judge, self._group_conversation_state):
+            all_tracked_gids.update(str(k) for k in list(src.keys()))
+
+        stale_gids = all_tracked_gids - enabled_gids
+        if stale_gids:
+            for gid in stale_gids:
+                gid_int = int(gid) if gid.lstrip("-").isdigit() else None
+                self._group_msg_counts.pop(gid_int, None)
+                self._group_msg_buffer.pop(gid_int, None)
+                self._group_repeat_tracker.pop(gid_int, None)
+                self._group_last_interject.pop(gid_int, None)
+                self._group_last_at_bot.pop(gid_int, None)
+                self._group_last_name_reply.pop(gid_int, None)
+                self._group_interject_ts.pop(gid_int, None)
+                self._group_followup_count.pop(gid_int, None)
+                self._group_at_others_ts.pop(gid_int, None)
+                self._group_reply_timestamps.pop(gid_int, None)
+                self._group_consecutive_replies.pop(gid_int, None)
+                self._group_member_cache.pop(gid_int, None)
+                self._member_cache_ts.pop(gid_int, None)
+                self._group_last_ai_judge.pop(gid_int, None)
+                self._group_conversation_state.pop(gid_int, None)
+            log.info("Cleaned up %d disabled/non-existent groups from runtime state", len(stale_gids))
+
+        # --- B: Expired entries within active groups ---
+        # _group_last_reply_to: remove (group, user) entries > 10 min inactive
+        stale_reply_to = [(g, u) for (g, u), ts in self._group_last_reply_to.items()
+                          if now - ts > 600]
+        for key in stale_reply_to:
+            del self._group_last_reply_to[key]
+
+        # _group_repeat_tracker: purge empty per-group dicts for active groups
+        for gid in list(self._group_repeat_tracker.keys()):
+            tracker = self._group_repeat_tracker.get(gid)
+            if isinstance(tracker, dict):
+                expired_texts = [t for t, v in tracker.items()
+                                 if isinstance(v, tuple) and now - v[0] > 300]
+                for t in expired_texts:
+                    del tracker[t]
+
+        # _daily_likes / _daily_fortunes: remove non-today keys from memory
+        today = time.strftime("%Y%m%d")
+        for dct in (self._daily_likes, self._daily_fortunes):
+            stale_keys = [k for k in dct if not k.startswith(today + ":")]
+            for k in stale_keys:
+                del dct[k]
+
+        # _private_reply_ts: remove user keys with empty lists > 15 min stale
+        if hasattr(self, "_private_reply_ts"):
+            stale_users = [u for u, stamps in self._private_reply_ts.items()
+                          if not stamps]
+            for u in stale_users:
+                del self._private_reply_ts[u]
+
+        # _non_friend_notified: evict entries older than 24h
+        if hasattr(self, "_non_friend_notified"):
+            stale_nf = [u for u, ts in self._non_friend_notified.items() if now - ts > 86400]
+            for u in stale_nf:
+                del self._non_friend_notified[u]
+
+        # _image_desc_cache: evict entries older than 1 hour; cap at 500
+        if hasattr(self, "_image_desc_cache"):
+            img_stale = [k for k, v in self._image_desc_cache.items()
+                        if isinstance(v, dict) and now - v.get("ts", 0) > 3600]
+            for k in img_stale:
+                del self._image_desc_cache[k]
+            if len(self._image_desc_cache) > 500:
+                oldest = sorted(
+                    [(k, v.get("ts", 0) if isinstance(v, dict) else 0)
+                     for k, v in self._image_desc_cache.items()],
+                    key=lambda x: x[1],
+                )[:200]
+                for k, _ in oldest:
+                    self._image_desc_cache.pop(k, None)
 
     def start_scheduler(self):
         """Start the scheduler only when enabled in config (off by default on low-spec hosts)."""
@@ -191,9 +281,12 @@ class Dispatcher:
             async with self._lock:
                 if message_id in self._seen_msg_ids:
                     return
-                self._seen_msg_ids.add(message_id)
+                now_ts = time.time()
+                self._seen_msg_ids[message_id] = now_ts
                 if len(self._seen_msg_ids) > self._seen_msg_ids_maxlen:
-                    self._seen_msg_ids.clear()
+                    sorted_items = sorted(self._seen_msg_ids.items(), key=lambda x: x[1])
+                    for old_id, _ in sorted_items[:1000]:
+                        del self._seen_msg_ids[old_id]
 
         # Sender role from NapCat (provided in real-time with each message)
         sender_role = sender.get("role", "member")
@@ -668,7 +761,8 @@ class Dispatcher:
             elif parts2[0] in ("enable", "disable") and len(parts2) >= 2:
                 gid = parts2[1]
                 enabled = parts2[0] == "enable"
-                cfg = json.loads(open(self._config_path, encoding="utf-8").read())
+                with open(self._config_path, encoding="utf-8") as f:
+                    cfg = json.load(f)
                 if "groups" not in cfg:
                     cfg["groups"] = {}
                 if gid not in cfg["groups"]:
@@ -783,8 +877,30 @@ class Dispatcher:
             await handle_ai_chat(self, None, user_id, raw, sender_name,
                                  image_context="", message_id=message_id)
 
+    async def _is_friend(self, user_id):
+        """Check if user is a friend of the bot (cached, 5 min TTL)."""
+        now = time.time()
+        if not hasattr(self, "_friend_cache"):
+            self._friend_cache = set()
+            self._friend_cache_ts = 0
+        if now - self._friend_cache_ts < 300:
+            return user_id in self._friend_cache
+        try:
+            result = await self.client.call("get_friend_list", {})
+            if result.get("status") == "ok":
+                friends = set()
+                for f in result.get("data", []):
+                    friends.add(int(f.get("user_id", 0)))
+                self._friend_cache = friends
+                self._friend_cache_ts = now
+                log.info("Friend cache refreshed: %d friends", len(friends))
+                return user_id in friends
+        except Exception as e:
+            log.error("get_friend_list failed: %s", e)
+        return user_id in self._friend_cache
+
     async def _handle_private_ai_chat(self, user_id, message, raw, sender, message_id):
-        """AI auto-reply for non-owner private chat. No command prefix / @ trigger needed."""
+        """AI auto-reply for non-owner private chat. Friends only, no rate limits."""
         import re as _re_priv
 
         # Blacklist check
@@ -792,15 +908,21 @@ class Dispatcher:
         if is_blacklisted(0, user_id):
             return
 
-        # Simple rate limit: max 20 replies per 10min per user
-        now = time.time()
-        if not hasattr(self, '_private_reply_ts'):
-            self._private_reply_ts = {}
-        stamps = self._private_reply_ts.setdefault(user_id, [])
-        stamps[:] = [t for t in stamps if now - t < 600]
-        if len(stamps) >= 20:
+        # Friend-only gate
+        if not await self._is_friend(user_id):
+            # Send guidance once per user (don't spam)
+            if not hasattr(self, '_non_friend_notified'):
+                self._non_friend_notified = {}
+            if user_id not in self._non_friend_notified:
+                try:
+                    await self.client.send_private_msg(user_id,
+                        "你好！我是小汐，目前只有好友才能跟我聊天哦～先加个好友吧")
+                except Exception:
+                    pass
+                self._non_friend_notified[user_id] = time.time()
             return
-        stamps.append(now)
+
+        now = time.time()
 
         # Sticker collection from images
         sticker_cfg = self.config.get("sticker_mode", {})
@@ -847,7 +969,7 @@ class Dispatcher:
             reply_intent="直接回应",
         )
         if result:
-            log.info("Private AI replied to %s(%s)", sender_name, user_id)
+            log.debug("Private AI replied to %s(%s)", sender_name, user_id)
 
 
     def _parse_private_group_args(self, args):
@@ -889,16 +1011,61 @@ class Dispatcher:
             log.error("Member cache refresh failed for %s: %s", group_id, e)
 
     async def _get_image_context(self, group_id, message):
-        """Extract image/media context for AI."""
+        """Return accurate image context. Cache hit → instant. Cache miss → wait for vision API."""
+        import html as _html
+        contexts = []
+        for seg in message:
+            if seg.get("type") != "image":
+                continue
+            data = seg.get("data", {}) if isinstance(seg.get("data"), dict) else {}
+            file_id = data.get("file", "")
+            summary = data.get("summary", "")
+            sub_type = data.get("sub_type", "0")
+
+            # Priority 1: cached vision API result (accurate, fast)
+            cache = getattr(self, "_image_desc_cache", None)
+            if cache and file_id in cache:
+                cached = cache[file_id]
+                desc = cached if isinstance(cached, str) else cached.get("desc", "")
+                if desc:
+                    contexts.append("图片：" + desc[:120])
+                    continue
+
+            # Priority 2: call vision API (blocks, but accurate)
+            from .ai import describe_image
+            desc = await describe_image(self, group_id, file_id, sub_type, summary)
+            if desc and desc not in ("[图片]", "[表情/贴纸]"):
+                if not hasattr(self, "_image_desc_cache"):
+                    self._image_desc_cache = {}
+                self._image_desc_cache[file_id] = {"desc": desc, "ts": time.time()}
+                contexts.append("图片：" + desc[:120])
+            elif summary:
+                # Priority 3: QQ summary as fallback when vision API fails
+                contexts.append("图片：" + _html.unescape(summary)[:120])
+            else:
+                contexts.append("[图片]")
+        return "\n".join(contexts) if contexts else ""
+
+    async def _enhance_image_cache(self, group_id, file_id, sub_type, summary):
+        """Background pre-fetch: warm image cache so future @bot queries hit cache."""
+        cache_key = file_id
+        if not hasattr(self, "_image_desc_cache"):
+            self._image_desc_cache = {}
+        if cache_key in self._image_desc_cache:
+            return
         try:
-            from .media import extract_message_context
-            ctx = await extract_message_context(self, group_id, message)
-            if ctx:
-                log.info("Media context: %s", ctx[:120])
-            return ctx
+            from .ai import describe_image
+            desc = await describe_image(self, group_id, file_id, sub_type, summary)
+            if desc and desc not in ("[图片]", "[表情/贴纸]"):
+                self._image_desc_cache[cache_key] = {"desc": desc, "ts": time.time()}
+                # Cap cache: remove oldest entries when over limit
+                if len(self._image_desc_cache) > 500:
+                    stale = sorted(self._image_desc_cache.items(),
+                                   key=lambda kv: kv[1].get("ts", 0) if isinstance(kv[1], dict) else 0)
+                    for k, _ in stale[:200]:
+                        del self._image_desc_cache[k]
         except Exception as e:
-            log.error("Media context error: %s", e, exc_info=True)
-            return ""
+            log.error("Image enhance cache failed for %s: %s", file_id[:16], e)
 
     def _load_guard_file(self, path):
         try:
@@ -961,7 +1128,7 @@ class Dispatcher:
         state = self._group_conversation_state[group_id]
         now = time.time()
         state["last_human_ts"] = now
-        state["human_since_bot"] = int(state.get("human_since_bot", 0)) + 1
+        state["human_since_bot"] = state["human_since_bot"] + 1
         if state["human_since_bot"] >= 2:
             self._group_consecutive_replies[group_id] = 0
 
@@ -990,18 +1157,6 @@ class Dispatcher:
             return "\n（今天说太多了 我先潜了）"
         return ""
 
-    def _check_chat_limits(self, group_id, user_id):
-        """Layer 1 rule check. Returns (allowed, reason).
-        Only checks consecutive replies - user cooldowns removed for natural flow."""
-        cfg = self.config.get("chat_limits", {})
-        max_consecutive = cfg.get("max_consecutive_replies", 5)
-        
-        consecutive = self._group_consecutive_replies.get(group_id, 0)
-        if consecutive >= max_consecutive:
-            return False, "consecutive_limit"
-        
-        return True, "ok"
-    
     def _record_bot_reply(self, group_id, user_id):
         """Record that bot replied - only tracks consecutive count."""
         self._group_consecutive_replies[group_id] = (
@@ -1091,9 +1246,9 @@ class Dispatcher:
         if self._is_low_signal_text(text):
             add(-35, "更像语气词或表情")
         from .ai import is_ai_busy
-        if is_ai_busy():
+        if is_ai_busy() and not is_followup:
             add(-28, "AI正在忙")
-        if len(self._background_tasks) >= max(2, self._max_background_tasks // 2):
+        if len(self._background_tasks) >= max(2, self._max_background_tasks // 2) and not is_followup:
             add(-18, "后台任务较多")
         last_bot_ts = self._group_conversation_state[group_id].get("last_bot_ts", 0)
         if not is_followup and now - last_bot_ts < cfg.get("quiet_after_reply_seconds", 75):
@@ -1144,9 +1299,9 @@ class Dispatcher:
     def _matches_interest_topic(self, text):
         words = (
             "番", "动漫", "漫画", "游戏", "二次元", "gal", "剧情", "角色", "音乐", "歌",
-            "电影", "剧", "小说", "梗", "表情包", "电脑", "手机", "AI", "模型", "代码",
+            "电影", "剧", "小说", "梗", "表情包", "电脑", "手机", "ai", "模型", "代码",
         )
-        return any(w.lower() in (text or "").lower() for w in words)
+        return any(w in (text or "").lower() for w in words)
 
     def _is_low_signal_text(self, text):
         t = (text or "").strip()
@@ -1238,10 +1393,35 @@ class Dispatcher:
         return targets
 
     async def _reply(self, group_id, user_id, text):
-        if group_id:
-            await self.client.send_group_msg(group_id, text)
-        else:
-            await self.client.send_private_msg(user_id, text)
+        # QQ message limit ~4500 chars; split long messages to avoid silent truncation
+        max_len = 4000
+        if len(text) <= max_len:
+            if group_id:
+                await self.client.send_group_msg(group_id, text)
+            else:
+                await self.client.send_private_msg(user_id, text)
+            return
+        # Split at sentence boundaries when possible
+        chunks = []
+        remaining = text
+        while len(remaining) > max_len:
+            split_at = remaining.rfind("\n", 0, max_len)
+            if split_at < max_len // 2:
+                split_at = remaining.rfind("。", 0, max_len)
+            if split_at < max_len // 2:
+                split_at = remaining.rfind("；", 0, max_len)
+            if split_at < max_len // 2:
+                split_at = max_len
+            chunks.append(remaining[:split_at + 1])
+            remaining = remaining[split_at + 1:].lstrip()
+        if remaining:
+            chunks.append(remaining)
+        for chunk in chunks:
+            if group_id:
+                await self.client.send_group_msg(group_id, chunk)
+            else:
+                await self.client.send_private_msg(user_id, chunk)
+            await asyncio.sleep(0.5)  # Small delay between chunks to avoid rate limits
 
     def _get_config_path(self):
         return self._config_path

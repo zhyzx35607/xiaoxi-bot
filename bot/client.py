@@ -21,7 +21,7 @@ class OneBotClient:
         self._session = None
         runtime = config.get("runtime", {})
         self._pid_fd = None
-        self._queue_size = int(runtime.get("ws_queue_size", 200))
+        self._queue_size = int(runtime.get("ws_queue_size", 50))
         self._max_event_tasks = int(runtime.get("max_event_tasks", 8))
         self._api_timeout = int(runtime.get("api_timeout_seconds", 8))
         self._connect_timeout = float(runtime.get("connect_timeout_seconds", 5))
@@ -172,9 +172,13 @@ class OneBotClient:
                             pass
 
                 except websockets.ConnectionClosed as e:
-                    log.warning("Connection closed: %s", e)
+                    log.info("Connection closed: %s", e)
                 except Exception as e:
-                    log.warning("Connect error: %s (retry in %ds)", e, retry_delay)
+                    # Only escalate to WARNING after several failed retries (> 8s delay)
+                    if retry_delay <= 8:
+                        log.debug("Connect error: %s (retry in %ds)", e, retry_delay)
+                    else:
+                        log.warning("Connect error after repeated retries: %s (retry in %ds)", e, retry_delay)
                 finally:
                     self._ws = None
                     for echo, fut in list(self._pending.items()):
@@ -288,6 +292,9 @@ class OneBotClient:
 
     async def get_group_list(self):
         return await self.call("get_group_list", {})
+
+    async def get_friend_list(self):
+        return await self.call("get_friend_list", {})
 
     async def delete_msg(self, message_id):
         return await self.call("delete_msg", {"message_id": message_id})
@@ -579,6 +586,10 @@ class OneBotClient:
 
     async def friend_poke(self, user_id):
         return await self.call("friend_poke", {"user_id": user_id})
+
+    async def translate_en2zh(self, text):
+        """Native NapCat English-to-Chinese translation (free, no API cost)."""
+        return await self.call("translate_en2zh", {"text": text})
 
     async def get_stranger_info(self, user_id, no_cache=False):
         return await self.call("get_stranger_info", {"user_id": user_id, "no_cache": no_cache})
