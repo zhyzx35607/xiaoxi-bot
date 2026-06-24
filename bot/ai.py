@@ -16,6 +16,7 @@ _memory_timestamps = {}
 _AI_SEM = None
 _VISION_SEM = None
 _SEARCH_CACHE_TTL = 600
+_last_reply_ts = {}  # context_key -> timestamp, for multi-layer delay
 
 # ========== PERSONA ==========
 
@@ -37,7 +38,9 @@ SAFETY_RULES = (
     "4.【R18检测机制】先判断消息是否包含性骚扰/色情/淫秽内容（性器官、性行为、性暗示）。仅是则用[R18]标记：回复以[R18]开头，如\"[R18] 不提供\"。仅真色情加标记，开玩笑打闹不要误判。\n"
     "5. 被人说是AI/机器人/程序时，自然回应就好，不用专门辩解。\n"
     "6. 参考信息只在有用时使用，不要提搜索、资料、参考信息这些词；如果参考信息不足，就明确说不太确定。\n"
-    "7. 不要总结对话、不要复述用户问题、不要列条目，除非对方明确要求。"
+    "7. 不要总结对话、不要复述用户问题、不要列条目，除非对方明确要求。\n"
+    "8. 口语化：别写得像作文。适当使用网络用语和口语表达——\"了\"可以说\"啦\"，\"什么\"说\"啥\"，\"怎么\"说\"咋\"，\"没有\"说\"没\"，\"是的\"说\"对\"或\"嗯\"。不用每句都这样，自然就好。\n"
+    "9. 如果发个表情包能比纯文字更好地表达你的情绪，在回复末尾加 [STICKER:情绪标签]。可选标签：开心 伤心 生气 无语 惊讶 害羞 尴尬 得意 困惑 拒绝 赞同 嘲讽 感谢 安慰 庆祝 卖萌 敷衍 打招呼 告别 晚安 点赞。只在确实需要时用，不要每条都加。例如：\"啊这太惨了 [STICKER:安慰]\" \"笑死我了 [STICKER:开心]\""
 )
 
 
@@ -156,6 +159,10 @@ def _save_memory(group_id, memory, config=None, session=None):
         _memory_timestamps.pop(g, None)
     if stale:
         log.debug("Memory cleanup: evicted %d stale group caches", len(stale))
+    # Cleanup _last_reply_ts: evict entries older than 12 hours
+    stale_ts = [k for k, ts in _last_reply_ts.items() if now - ts > 43200]
+    for k in stale_ts:
+        del _last_reply_ts[k]
     # Cap at 20 entries
     if len(memory) > 20:
         overflow = memory[:len(memory)-20]
@@ -570,7 +577,7 @@ async def deepseek_chat(dispatcher, prompt, system_prompt=None):
 async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name,
                           image_context="", web_search_query="", chat_context="",
                           message_id=0, rate_warning="", web_search_results=None,
-                          reply_intent=""):
+                          reply_intent="", consecutive_replies=0):
     config = dispatcher.config
 
 
@@ -666,6 +673,25 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         user_mem_ctx=user_mem_ctx,
     )
     
+    # Time-of-day mode: affects persona, delay, length, slacker rate
+    now_dt = datetime.now(timezone(timedelta(hours=8)))
+    hour = now_dt.hour
+    is_late_night = 2 <= hour < 6
+    is_morning = 6 <= hour < 9
+    is_workday_daytime = (now_dt.weekday() < 5) and (9 <= hour < 18)
+
+    # Late-night persona: sleepier, shorter replies, more likely to ignore
+    if is_late_night:
+        system_prompt += (
+            "\n\n【状态：深夜】现在是凌晨，你正在熬夜刷手机，已经困得眼皮打架。"
+            "说话模糊简短，不超过1句话。对方的问题可以敷衍过去。"
+            "像半夜被吵醒的朋友——不太愿意打字，但又不忍心不理。"
+        )
+    elif is_morning:
+        system_prompt += (
+            "\n\n【状态：早上】现在是大早上，你刚醒还有点迷糊。说话简单随意。"
+        )
+
     if chat_hint:
         system_prompt += "\n\n" + chat_hint
     if reply_intent:
@@ -674,11 +700,36 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             f"{reply_intent}。按这个意图自然说一句，像群友接话，不要解释自己为什么接话。"
         )
 
+    # Sticker inventory: let AI know what stickers are available
+    sticker_inv = _build_sticker_inventory(
+        group_id=group_id, user_id=user_id, is_private=(not group_id))
+    if sticker_inv:
+        system_prompt += "\n\n" + sticker_inv
+
+    # Exit awareness: tell AI how many rounds it's been chatting
+    if group_id and consecutive_replies >= 2:
+        system_prompt += (
+            "\n【对话状态】这是你在本群连续回的第{}条消息了。"
+            "聊得差不多了可以自然收尾（比如\"先溜了\"\"潜了\"之类），真人不会一直聊。"
+        ).format(consecutive_replies + 1)
+    elif not group_id and consecutive_replies >= 3:
+        system_prompt += (
+            "\n【对话状态】你们已经聊了{}轮了。想继续聊就聊，想收尾就自然结束，不用硬撑。"
+        ).format(consecutive_replies + 1)
+
     messages = [{"role": "system", "content": system_prompt}]
-    
-    # Add recent group memory
-    if memory:
-        messages.extend(memory[-30:])
+
+    # Add recent conversation history as structured messages
+    if group_id:
+        if memory:
+            messages.extend(memory[-30:])
+    else:
+        # Private chat: load user memory as structured conversation history
+        priv_mem = _load_user_memory(0, user_id) if user_id else []
+        if priv_mem:
+            priv_history = [m for m in priv_mem[-20:] if m.get("role") in ("user", "assistant")]
+            for m in priv_history:
+                messages.append({"role": m["role"], "content": m["content"]})
 
     # Clean the message
     clean_msg = _sanitize_message(raw_message)
@@ -704,58 +755,136 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
 
     temperature = 0.65
 
-    # Human-like delay: only when no external API (vision/search) was used
+    # Human-like delay: power-law distribution (simulates real phone-checking patterns)
     has_image = bool(image_context)
     has_search = bool(web_search_results or web_text)
-    if not has_image and not has_search:
-        delay = random.uniform(1.0, 10.0)
-        log.debug("Human-like delay: %.1fs for user %s in group %s", delay, user_id, group_id)
-        # Show "typing..." during delay
+    context_key = f"private_{user_id}" if not group_id else str(group_id)
+    last_ts = _last_reply_ts.get(context_key, 0)
+
+    # Power-law delay: most replies fast, some slow, rare very slow
+    roll = random.random()
+    if roll < 0.05:
+        delay = random.uniform(0.5, 2.0)   # 5%: already looking at phone
+    elif roll < 0.65:
+        delay = random.uniform(2.0, 7.0)   # 60%: glanced and replied
+    elif roll < 0.88:
+        delay = random.uniform(8.0, 20.0)  # 23%: doing something else
+    else:
+        delay = random.uniform(22.0, 50.0) # 12%: away from phone
+
+    # Late-night: reply slower (sleepier)
+    if is_late_night:
+        delay *= random.uniform(1.3, 2.5)
+
+    # Image/search already took time → reply faster
+    if has_image or has_search:
+        delay *= random.uniform(0.35, 0.65)
+
+    # If last reply was > 3 min ago, add a bit (need to re-read context)
+    if (time.time() - last_ts) > 180:
+        delay += random.uniform(1.0, 4.0)
+
+    # Clamp to reasonable range
+    delay = max(0.5, min(60.0, delay))
+    log.debug("Human-like delay: %.1fs (roll=%.2f%s%s) for user %s",
+              delay, roll,
+              " night" if is_late_night else "",
+              " img/search" if has_image or has_search else "",
+              user_id)
+    # Show "typing..." during delay
+    try:
+        if group_id:
+            await dispatcher.client.call("set_input_status", {
+                "group_id": group_id, "event_type": 1})
+        else:
+            await dispatcher.client.call("set_input_status", {
+                "user_id": user_id, "event_type": 1})
+    except Exception:
+        pass
+    await asyncio.sleep(delay)
+
+    # === Hesitation mode: simulate typing uncertainty ===
+    _hesitation_roll = random.random()
+    _hesitation_threshold = 0.50 if is_late_night else 0.30
+    if _hesitation_roll < _hesitation_threshold:
         try:
+            # Cancel typing (pause to think)
             if group_id:
-                await dispatcher.client.call("set_input_status", {
-                    "group_id": group_id, "event_type": 1})
+                await dispatcher.client.call("set_input_status", {"group_id": group_id, "event_type": 0})
             else:
-                await dispatcher.client.call("set_input_status", {
-                    "user_id": user_id, "event_type": 1})
+                await dispatcher.client.call("set_input_status", {"user_id": user_id, "event_type": 0})
         except Exception:
             pass
-        await asyncio.sleep(delay)
+        await asyncio.sleep(random.uniform(0.5, 2.0))
+        try:
+            # Resume typing
+            if group_id:
+                await dispatcher.client.call("set_input_status", {"group_id": group_id, "event_type": 1})
+            else:
+                await dispatcher.client.call("set_input_status", {"user_id": user_id, "event_type": 1})
+        except Exception:
+            pass
+        await asyncio.sleep(random.uniform(0.5, 1.5))
+        log.debug("Hesitation mode activated (roll=%.2f) for user %s", _hesitation_roll, user_id)
 
-    reply = await _call_deepseek(config, messages, max_tokens=400,
+    # Dynamic max_tokens: match reply length to context
+    is_question = bool(clean_msg) and ("?" in str(clean_msg) or "？" in str(clean_msg) or
+                    any(w in str(clean_msg) for w in ("怎么", "为什么", "如何", "啥", "什么")))
+    if is_late_night:
+        dyn_max_tokens = random.randint(30, 80)
+    elif is_question:
+        dyn_max_tokens = random.randint(200, 400)
+    elif group_id:
+        dyn_max_tokens = random.randint(100, 250)
+    else:
+        dyn_max_tokens = random.randint(120, 300)  # private chat: a bit more room
+
+    reply = await _call_deepseek(config, messages, max_tokens=dyn_max_tokens,
                                   temperature=temperature, session=dispatcher.client.session)
 
     # === R18 / inappropriate content interception ===
     # AI uses [R18] marker to flag explicit content - intercept and escalate
     if reply and "[R18]" in reply:
             log.warning("AI rejected user %s in group %s: %s", user_id, group_id, reply[:50])
-            if group_id:
-                # Skip blacklist for bot owner / bot itself
-                owner = config.get("bot_owner")
-                bot_qq = config.get("bot_qq")
-                if user_id == owner or user_id == bot_qq:
-                    log.info("Skipping R18 escalation for bot owner/self")
-                else:
-                    from .guard import add_warning, get_warning_count, add_blacklist
-                    add_warning(group_id, user_id)
-                    warn_count = get_warning_count(group_id, user_id)
-                    if warn_count >= 3:
-                        add_blacklist(group_id, user_id, 48)
+            # Skip blacklist for bot owner / bot itself
+            owner = config.get("bot_owner")
+            bot_qq = config.get("bot_qq")
+            if user_id == owner or user_id == bot_qq:
+                log.info("Skipping R18 escalation for bot owner/self")
+            else:
+                from .guard import add_warning, get_warning_count, add_blacklist
+                gid = group_id if group_id else 0
+                add_warning(gid, user_id)
+                warn_count = get_warning_count(gid, user_id)
+                if warn_count >= 3:
+                    add_blacklist(gid, user_id, 48, bot_owner=owner, bot_qq=bot_qq)
+                    if group_id:
                         await dispatcher.client.send_group_msg_with_at(group_id,
                             "多次违规，已拉黑48小时。", [user_id])
-                    elif warn_count >= 2:
+                    else:
+                        await dispatcher.client.send_private_msg(user_id,
+                            "多次违规，已拉黑48小时。")
+                elif warn_count >= 2:
+                    if group_id:
                         await dispatcher.client.send_group_msg_with_at(group_id,
                             "第二次警告，再犯拉黑。", [user_id])
                     else:
+                        await dispatcher.client.send_private_msg(user_id,
+                            "第二次警告，再犯拉黑。")
+                else:
+                    if group_id:
                         await dispatcher.client.send_group_msg_with_at(group_id,
                             "警告：请勿发布违规内容。", [user_id])
+                    else:
+                        await dispatcher.client.send_private_msg(user_id,
+                            "警告：请勿发布违规内容。")
             return
 
     reply = _post_process_reply(reply)
     if not reply or len(reply.strip()) == 0:
         log.warning("AI returned empty reply for user %s in group %s - retrying once", user_id, group_id)
         # Retry once with simpler prompt
-        retry_msg = [{"role": "user", "content": f"{sender_name}: {clean_msg}"}]
+        retry_msg = [{"role": "user", "content": f"{sender_name}: {original_clean_msg or raw_message}"}]
         reply2 = await _call_deepseek(config, [messages[0]] + retry_msg, max_tokens=200,
                                        temperature=0.8, session=dispatcher.client.session)
         if reply2:
@@ -767,6 +896,50 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
 
     # Delay removed - web search is free and fast now
 
+    # Slacker mode: occasionally give minimal replies (like a real person)
+    # Group chat: up to 18% chance. Private chat: up to 8%. Late night: higher.
+    slacker_base = 0.06 if group_id else 0.03
+    if is_late_night:
+        slacker_base += 0.12
+    elif random.random() < 0.2:  # 20% of the time, randomly more slacker
+        slacker_base += 0.06
+    if random.random() < slacker_base:
+        slackers = ["草", "笑死", "确实", "6", "牛的", "哈哈", "确实确实",
+                     "好家伙", "嗯", "对", "行", "真实", "离谱"]
+        reply = random.choice(slackers)
+        log.debug("Slacker mode: replaced reply with '%s' (prob=%.2f)", reply, slacker_base)
+
+    # === AI-driven sticker: parse [STICKER:xxx] tag ===
+    wanted_emotion = None
+    _sticker_match = re.search(r'\[STICKER:([^\]]+)\]', reply)
+    if _sticker_match:
+        wanted_emotion = _sticker_match.group(1).strip()
+        reply = reply.replace(_sticker_match.group(0), '').strip()
+
+    # Local sticker matching (zero API call)
+    sticker_file = None
+    if wanted_emotion:
+        _sticker_path = os.path.join(STICKER_DIR,
+            f"private_{user_id}.json" if not group_id else f"group_{group_id}.json")
+        if os.path.exists(_sticker_path):
+            try:
+                with open(_sticker_path, encoding="utf-8") as _sf:
+                    _stickers = json.load(_sf)
+                # Exact emotion match first
+                matches = [s for s in _stickers if s.get("emotion", "") == wanted_emotion]
+                # Fallback: match by tags
+                if not matches:
+                    matches = [s for s in _stickers if wanted_emotion in s.get("tags", [])]
+                if matches:
+                    sticker_file = random.choice(matches)["file"]
+                    log.info("AI-driven sticker: emotion=%s -> file=%s (from %d matches)",
+                             wanted_emotion, sticker_file[:16], len(matches))
+                else:
+                    log.info("AI wanted sticker emotion=%s but no match found in %d stickers",
+                             wanted_emotion, len(_stickers))
+            except Exception as e:
+                log.error("Sticker matching error: %s", e)
+
     if group_id:
         try:
             # Build member map for @ parsing
@@ -776,27 +949,47 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 for nick, qq in cache.items():
                     if nick and qq:
                         member_map[nick] = qq
-            
+
             clean_reply, at_qqs, quote_text = _parse_reply_actions(reply, member_map)
-            
+
+            # Build message segments: text + optional sticker image
+            _segs = []
+            if clean_reply:
+                _segs.append({"type": "text", "data": {"text": clean_reply}})
+            if sticker_file:
+                _segs.append({"type": "image", "data": {"file": sticker_file}})
+
+            if not _segs:
+                _segs = [{"type": "text", "data": {"text": reply}}]
+
             if quote_text and message_id:
-                final_text = clean_reply
                 if at_qqs:
-                    final_segs = [{"type": "at", "data": {"qq": str(qq)}} for qq in at_qqs[:2]]
-                    final_segs.append({"type": "text", "data": {"text": " " + final_text}})
-                    await dispatcher.client.send_group_msg_reply(group_id, final_segs, message_id)
+                    _at_segs = [{"type": "at", "data": {"qq": str(qq)}} for qq in at_qqs[:2]]
+                    _at_segs.extend(_segs)
+                    await dispatcher.client.send_group_msg_reply(group_id, _at_segs, message_id)
                 else:
-                    await dispatcher.client.send_group_msg_reply(group_id, final_text, message_id)
+                    await dispatcher.client.send_group_msg_reply(group_id, _segs, message_id)
             elif at_qqs:
-                await dispatcher.client.send_group_msg_with_at(group_id, clean_reply, at_qqs[:2])
+                _at_segs = [{"type": "at", "data": {"qq": str(qq)}} for qq in at_qqs[:2]]
+                _at_segs.extend(_segs)
+                await dispatcher.client.send_group_msg(group_id, _at_segs)
             else:
-                await dispatcher.client.send_group_msg(group_id, clean_reply)
+                await dispatcher.client.send_group_msg(group_id, _segs)
         except Exception as e:
             log.error("Reply send error: %s", e, exc_info=True)
             await dispatcher.client.send_group_msg(group_id, reply)
     else:
         clean_reply, _, _ = _parse_reply_actions(reply, {})
-        await dispatcher.client.send_private_msg(user_id, clean_reply)
+        _segs = []
+        if clean_reply:
+            _segs.append({"type": "text", "data": {"text": clean_reply}})
+        if sticker_file:
+            _segs.append({"type": "image", "data": {"file": sticker_file}})
+        await dispatcher.client.send_private_msg(user_id, _segs if _segs else clean_reply)
+
+    # Track last reply timestamp for multi-layer delay
+    _last_reply_ts[context_key] = time.time()
+
     # Learn from conversation & save memory
 
     from .memory import extract_user_info
@@ -840,7 +1033,6 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                     pass
         atomic_write_json(_user_memory_file(0, user_id), user_mem)
 
-    await _maybe_send_sticker(dispatcher, group_id or user_id, is_private=(not group_id))
     return True
 
 # ========== RELEVANCE JUDGE ==========
@@ -1040,24 +1232,28 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
     if any(s.get("file") == file_id for s in stickers):
         return
 
-    description = ""
+    # Group chat sampling: only collect ~30% to avoid overload (private chat collects all)
+    if not is_private and random.random() > 0.3:
+        return
+
+    desc_text = ""
+    emotion = ""
     tags = []
-    category = "other"
     usage_scene = ""
     if summary:
         import html as _html_st
-        description = _html_st.unescape(summary)[:50]
+        desc_text = _html_st.unescape(summary)[:50]
 
     # Reuse dispatcher image cache if available (avoid duplicate vision API call)
-    cached_desc = None
+    cached_entry = None
     img_cache = getattr(dispatcher, "_image_desc_cache", None)
     if img_cache and file_id in img_cache:
         entry = img_cache[file_id]
-        cached_desc = entry if isinstance(entry, str) else entry.get("desc", "") if isinstance(entry, dict) else ""
+        cached_entry = entry if isinstance(entry, dict) else {"desc": str(entry)}
 
-    # Get image URL for vision API only when explicitly enabled and needed.
+    # Always try vision API for new stickers (free quota, one-time cost)
     image_url = None
-    if not description and sticker_cfg.get("vision_analyze", False):
+    if not desc_text:
         try:
             result = await dispatcher.client.call("get_image", {"file": file_id})
             if result.get("status") == "ok":
@@ -1067,28 +1263,31 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
             pass
 
     # Call vision API for detailed analysis (or use cached description)
-    if cached_desc and not description:
-        description = cached_desc[:50]
+    if cached_entry and not desc_text:
+        desc_text = cached_entry.get("desc", "")[:50]
+        emotion = cached_entry.get("emotion", "")
+        tags = cached_entry.get("tags", [])
+        usage_scene = cached_entry.get("usage", "")
     elif image_url:
-        desc = await _analyze_sticker_vision(dispatcher.config, image_url,
-                                              session=dispatcher.client.session)
-        if desc:
-            # Parse structured response: description|tags|category|usage
-            parts = desc.split("|")
+        result = await _analyze_sticker_vision(dispatcher.config, image_url,
+                                               session=dispatcher.client.session)
+        if result:
+            # Parse structured response: description|emotion|tags|usage
+            parts = result.split("|")
             if len(parts) >= 1:
-                description = parts[0].strip()
+                desc_text = parts[0].strip()
             if len(parts) >= 2:
-                tags = [t.strip() for t in parts[1].split(",") if t.strip()]
+                emotion = parts[1].strip()
             if len(parts) >= 3:
-                category = parts[2].strip()
+                tags = [t.strip() for t in parts[2].split(",") if t.strip()]
             if len(parts) >= 4:
                 usage_scene = parts[3].strip()
     stickers.append({
         "file": file_id,
         "sub_type": sub_type,
-        "description": description,
+        "desc": desc_text,
+        "emotion": emotion,
         "tags": tags,
-        "category": category,
         "usage": usage_scene,
         "ts": time.time()
     })
@@ -1099,7 +1298,7 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
         stickers = stickers[-max_stickers:]
 
     atomic_write_json(path, stickers)
-    log.info("Sticker collected + analyzed: %s -> %s", file_id[:16], description[:40])
+    log.info("Sticker collected + analyzed: %s -> %s [%s]", file_id[:16], desc_text[:40], emotion or "?")
 
 
 async def _analyze_sticker_vision(config, image_url, session=None):
@@ -1122,10 +1321,10 @@ async def _analyze_sticker_vision_inner(config, image_url, session=None):
         "Content-Type": "application/json"
     }
     prompt = (
-        "分析这张表情包/图片。用以下格式回复（严格4段，用|分隔）：\n"
-        "描述（15字内）|标签1,标签2,标签3|"
-        "分类（梗图/反应/可爱/搞笑/其他）|适用场景(15字内)\n"
-        "例如：猫翻白眼表示无语|无语,翻白眼,猫|反应|对无语的事表示同感"
+        "请描述这张表情包。用以下格式回复（严格4段，用|分隔）：\n"
+        "简短描述(15字内)|情绪标签|关键词1,关键词2|适用场景(10字内)\n"
+        "情绪标签必须从以下选一个：开心 伤心 生气 无语 惊讶 害羞 尴尬 得意 困惑 拒绝 赞同 嘲讽 感谢 安慰 庆祝 卖萌 敷衍 打招呼 告别 晚安 点赞\n"
+        "示例：猫翻白眼|无语|翻白眼,猫|对无语的事表示同感"
     )
     payload = {
         "model": vision_cfg.get("model", "qwen-vl-plus"),
@@ -1279,18 +1478,61 @@ def get_sticker_summaries(group_id):
         return []
     summaries = []
     for s in stickers:
-        desc = s.get("description", "") or s.get("summary", "") or "无描述"
+        desc = s.get("desc") or s.get("description") or s.get("summary", "") or "无描述"
+        emotion = s.get("emotion", "")
         tags = s.get("tags", [])
         usage = s.get("usage", "")
-        cat = s.get("category", "other")
         line = desc
+        if emotion:
+            line += " [" + emotion + "]"
         if tags:
             line += " [" + ",".join(tags[:3]) + "]"
         if usage:
             line += " - " + usage
-        summaries.append({"description": desc, "tags": tags, "usage": usage,
-                          "category": cat, "display": line})
+        summaries.append({"description": desc, "emotion": emotion, "tags": tags, "usage": usage,
+                          "display": line})
     return summaries
+
+
+def _build_sticker_inventory(group_id=None, user_id=None, is_private=False):
+    """Build sticker inventory summary by emotion for system prompt.
+    Tells AI what stickers are available so it can decide whether to use [STICKER:xxx]."""
+    gid = user_id if is_private else group_id
+    if not gid:
+        return ""
+    prefix = "private" if is_private else "group"
+    path = os.path.join(STICKER_DIR, f"{prefix}_{gid}.json")
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            stickers = json.load(f)
+    except Exception:
+        return ""
+    if not stickers:
+        return ""
+    # Group by emotion, collect up to 2 descriptions per emotion
+    by_emotion = {}
+    for s in stickers:
+        em = s.get("emotion", "")
+        if not em:
+            tags = s.get("tags", [])
+            em = tags[0] if tags else "其他"
+        if em not in by_emotion:
+            by_emotion[em] = []
+        desc = s.get("desc") or s.get("description", "") or ""
+        if desc and desc not in by_emotion[em]:
+            by_emotion[em].append(desc[:10])
+    total = len(stickers)
+    lines = []
+    for em in sorted(by_emotion):
+        samples = by_emotion[em][:2]
+        count = len(by_emotion[em])
+        lines.append(f"{em}({count}): " + "、".join(samples))
+    summary = "\n".join(lines)
+    return (f"【你收藏的表情包（共{total}个）】\n{summary}\n"
+            "回复时如果觉得发个表情包能更好表达情绪，在末尾加 [STICKER:情绪标签]。")
+
 # ========== WEB SEARCH ==========
 
 async def search_web(dispatcher, query):
