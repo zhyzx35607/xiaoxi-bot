@@ -1782,12 +1782,15 @@ async def _maybe_send_as_voice(dispatcher, group_id, reply, is_late_night):
 def _should_split_reply(text, is_private=False):
     """Decide whether to split reply into multiple messages for human-like pacing.
 
-    Splits if text > 10 chars, with 60% probability. Private chat splits less (45%)
-    to avoid feeling too eager. Short splits (<15 chars) increase chance slightly.
+    Splits if text > 8 chars. Private chat: 55% normally, 65% for longer messages.
+    Group chat remains at 60%.
     """
-    if not text or len(text) < 10:
+    if not text or len(text) < 8:
         return False
-    split_chance = 0.45 if is_private else 0.60
+    if is_private:
+        split_chance = 0.65 if len(text) > 12 else 0.55
+    else:
+        split_chance = 0.60
     return random.random() < split_chance
 
 

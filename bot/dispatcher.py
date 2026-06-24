@@ -1018,21 +1018,44 @@ class Dispatcher:
                 self._private_processing.pop(user_id, None)
                 return
 
-        # ---- Filter 3: Very short messages without question marks → ignore ----
-        if len(clean_raw) < 3 and "?" not in clean_raw and "？" not in clean_raw:
+        # ---- Filter 3: Very short messages ----
+        # During a conversation (already exchanged at least one round), accept short
+        # replies like "嗯" "好" "呵呵" as natural conversation signals.
+        consecutive = self._private_consecutive_replies.get(user_id, 0)
+        min_len = 1 if consecutive >= 1 else 3
+        # "..." or "。。。" type messages: always treat as pings (not filtered)
+        is_dots = clean_raw and all(c in ".。…" for c in clean_raw)
+        if not is_dots and len(clean_raw) < min_len and "?" not in clean_raw and "？" not in clean_raw:
             self._private_processing.pop(user_id, None)
             return
 
-        # ---- Filter 4: Cooldown between replies ----
+        # ---- Filter 4: Dynamic cooldown between replies ----
+        # Cooldown gets shorter as conversation heats up — once you're chatting,
+        # you reply more readily instead of going silent.
         last_reply_ts = self._private_last_reply_ts.get(user_id, 0)
         elapsed = now - last_reply_ts
-        # If enough time passed (>10 min), reset consecutive count (fresh conversation)
-        if elapsed > 600:
+        # If enough time passed (>10 min), reset (fresh conversation)
+        if last_reply_ts and elapsed > 600:
             self._private_consecutive_replies[user_id] = 0
             consecutive = 0
-        cooldown_min = 20
-        cooldown_max = 60
-        if elapsed < cooldown_min:
+            last_reply_ts = 0
+            elapsed = now
+
+        # conversation-heat-based cooldown
+        if consecutive >= 4:
+            hard_cooldown, soft_cooldown = 3, 10
+        elif consecutive >= 2:
+            hard_cooldown, soft_cooldown = 5, 18
+        elif consecutive >= 1:
+            hard_cooldown, soft_cooldown = 12, 35
+        else:
+            hard_cooldown, soft_cooldown = 20, 60  # first reply: original pacing
+
+        # "?" / "？" always breaks hard cooldown
+        has_question = "?" in clean_raw or "？" in clean_raw
+        is_dots = clean_raw and all(c in ".。…" for c in clean_raw)
+
+        if last_reply_ts and elapsed < hard_cooldown and not has_question and not is_dots:
             # Still in hard cooldown — track urgent pings
             urgent = self._private_urgent_pings.setdefault(user_id, [])
             urgent.append(now)
@@ -1043,9 +1066,10 @@ class Dispatcher:
                 return
             # 3+ fast messages during cooldown → they really want to talk, allow
             log.debug("Private cooldown override: user %s sent 3+ urgent messages", user_id)
-        elif elapsed < cooldown_max:
-            # Soft cooldown: only respond to substantial messages (>= 8 chars or questions)
-            if len(clean_raw) < 8 and "?" not in clean_raw and "？" not in clean_raw:
+        elif last_reply_ts and elapsed < soft_cooldown and not has_question and not is_dots:
+            # Soft cooldown: only respond to substantial messages (>= 6 chars in conversation, >= 8 cold)
+            soft_min = 6 if consecutive >= 1 else 8
+            if len(clean_raw) < soft_min:
                 self._private_processing.pop(user_id, None)
                 return
 
