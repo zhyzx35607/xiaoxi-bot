@@ -34,7 +34,7 @@ SAFETY_RULES = (
     "回复风格：\n"
     "1. 简短自然，多数时候1句话，最多3句话。像群友闲聊，不像写作文。\n"
     "2. 不用括号动作描写、不堆感叹号和～、不用\"你好呀\"\"好呢\"\"作为AI\"等客服语气。\n"
-    "3. 收到图片直接描述内容，自然点就行。\n"
+    "3. 群友发的表情包/贴纸通常只是抒发情绪，不是为了让你评价。除非对方同时说了话、或者有人@你问\"这图什么意思\"，否则不要主动描述或评论表情包。真正的照片/截图/正常图片才需要描述内容。\n"
     "4.【R18检测机制】先判断消息是否包含性骚扰/色情/淫秽内容（性器官、性行为、性暗示）。仅是则用[R18]标记：回复以[R18]开头，如\"[R18] 不提供\"。仅真色情加标记，开玩笑打闹不要误判。\n"
     "5. 被人说是AI/机器人/程序时，自然回应就好，不用专门辩解。\n"
     "6. 参考信息只在有用时使用，不要提搜索、资料、参考信息这些词；如果参考信息不足，就明确说不太确定。\n"
@@ -310,7 +310,7 @@ async def _compress_private_to_long(user_id, old_entries, config, session):
     try:
         headers = {"Authorization": "Bearer {}".format(config["deepseek_api_key"]), "Content-Type": "application/json"}
         payload = {
-            "model": config.get("deepseek_model", "deepseek-chat"),
+            "model": config.get("deepseek_model", "deepseek-v4-flash"),
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 80, "temperature": 0.3,
         }
@@ -347,7 +347,7 @@ async def _compress_to_long_term(group_id, old_entries, config, session):
     try:
         headers = {"Authorization": "Bearer {}".format(config["deepseek_api_key"]), "Content-Type": "application/json"}
         payload = {
-            "model": config.get("deepseek_model", "deepseek-chat"),
+            "model": config.get("deepseek_model", "deepseek-v4-flash"),
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 80, "temperature": 0.3,
         }
@@ -460,10 +460,13 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
         "Content-Type": "application/json"
     }
     payload = {
-        "model": config.get("deepseek_model", "deepseek-chat"),
+        "model": config.get("deepseek_model", "deepseek-v4-flash"),
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
+        "top_p": 0.9,
+        "presence_penalty": 0.3,
+        "frequency_penalty": 0.3,
     }
     url = f"{config.get('deepseek_base_url', 'https://api.deepseek.com')}/v1/chat/completions"
 
@@ -784,8 +787,17 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     if (time.time() - last_ts) > 180:
         delay += random.uniform(1.0, 4.0)
 
-    # Clamp to reasonable range
-    delay = max(0.5, min(60.0, delay))
+    # --- Private chat: slower, more human-like pacing ---
+    is_private = not group_id
+    if is_private:
+        # Private chat feels more deliberate: rarely instant, often delayed
+        # Scale existing delay up by 1.3x-2.5x
+        delay *= random.uniform(1.3, 2.5)
+        # Higher minimum floor
+        delay = max(3.0, delay)
+
+    # Clamp to reasonable range — wider for private chat
+    delay = max(0.5, min(120.0 if is_private else 60.0, delay))
     log.debug("Human-like delay: %.1fs (roll=%.2f%s%s) for user %s",
               delay, roll,
               " night" if is_late_night else "",
@@ -830,14 +842,18 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     # Dynamic max_tokens: match reply length to context
     is_question = bool(clean_msg) and ("?" in str(clean_msg) or "？" in str(clean_msg) or
                     any(w in str(clean_msg) for w in ("怎么", "为什么", "如何", "啥", "什么")))
-    if is_late_night:
-        dyn_max_tokens = random.randint(30, 80)
+    # Dynamic max_tokens with randomness — wider ranges for natural variation
+    # Occasionally give a super-short reply (15% chance, like a lazy real person)
+    if random.random() < 0.15:
+        dyn_max_tokens = random.randint(10, 30)
+    elif is_late_night:
+        dyn_max_tokens = random.randint(20, 100)
     elif is_question:
-        dyn_max_tokens = random.randint(200, 400)
+        dyn_max_tokens = random.randint(100, 450)
     elif group_id:
-        dyn_max_tokens = random.randint(100, 250)
+        dyn_max_tokens = random.randint(60, 300)
     else:
-        dyn_max_tokens = random.randint(120, 300)  # private chat: a bit more room
+        dyn_max_tokens = random.randint(80, 350)  # private chat: wider range
 
     reply = await _call_deepseek(config, messages, max_tokens=dyn_max_tokens,
                                   temperature=temperature, session=dispatcher.client.session)
@@ -897,8 +913,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     # Delay removed - web search is free and fast now
 
     # Slacker mode: occasionally give minimal replies (like a real person)
-    # Group chat: up to 18% chance. Private chat: up to 8%. Late night: higher.
-    slacker_base = 0.06 if group_id else 0.03
+    # Group chat: up to 18% chance. Private chat: up to 15% (more "seen-zone" realism).
+    slacker_base = 0.06 if group_id else 0.08
     if is_late_night:
         slacker_base += 0.12
     elif random.random() < 0.2:  # 20% of the time, randomly more slacker
@@ -951,41 +967,94 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                         member_map[nick] = qq
 
             clean_reply, at_qqs, quote_text = _parse_reply_actions(reply, member_map)
+            if not clean_reply:
+                clean_reply = reply
 
-            # Build message segments: text + optional sticker image
-            _segs = []
-            if clean_reply:
-                _segs.append({"type": "text", "data": {"text": clean_reply}})
-            if sticker_file:
-                _segs.append({"type": "image", "data": {"file": sticker_file}})
+            # === AI Voice: occasionally send short replies as voice instead of text ===
+            voice_used = False
+            if not at_qqs and not quote_text and len(clean_reply) <= 15:
+                voice_used = await _maybe_send_as_voice(dispatcher, group_id, clean_reply, is_late_night)
 
-            if not _segs:
-                _segs = [{"type": "text", "data": {"text": reply}}]
-
-            if quote_text and message_id:
-                if at_qqs:
-                    _at_segs = [{"type": "at", "data": {"qq": str(qq)}} for qq in at_qqs[:2]]
-                    _at_segs.extend(_segs)
-                    await dispatcher.client.send_group_msg_reply(group_id, _at_segs, message_id)
+            if not voice_used:
+                # === Message splitting: mimic human sequential sending ===
+                if _should_split_reply(clean_reply, is_private=False):
+                    segments = _split_reply_segments(clean_reply)
+                    for i, seg in enumerate(segments):
+                        seg = _random_trim_punctuation(seg)
+                        if not seg:
+                            continue
+                        _segs = []
+                        # @mention only on first segment
+                        if i == 0 and at_qqs:
+                            _at_segs = [{"type": "at", "data": {"qq": str(qq)}} for qq in at_qqs[:2]]
+                            _at_segs.append({"type": "text", "data": {"text": seg}})
+                            _segs = _at_segs
+                        else:
+                            _segs.append({"type": "text", "data": {"text": seg}})
+                        # Sticker on last segment
+                        if i == len(segments) - 1 and sticker_file:
+                            _segs.append({"type": "image", "data": {"file": sticker_file}})
+                        # Quote only on first segment
+                        if quote_text and message_id and i == 0:
+                            await dispatcher.client.send_group_msg_reply(group_id, _segs, message_id)
+                        else:
+                            await dispatcher.client.send_group_msg(group_id, _segs)
+                        # Natural gap between segments
+                        if i < len(segments) - 1:
+                            await asyncio.sleep(random.uniform(0.5, 2.0))
+                    log.debug("Split reply into %d segments for group %s", len(segments), group_id)
                 else:
-                    await dispatcher.client.send_group_msg_reply(group_id, _segs, message_id)
-            elif at_qqs:
-                _at_segs = [{"type": "at", "data": {"qq": str(qq)}} for qq in at_qqs[:2]]
-                _at_segs.extend(_segs)
-                await dispatcher.client.send_group_msg(group_id, _at_segs)
-            else:
-                await dispatcher.client.send_group_msg(group_id, _segs)
+                    # No split — single message
+                    _segs = []
+                    if clean_reply:
+                        _segs.append({"type": "text", "data": {"text": clean_reply}})
+                    if sticker_file:
+                        _segs.append({"type": "image", "data": {"file": sticker_file}})
+                    if not _segs:
+                        _segs = [{"type": "text", "data": {"text": reply}}]
+
+                    if quote_text and message_id:
+                        if at_qqs:
+                            _at_segs = [{"type": "at", "data": {"qq": str(qq)}} for qq in at_qqs[:2]]
+                            _at_segs.extend(_segs)
+                            await dispatcher.client.send_group_msg_reply(group_id, _at_segs, message_id)
+                        else:
+                            await dispatcher.client.send_group_msg_reply(group_id, _segs, message_id)
+                    elif at_qqs:
+                        _at_segs = [{"type": "at", "data": {"qq": str(qq)}} for qq in at_qqs[:2]]
+                        _at_segs.extend(_segs)
+                        await dispatcher.client.send_group_msg(group_id, _at_segs)
+                    else:
+                        await dispatcher.client.send_group_msg(group_id, _segs)
         except Exception as e:
             log.error("Reply send error: %s", e, exc_info=True)
             await dispatcher.client.send_group_msg(group_id, reply)
     else:
         clean_reply, _, _ = _parse_reply_actions(reply, {})
-        _segs = []
-        if clean_reply:
-            _segs.append({"type": "text", "data": {"text": clean_reply}})
-        if sticker_file:
-            _segs.append({"type": "image", "data": {"file": sticker_file}})
-        await dispatcher.client.send_private_msg(user_id, _segs if _segs else clean_reply)
+        if not clean_reply:
+            clean_reply = reply
+
+        # Private chat splitting (lower probability, more chill)
+        if _should_split_reply(clean_reply, is_private=True):
+            segments = _split_reply_segments(clean_reply)
+            for i, seg in enumerate(segments):
+                seg = _random_trim_punctuation(seg)
+                if not seg:
+                    continue
+                _segs = [{"type": "text", "data": {"text": seg}}]
+                if i == len(segments) - 1 and sticker_file:
+                    _segs.append({"type": "image", "data": {"file": sticker_file}})
+                await dispatcher.client.send_private_msg(user_id, _segs)
+                if i < len(segments) - 1:
+                    await asyncio.sleep(random.uniform(0.5, 2.0))
+            log.debug("Split private reply into %d segments for user %s", len(segments), user_id)
+        else:
+            _segs = []
+            if clean_reply:
+                _segs.append({"type": "text", "data": {"text": clean_reply}})
+            if sticker_file:
+                _segs.append({"type": "image", "data": {"file": sticker_file}})
+            await dispatcher.client.send_private_msg(user_id, _segs if _segs else clean_reply)
 
     # Track last reply timestamp for multi-layer delay
     _last_reply_ts[context_key] = time.time()
@@ -1679,3 +1748,87 @@ def _post_process_reply(reply):
     if len(reply) > 500:
         reply = reply[:500] + "..."
     return reply
+
+
+async def _maybe_send_as_voice(dispatcher, group_id, reply, is_late_night):
+    """Try to send a short reply as AI voice instead of text.
+
+    Only for short replies (≤ 15 chars), with probability varying by time.
+    Returns True if voice was sent, False if should fall back to text.
+    """
+    if not group_id:
+        return False  # Voice only supported for group chat currently
+    if not reply or len(reply) > 15:
+        return False
+
+    # Probability: 8% normally, 18% late night (sleepy, don't want to type)
+    voice_chance = 0.18 if is_late_night else 0.08
+    if random.random() > voice_chance:
+        return False
+
+    # Default character ID — young female voice
+    # Can be overridden via config: voice_character
+    character = dispatcher.config.get("voice_character", "2")
+
+    try:
+        await dispatcher.client.send_group_ai_record(group_id, character, reply)
+        log.info("Voice sent: group=%s char=%s text=%s", group_id, character, reply[:20])
+        return True
+    except Exception as e:
+        log.debug("Voice send failed (will fall back to text): %s", e)
+        return False
+
+
+def _should_split_reply(text, is_private=False):
+    """Decide whether to split reply into multiple messages for human-like pacing.
+
+    Splits if text > 10 chars, with 60% probability. Private chat splits less (45%)
+    to avoid feeling too eager. Short splits (<15 chars) increase chance slightly.
+    """
+    if not text or len(text) < 10:
+        return False
+    split_chance = 0.45 if is_private else 0.60
+    return random.random() < split_chance
+
+
+def _split_reply_segments(text):
+    """Split reply text into natural segments mimicking how a person sends messages.
+
+    Splits at sentence boundaries (。！？) and newlines first. Longer segments (>18 chars)
+    are further split at commas. Returns list of segments.
+    """
+    import re as _re
+    if not text:
+        return [""]
+
+    # Step 1: split by sentence-ending punctuation and newlines
+    parts = _re.split(r'(?<=[。！？\n])', text)
+
+    # Step 2: refine long segments
+    result = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if len(part) > 18:
+            # Further split by commas / semicolons
+            sub = _re.split(r'(?<=[，,、；;])', part)
+            for s in sub:
+                s = s.strip()
+                if s:
+                    result.append(s)
+        else:
+            result.append(part)
+
+    # If splitting produced only 1 segment (or 0), return as-is
+    if len(result) <= 1:
+        return [text.strip()]
+    return result
+
+
+def _random_trim_punctuation(segment):
+    """Randomly drop trailing punctuation (~40% chance) for casual chat feel."""
+    import re as _re
+    if random.random() < 0.4:
+        segment = _re.sub(r'[。！？，、….,!?]+$', '', segment)
+    return segment.strip()
