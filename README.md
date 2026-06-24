@@ -27,7 +27,7 @@
 - 戳一戳自动回戳
 - 点赞秒回：有人给你点赞，一秒回满（SVIP 回 20 个，普通号回 10 个）
 - 复读机：群友好几个人发同一句话，她概率跟风
-- 表情包：自动收集群里的表情，偶尔发出贴合语境的表情包
+- 表情包：自动收集并用 AI 分析情绪标签，AI 聊天时能自主选择贴合语境的表情包发送
 - 点歌：说"来首 xxx"就能搜
 
 **私聊：**
@@ -56,7 +56,7 @@ export QQBOT_WS_URL="ws://127.0.0.1:3001"        # NapCat 的 WS 地址
 export QQBOT_TOKEN=""                             # OneBot access token，没设就不填
 ```
 
-如果要用图片识别功能，再配 Vision API（可选）：
+如果要用图片识别和表情包分析功能，再配 Vision API（推荐开启，免费额度足够用）：
 
 ```bash
 export VISION_API_KEY="sk-xxxxxxxxxxxxxxxx"

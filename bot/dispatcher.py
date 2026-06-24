@@ -45,6 +45,7 @@ class Dispatcher:
         self._group_consecutive_replies = {}  # group_id -> int
         self._group_member_cache = {}  # group_id -> {nickname: qq_id}
         self._member_cache_ts = {}  # group_id -> timestamp
+        self._private_processing = {}  # user_id -> timestamp; key presence = processing in-flight
         runtime = config.get("runtime", {})
         self._max_background_tasks = int(runtime.get("max_background_tasks", 16))
         self._background_tasks = set()
@@ -164,12 +165,16 @@ class Dispatcher:
             for k in stale_keys:
                 del dct[k]
 
-        # _private_reply_ts: remove user keys with empty lists > 15 min stale
-        if hasattr(self, "_private_reply_ts"):
-            stale_users = [u for u, stamps in self._private_reply_ts.items()
-                          if not stamps]
-            for u in stale_users:
-                del self._private_reply_ts[u]
+        # _private_processing: evict stale entries (> 60s)
+        stale_users = [u for u, ts in self._private_processing.items() if now - ts > 60]
+        for u in stale_users:
+            del self._private_processing[u]
+
+        # _last_like_back: evict entries older than 60s (only needed for 1s cooldown)
+        if hasattr(self, "_last_like_back"):
+            stale_likes = [u for u, ts in self._last_like_back.items() if now - ts > 60]
+            for u in stale_likes:
+                del self._last_like_back[u]
 
         # _non_friend_notified: evict entries older than 24h
         if hasattr(self, "_non_friend_notified"):
@@ -522,7 +527,8 @@ class Dispatcher:
                                      image_context=img_ctx, chat_context=chat_ctx,
                                      message_id=message_id, rate_warning=rate_warning,
                                      web_search_results=web_rs,
-                                     reply_intent="直接回应")
+                                     reply_intent="直接回应",
+                                     consecutive_replies=self._group_consecutive_replies.get(group_id, 0))
                 if result:
                     self._record_bot_reply(group_id, user_id)
                     self._record_rate_limit(group_id)
@@ -588,7 +594,8 @@ class Dispatcher:
                     result = await handle_ai_chat(self, group_id, user_id, clean_raw, sender_card,
                                           image_context=img_ctx, chat_context=chat_ctx,
                                           message_id=message_id, web_search_results=web_ctx,
-                                          reply_intent=decision.get("intent", "自然接话"))
+                                          reply_intent=decision.get("intent", "自然接话"),
+                                          consecutive_replies=self._group_consecutive_replies.get(group_id, 0))
                     if result:
                         self._record_bot_reply(group_id, user_id)
                         self._record_rate_limit(group_id)
@@ -707,7 +714,7 @@ class Dispatcher:
                     hours = int(parts2[3]) if len(parts2) > 3 else 48
                 except Exception:
                     pass
-                add_blacklist(gid, uid, hours)
+                add_blacklist(gid, uid, hours, bot_owner=self.config.get("bot_owner"), bot_qq=self.config.get("bot_qq"))
                 await self._reply(None, user_id, f"加进黑名单了：群 {gid}，QQ {uid}，{hours} 小时")
             elif parts2[0] == "remove" and len(parts2) >= 3:
                 from .guard import remove_blacklist
@@ -875,7 +882,8 @@ class Dispatcher:
             # Unknown command → fall through to AI chat
             from .ai import handle_ai_chat, search_web
             await handle_ai_chat(self, None, user_id, raw, sender_name,
-                                 image_context="", message_id=message_id)
+                                 image_context="", message_id=message_id,
+                                 consecutive_replies=0)
 
     async def _is_friend(self, user_id):
         """Check if user is a friend of the bot (cached, 5 min TTL).
@@ -929,6 +937,13 @@ class Dispatcher:
         if is_blacklisted(0, user_id):
             return
 
+        # Dedup: skip if already processing this user (prevents concurrent AI calls)
+        now = time.time()
+        if user_id in self._private_processing:
+            log.debug("Private dedup: skipping user %s (already processing)", user_id)
+            return
+        self._private_processing[user_id] = now
+
         # Friend-only gate
         if not await self._is_friend(user_id):
             # Send guidance once per user (don't spam)
@@ -940,14 +955,13 @@ class Dispatcher:
                         "你好！我是小汐，目前只有好友才能跟我聊天哦～先加个好友吧")
                 except Exception:
                     pass
-                self._non_friend_notified[user_id] = time.time()
+                self._non_friend_notified[user_id] = now
+            self._private_processing.pop(user_id, None)
             return
 
-        now = time.time()
-
-        # Sticker collection from images (respect collect config)
+        # Sticker collection from images — private chat always collects when enabled
         sticker_cfg = self.config.get("sticker_mode", {})
-        if sticker_cfg.get("enabled", True) and sticker_cfg.get("collect", True):
+        if sticker_cfg.get("enabled", True):
             for seg in message:
                 if seg.get("type") == "image":
                     file_id = seg.get("data", {}).get("file", "")
@@ -966,33 +980,38 @@ class Dispatcher:
         # Check if message contains images — always process those
         has_image = any(seg.get("type") == "image" for seg in message if isinstance(seg, dict))
         if not clean_raw and not has_image:
+            self._private_processing.pop(user_id, None)
             return
 
-        sender_name = sender.get("nickname", str(user_id))
+        try:
+            sender_name = sender.get("nickname", str(user_id))
 
-        # Build image context
-        from .media import extract_message_context
-        img_ctx = await extract_message_context(self, None, message)
-        if img_ctx:
-            img_ctx = img_ctx[:300]
+            # Build image context
+            from .media import extract_message_context
+            img_ctx = await extract_message_context(self, None, message)
+            if img_ctx:
+                img_ctx = img_ctx[:300]
 
-        # Search web for factual questions
-        from .ai import search_web
-        import re as _re_clean
-        search_text = _re_clean.sub(r"\[CQ:[^\]]+\]", "", raw).strip()[:100]
-        web_ctx = await search_web(self, search_text) if self._should_search_web(search_text) else ""
+            # Search web for factual questions
+            from .ai import search_web
+            import re as _re_clean
+            search_text = _re_clean.sub(r"\[CQ:[^\]]+\]", "", raw).strip()[:100]
+            web_ctx = await search_web(self, search_text) if self._should_search_web(search_text) else ""
 
-        # Call AI chat (group_id=None for private)
-        from .ai import handle_ai_chat
-        result = await handle_ai_chat(
-            self, None, user_id, clean_raw, sender_name,
-            image_context=img_ctx or "",
-            message_id=message_id,
-            web_search_results=web_ctx,
-            reply_intent="直接回应",
-        )
-        if result:
-            log.debug("Private AI replied to %s(%s)", sender_name, user_id)
+            # Call AI chat (group_id=None for private)
+            from .ai import handle_ai_chat
+            result = await handle_ai_chat(
+                self, None, user_id, clean_raw, sender_name,
+                image_context=img_ctx or "",
+                message_id=message_id,
+                web_search_results=web_ctx,
+                reply_intent="直接回应",
+                consecutive_replies=0,
+            )
+            if result:
+                log.debug("Private AI replied to %s(%s)", sender_name, user_id)
+        finally:
+            self._private_processing.pop(user_id, None)
 
 
     def _parse_private_group_args(self, args):
@@ -1013,25 +1032,20 @@ class Dispatcher:
 
 
     async def _refresh_member_cache(self, group_id):
-        """Refresh the member nickname->QQ cache for a group."""
+        """Build nickname->QQ cache from recent message buffer (zero API calls).
+        Only active speakers are cached — silent members don't need @-resolution."""
         now = time.time()
         if group_id in self._member_cache_ts and now - self._member_cache_ts.get(group_id, 0) < 600:
             return
-        try:
-            result = await self.client.call("get_group_member_list", {"group_id": group_id})
-            if result.get("status") == "ok":
-                data = result.get("data", [])
-                cache = {}
-                for member in data:
-                    nick = member.get("card") or member.get("nickname", "")
-                    qq = member.get("user_id", 0)
-                    if nick and qq:
-                        cache[nick] = qq
-                self._group_member_cache[group_id] = cache
-                self._member_cache_ts[group_id] = now
-                log.info("Member cache refreshed for group %s: %d members", group_id, len(cache))
-        except Exception as e:
-            log.error("Member cache refresh failed for %s: %s", group_id, e)
+        cache = {}
+        buffer = self._group_msg_buffer.get(group_id, [])
+        for user_id, _raw, _ts, sender_card in buffer:
+            if sender_card and user_id:
+                cache[sender_card] = user_id
+        if cache:
+            self._group_member_cache[group_id] = cache
+            self._member_cache_ts[group_id] = now
+            log.debug("Member cache from buffer for group %s: %d speakers", group_id, len(cache))
 
     async def _get_image_context(self, group_id, message):
         """Return accurate image context. Cache hit → instant. Cache miss → wait for vision API."""
@@ -1175,9 +1189,9 @@ class Dispatcher:
     def _get_rate_limit_warning(self, remaining):
         """Get a warning message when approaching limit."""
         if remaining <= 3:
-            return "\n（累了 歇会 回头聊）"
+            return "\n（快超限了 我潜了 回头聊）"
         elif remaining <= 10:
-            return "\n（今天说太多了 我先潜了）"
+            return "\n（今天说不少了 省着点回）"
         return ""
 
     def _record_bot_reply(self, group_id, user_id):
