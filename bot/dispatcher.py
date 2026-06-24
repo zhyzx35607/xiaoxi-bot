@@ -960,134 +960,53 @@ class Dispatcher:
         return True
 
     async def _handle_private_ai_chat(self, user_id, message, raw, sender, message_id):
-        """AI auto-reply for non-owner private chat. Friends only, with human-like pacing.
+        """AI auto-reply for non-owner private chat. Friends only.
 
-        Key differences from group chat:
-        - Longer reply delays (3-120s vs 0.5-60s)
-        - Cooldown between replies (20-60s)
-        - Short messages and pure stickers are ignored
-        - Consecutive reply tracking triggers natural exits
-        - Higher slacker rate for occasional "seen-zone" realism
+        Minimal code intervention — AI decides everything:
+        - Whether to reply (output [SKIP] to skip)
+        - What to reply
+        - How long the reply should be
+        - When to end the conversation
+
+        Code only handles: blacklist, friend check, typing delay, sending.
         """
         import re as _re_priv
 
-        # Blacklist check
+        # === Safety: blacklist ===
         from .guard import is_blacklisted
         if is_blacklisted(0, user_id):
             return
 
-        # Dedup: skip if already processing this user (prevents concurrent AI calls)
+        # === Dedup: prevent concurrent AI calls for same user ===
         now = time.time()
         if user_id in self._private_processing:
-            log.debug("Private dedup: skipping user %s (already processing)", user_id)
+            log.debug("Private dedup: user %s already processing, skipping", user_id)
             return
         self._private_processing[user_id] = now
 
-        # Friend-only gate
-        if not await self._is_friend(user_id):
-            if not hasattr(self, '_non_friend_notified'):
-                self._non_friend_notified = {}
-            if user_id not in self._non_friend_notified:
-                try:
-                    await self.client.send_private_msg(user_id,
-                        "你好！我是小汐，目前只有好友才能跟我聊天哦～先加个好友吧")
-                except Exception:
-                    pass
-                self._non_friend_notified[user_id] = now
-            self._private_processing.pop(user_id, None)
-            return
-
-        # Strip CQ codes for clean text analysis
-        clean_raw = _re_priv.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
-        has_image = any(seg.get("type") == "image" for seg in message if isinstance(seg, dict))
-
-        # ---- Filter 1: Empty messages ----
-        if not clean_raw and not has_image:
-            self._private_processing.pop(user_id, None)
-            return
-
-        # ---- Filter 2: Pure stickers with no text → ignore ----
-        if has_image:
-            images_in_msg = [seg for seg in message
-                           if isinstance(seg, dict) and seg.get("type") == "image"]
-            all_stickers = images_in_msg and all(
-                str(seg.get("data", {}).get("sub_type", "0")) != "0"
-                for seg in images_in_msg
-            )
-            if all_stickers and len(clean_raw) < 3:
-                self._private_processing.pop(user_id, None)
-                return
-
-        # ---- Filter 3: Very short messages ----
-        # During a conversation (already exchanged at least one round), accept short
-        # replies like "嗯" "好" "呵呵" as natural conversation signals.
-        consecutive = self._private_consecutive_replies.get(user_id, 0)
-        min_len = 1 if consecutive >= 1 else 3
-        # "..." or "。。。" type messages: always treat as pings (not filtered)
-        is_dots = clean_raw and all(c in ".。…" for c in clean_raw)
-        if not is_dots and len(clean_raw) < min_len and "?" not in clean_raw and "？" not in clean_raw:
-            self._private_processing.pop(user_id, None)
-            return
-
-        # ---- Filter 4: Dynamic cooldown between replies ----
-        # Cooldown gets shorter as conversation heats up — once you're chatting,
-        # you reply more readily instead of going silent.
-        last_reply_ts = self._private_last_reply_ts.get(user_id, 0)
-        elapsed = now - last_reply_ts
-        # If enough time passed (>10 min), reset (fresh conversation)
-        if last_reply_ts and elapsed > 600:
-            self._private_consecutive_replies[user_id] = 0
-            consecutive = 0
-            last_reply_ts = 0
-            elapsed = now
-
-        # conversation-heat-based cooldown
-        if consecutive >= 4:
-            hard_cooldown, soft_cooldown = 3, 10
-        elif consecutive >= 2:
-            hard_cooldown, soft_cooldown = 5, 18
-        elif consecutive >= 1:
-            hard_cooldown, soft_cooldown = 12, 35
-        else:
-            hard_cooldown, soft_cooldown = 20, 60  # first reply: original pacing
-
-        # "?" / "？" always breaks hard cooldown
-        has_question = "?" in clean_raw or "？" in clean_raw
-        is_dots = clean_raw and all(c in ".。…" for c in clean_raw)
-
-        if last_reply_ts and elapsed < hard_cooldown and not has_question and not is_dots:
-            # Still in hard cooldown — track urgent pings
-            urgent = self._private_urgent_pings.setdefault(user_id, [])
-            urgent.append(now)
-            # Keep only last 10s of pings
-            self._private_urgent_pings[user_id] = [t for t in urgent if now - t < 10]
-            if len(self._private_urgent_pings[user_id]) < 3:
-                self._private_processing.pop(user_id, None)
-                return
-            # 3+ fast messages during cooldown → they really want to talk, allow
-            log.debug("Private cooldown override: user %s sent 3+ urgent messages", user_id)
-        elif last_reply_ts and elapsed < soft_cooldown and not has_question and not is_dots:
-            # Soft cooldown: only respond to substantial messages (>= 6 chars in conversation, >= 8 cold)
-            soft_min = 6 if consecutive >= 1 else 8
-            if len(clean_raw) < soft_min:
-                self._private_processing.pop(user_id, None)
-                return
-
-        # ---- Filter 5: Consecutive reply cap → natural exit ----
-        consecutive = self._private_consecutive_replies.get(user_id, 0)
-        if consecutive >= 6:
-            # Already chatted a lot, only respond to explicit goodbyes or urgent questions
-            is_goodbye = any(w in clean_raw for w in ("拜", "再见", "晚安", "睡了", "溜", "忙"))
-            is_urgent = "?" in clean_raw or "？" in clean_raw or len(clean_raw) > 20
-            if not (is_goodbye or is_urgent):
-                self._private_processing.pop(user_id, None)
-                return
-            if is_goodbye:
-                # Let it through for a final "bye" response, then reset
-                pass
-
-        # ---- Proceed with AI reply ----
         try:
+            # === Friend-only gate ===
+            if not await self._is_friend(user_id):
+                if not hasattr(self, '_non_friend_notified'):
+                    self._non_friend_notified = {}
+                if user_id not in self._non_friend_notified:
+                    try:
+                        await self.client.send_private_msg(user_id,
+                            "你好！我是小汐，目前只有好友才能跟我聊天哦～先加个好友吧")
+                    except Exception:
+                        pass
+                    self._non_friend_notified[user_id] = now
+                return
+
+            # === Strip CQ codes for clean text ===
+            clean_raw = _re_priv.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
+            has_image = any(seg.get("type") == "image" for seg in message if isinstance(seg, dict))
+
+            # Truly empty (no text + no image) → skip even AI call
+            if not clean_raw and not has_image:
+                return
+
+            # === Everything else: let AI decide ===
             sender_name = sender.get("nickname", str(user_id))
 
             # Build image context (only for non-sticker images)
@@ -1101,8 +1020,9 @@ class Dispatcher:
             search_text = clean_raw[:100]
             web_ctx = await search_web(self, search_text) if self._should_search_web(search_text) else ""
 
-            # Call AI chat with actual consecutive count
+            # Call AI — it decides whether to reply and what to say
             from .ai import handle_ai_chat
+            consecutive = self._private_consecutive_replies.get(user_id, 0)
             result = await handle_ai_chat(
                 self, None, user_id, clean_raw, sender_name,
                 image_context=img_ctx or "",
@@ -1113,15 +1033,10 @@ class Dispatcher:
             )
             if result:
                 log.debug("Private AI replied to %s(%s)", sender_name, user_id)
-                # Track state
                 self._private_last_reply_ts[user_id] = time.time()
                 self._private_consecutive_replies[user_id] = consecutive + 1
-                # Clear urgent pings
                 self._private_urgent_pings.pop(user_id, None)
-                # Reset consecutive after a natural gap (>10 min)
-                if consecutive >= 1:
-                    # Schedule reset if no further replies within 10 min
-                    pass  # handled by cleanup in _cleanup_stale_state
+                # Reset after 10 min gap (handled by _cleanup_stale_state)
         finally:
             self._private_processing.pop(user_id, None)
 

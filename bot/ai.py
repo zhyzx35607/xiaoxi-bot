@@ -695,6 +695,38 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             "\n\n【状态：早上】现在是大早上，你刚醒还有点迷糊。说话简单随意。"
         )
 
+    # === Private chat: detailed behavior rules for AI to follow ===
+    if not group_id:
+        system_prompt += (
+            "\n\n【私聊行为规则】\n"
+            "你现在在QQ上跟朋友一对一私聊。对方是你的熟人，你不是客服，是朋友。\n\n"
+            "=== 什么时候只回复 [SKIP]（不说话）===\n"
+            "• 对方只发了表情包/贴纸，没有配任何文字——表情包是为了表达情绪，不用评价\n"
+            "• 对话已经自然结束了，对方只回了一句\"嗯\"\"好\"\"行\"\"哦\"\"知道了\"之类，或者只发了\"。。\"\n"
+            "• 话题聊完了，对方没有追问也没有开启新话题\n"
+            "• 消息是乱码或者完全看不懂\n\n"
+            "=== 什么时候认真回复 ===\n"
+            "• 对方在问你问题，不管有没有问号（\"吗\"\"呢\"\"吧\"\"啥\"结尾也算提问）\n"
+            "• 对方叫你/找你/催你，比如\"人呢\"\"在吗\"\"喂\"\"出来\"\n"
+            "• 对话正在进行当中，你需要接话延续话题\n"
+            "• 对方分享了一件具体的事或者发了真正的照片跟你分享\n\n"
+            "=== 什么时候简短回（1-5个字就够）===\n"
+            "• 对方只是随口吐槽了一句，不需要长篇大论\n"
+            "• 出于礼貌需要应一声，但没有什么实质内容要说\n\n"
+            "=== 说话风格 ===\n"
+            "• 口语化：用\"啦\"\"啥\"\"咋\"\"没\"\"嗯\"\"对\"——但不每句都用，自然就好\n"
+            "• 可以不加句号，也可以加，随意\n"
+            "• 不用括号动作描写，不用\"你好呀\"\"作为AI\"\"根据搜索结果\"等任何客服腔\n"
+            "• 偶尔发懒只回\"草\"\"笑死\"\"确实\"\"6\"\"牛的\"这种一个字搞定\n"
+            "• 不确定的事就说不知道，别编\n\n"
+            "=== 关于表情包 ===\n"
+            "如果发个表情包比打字更能表达你现在的情绪，在回复末尾加上 [STICKER:情绪标签]。\n"
+            "可选标签：开心 伤心 生气 无语 惊讶 害羞 尴尬 得意 困惑 拒绝 赞同 嘲讽 安慰 庆祝 卖萌 敷衍 打招呼 告别 晚安 点赞\n"
+            "只在真的需要时用，不要每条都加。\n\n"
+            "=== 关于对话节奏 ===\n"
+            "你已经跟对方聊了几轮就在【对话状态】里会告诉你。聊到差不多的时候可以自然收尾（\"先去忙了\"\"溜了\"之类），也可以主动开启新话题。像一个真正的朋友那样松弛。"
+        )
+
     if chat_hint:
         system_prompt += "\n\n" + chat_hint
     if reply_intent:
@@ -787,17 +819,18 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     if (time.time() - last_ts) > 180:
         delay += random.uniform(1.0, 4.0)
 
-    # --- Private chat: slower, more human-like pacing ---
+    # --- Private chat: natural typing delay (short, based on message pacing) ---
     is_private = not group_id
     if is_private:
-        # Private chat feels more deliberate: rarely instant, often delayed
-        # Scale existing delay up by 1.3x-2.5x
-        delay *= random.uniform(1.3, 2.5)
-        # Higher minimum floor
-        delay = max(3.0, delay)
+        # Private chat is just typing — no "away from phone" simulation.
+        # Delay is short and natural: 1-4 seconds, like a real person typing.
+        delay = random.uniform(1.0, 4.0)
+        # Late night: a tiny bit slower (sleepier typing)
+        if is_late_night:
+            delay += random.uniform(0.5, 2.0)
 
-    # Clamp to reasonable range — wider for private chat
-    delay = max(0.5, min(120.0 if is_private else 60.0, delay))
+    # Clamp to reasonable range
+    delay = max(0.5, min(60.0, delay))
     log.debug("Human-like delay: %.1fs (roll=%.2f%s%s) for user %s",
               delay, roll,
               " night" if is_late_night else "",
@@ -897,6 +930,14 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             return
 
     reply = _post_process_reply(reply)
+
+    # === AI chose not to reply: [SKIP] signal ===
+    if reply and reply.strip().upper().startswith("[SKIP]"):
+        log.debug("AI chose to skip reply for user %s%s", user_id,
+                  f" in group {group_id}" if group_id else "")
+        _last_reply_ts[context_key] = time.time()
+        return True  # message processed but nothing sent
+
     if not reply or len(reply.strip()) == 0:
         log.warning("AI returned empty reply for user %s in group %s - retrying once", user_id, group_id)
         # Retry once with simpler prompt
@@ -912,18 +953,19 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
 
     # Delay removed - web search is free and fast now
 
-    # Slacker mode: occasionally give minimal replies (like a real person)
-    # Group chat: up to 18% chance. Private chat: up to 15% (more "seen-zone" realism).
-    slacker_base = 0.06 if group_id else 0.08
-    if is_late_night:
-        slacker_base += 0.12
-    elif random.random() < 0.2:  # 20% of the time, randomly more slacker
-        slacker_base += 0.06
-    if random.random() < slacker_base:
-        slackers = ["草", "笑死", "确实", "6", "牛的", "哈哈", "确实确实",
-                     "好家伙", "嗯", "对", "行", "真实", "离谱"]
-        reply = random.choice(slackers)
-        log.debug("Slacker mode: replaced reply with '%s' (prob=%.2f)", reply, slacker_base)
+    # Slacker mode: occasionally give minimal replies (group chat only)
+    # Private chat: AI decides its own tone via system prompt rules
+    if group_id:
+        slacker_base = 0.06
+        if is_late_night:
+            slacker_base += 0.12
+        elif random.random() < 0.2:
+            slacker_base += 0.06
+        if random.random() < slacker_base:
+            slackers = ["草", "笑死", "确实", "6", "牛的", "哈哈", "确实确实",
+                        "好家伙", "嗯", "对", "行", "真实", "离谱"]
+            reply = random.choice(slackers)
+            log.debug("Slacker mode: replaced reply with '%s' (prob=%.2f)", reply, slacker_base)
 
     # === AI-driven sticker: parse [STICKER:xxx] tag ===
     wanted_emotion = None
