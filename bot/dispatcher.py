@@ -647,7 +647,7 @@ class Dispatcher:
 
 
     async def _handle_owner_private(self, user_id, message, raw, sender, message_id):
-        """Handle private messages from bot owner: commands only, no auto AI chat."""
+        """Handle private messages from bot owner: commands first, then AI chat."""
         # Blacklist check
         from .guard import is_blacklisted
         if is_blacklisted(0, user_id):
@@ -663,9 +663,8 @@ class Dispatcher:
             await self._handle_owner_command(cmd, args, user_id, sender, message, raw)
             return
 
-        # Non-command messages from owner: show brief help, don't trigger AI
-        await self._reply(None, user_id,
-            "输入 / 开头使用命令，/help 查看全部。想测试 AI 聊天请在群聊里 @我。")
+        # Non-command messages from owner → treat as normal AI chat
+        await self._handle_private_ai_chat(user_id, message, raw, sender, message_id)
 
     async def _handle_owner_command(self, cmd, args, user_id, sender, message, raw):
         """Route owner private commands to handlers."""
