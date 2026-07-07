@@ -41,6 +41,10 @@ def apply_env_overrides(config):
         "QQBOT_DEEPSEEK_BASE_URL": "deepseek_base_url",
         "DEEPSEEK_MODEL": "deepseek_model",
         "QQBOT_DEEPSEEK_MODEL": "deepseek_model",
+        "AGNES_API_KEY": "agnes_api_key",
+        "QQBOT_AGNES_API_KEY": "agnes_api_key",
+        "AGNES_BASE_URL": "agnes_base_url",
+        "AGNES_MODEL": "agnes_model",
     }
     for env_name, cfg_key in env_map.items():
         value = os.getenv(env_name)

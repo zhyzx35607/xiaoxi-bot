@@ -59,6 +59,22 @@ async def handle_notice(dispatcher, event):
         log.info("Unhandled notice type=%s raw=%s", notice_type, str(event)[:300])
 
 
+async def _generate_welcome_text(dispatcher, nickname, sex=""):
+    """Generate a short, friendly welcome message using AI (Agnes > DeepSeek)."""
+    sex_part = "（" + sex + "）" if sex else ""
+    prompt = f"新生「{nickname}」{sex_part}加入了群聊，请用一句简短（15字以内）有趣友好的话欢迎ta。自然口语化，不用emoji。直接回复内容，不用任何前缀。"
+    try:
+        from .ai import _call_deepseek
+        msg = [{"role": "user", "content": prompt}]
+        reply = await _call_deepseek(dispatcher.config, msg, max_tokens=30, temperature=0.8,
+                                      session=dispatcher.client.session)
+        if reply and len(reply.strip()) > 3:
+            return reply.strip()[:30]
+    except Exception:
+        pass
+    return f"欢迎 {nickname} 哦～"
+
+
 async def handle_group_increase(dispatcher, event):
     group_id = event.get("group_id", 0)
     if not is_group_enabled(dispatcher, group_id):
@@ -68,19 +84,18 @@ async def handle_group_increase(dispatcher, event):
     wm = gcfg.get("welcome_msg", {})
     if not wm.get("enabled", True):
         return
-    template = wm.get("template", "欢迎 {nickname} 加入本群！")
+    nickname = str(user_id)
+    sex = ""
     try:
         info = await dispatcher.client.get_group_member_info(group_id, user_id)
-        nickname = str(user_id)
         if info.get("status") == "ok":
             data = info.get("data", {})
             nickname = data.get("card") or data.get("nickname", str(user_id))
+            sex = data.get("sex", "")
     except Exception:
-        nickname = str(user_id)
-    msg = template.replace("{nickname}", nickname).replace("{user_id}", str(user_id))
+        pass
+    msg = await _generate_welcome_text(dispatcher, nickname, sex)
     await dispatcher.client.send_group_msg(group_id, msg)
-
-
 async def handle_group_decrease(dispatcher, event):
     group_id = event.get("group_id", 0)
     if not is_group_enabled(dispatcher, group_id):
@@ -100,40 +115,27 @@ async def handle_group_decrease(dispatcher, event):
             dispatcher.config = cfg
         return
 
-    # Resolve nickname — API may fail since user already left
-    nickname = ""
+    uid_str = str(user_id)
+    # Resolve nickname via get_stranger_info (works even after user left)
+    nickname = uid_str
     try:
-        info = await dispatcher.client.get_group_member_info(group_id, user_id)
+        info = await dispatcher.client.get_stranger_info(user_id, no_cache=True)
         if info.get("status") == "ok":
             data = info.get("data", {})
-            nickname = data.get("card") or data.get("nickname", "")
+            nickname = data.get("nickname", "") or data.get("card", "") or uid_str
     except Exception:
         pass
 
-    # Fallback: member cache (reverse lookup)
-    if not nickname:
-        cache = getattr(dispatcher, '_group_member_cache', {}).get(group_id, {})
-        for name, qq in cache.items():
-            if qq == user_id:
-                nickname = name
-                break
-
-    # Fallback: recent message buffer
-    if not nickname:
-        buffer = list(dispatcher._group_msg_buffer.get(group_id, []))
-        for uid, _, _, card in reversed(buffer):
-            if uid == user_id and card:
-                nickname = card
-                break
-
-    if not nickname:
-        nickname = str(user_id)
-
     action = "被移出" if sub_type == "kick" else "离开了"
-    text = f"{nickname} {action}群聊" if nickname != str(user_id) else f"{nickname}({user_id}) {action}群聊"
-    await dispatcher.client.send_group_msg(group_id, text)
+    text = f"{nickname} 离开了群聊" if nickname != uid_str else f"{nickname}({user_id}) 离开了群聊"
 
-
+    # Build message with QQ avatar image
+    avatar_url = "https://q1.qlogo.cn/g?b=qq&nk=" + str(user_id) + "&s=640"
+    msg_segments = [
+        {"type": "image", "data": {"file": avatar_url}},
+        {"type": "text", "data": {"text": "\n" + text}},
+    ]
+    await dispatcher.client.send_group_msg(group_id, msg_segments)
 async def handle_group_admin(dispatcher, event):
     """Monitor admin changes - currently logs but bot role is always queried in real-time."""
     group_id = event.get("group_id", 0)
@@ -292,14 +294,12 @@ async def handle_group_msg_emoji_like(dispatcher, event):
 
 
 async def handle_friend_add(dispatcher, event):
-    """好友添加通知 — 刷新好友缓存让新好友立即可用"""
+    """好友添加通知 — 将新好友加入缓存，不触发全量刷新"""
     user_id = event.get("user_id", 0)
     log.info("Friend added: u=%s", user_id)
-    # Invalidate friend cache so the new friend is recognised immediately
     if hasattr(dispatcher, '_friend_cache'):
         dispatcher._friend_cache.add(int(user_id))
-        # Extend TTL so it doesn't re-fetch right away
-        dispatcher._friend_cache_ts = time.time() + 300
+        dispatcher._friend_cache_ts = time.time() + 3600
         log.info("Friend cache updated: added u=%s", user_id)
 
 

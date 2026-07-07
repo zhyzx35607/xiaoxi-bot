@@ -27,6 +27,7 @@ class Dispatcher:
         self._group_last_interject = {}
         self._group_last_at_bot = {}
         self._group_last_name_reply = {}
+        self._user_last_name_reply = {}  # per-user name mention cooldown
         self._group_last_reply_to = {}  # follow-up tracking
         self._group_interject_ts = {}  # last interjection timestamp per group
         self._group_followup_count = {}  # count consecutive followup replies per group
@@ -45,6 +46,10 @@ class Dispatcher:
         self._group_consecutive_replies = {}  # group_id -> int
         self._group_member_cache = {}  # group_id -> {nickname: qq_id}
         self._member_cache_ts = {}  # group_id -> timestamp
+        self._private_processing = {}  # user_id -> timestamp; key presence = processing in-flight
+        self._private_consecutive_replies = {}  # user_id -> int; track consecutive bot replies
+        self._private_last_reply_ts = {}  # user_id -> timestamp; cooldown between replies
+        self._private_urgent_pings = {}  # user_id -> [timestamps]; fast messages during cooldown
         runtime = config.get("runtime", {})
         self._max_background_tasks = int(runtime.get("max_background_tasks", 16))
         self._background_tasks = set()
@@ -105,7 +110,9 @@ class Dispatcher:
         self._cleanup_stale_state()
 
     def _cleanup_stale_state(self):
-        """Purge data for disabled groups and expired entries to prevent unbounded growth."""
+        """Purge data for disabled groups and expired entries to prevent unbounded growth.
+        Also evicts seen_msg_ids older than 30 minutes and caps memory cache.
+        """
         now = time.time()
         groups_cfg = self.config.get("groups", {})
         enabled_gids = {gid for gid, cfg in groups_cfg.items() if cfg.get("enabled", False)}
@@ -164,18 +171,43 @@ class Dispatcher:
             for k in stale_keys:
                 del dct[k]
 
-        # _private_reply_ts: remove user keys with empty lists > 15 min stale
-        if hasattr(self, "_private_reply_ts"):
-            stale_users = [u for u, stamps in self._private_reply_ts.items()
-                          if not stamps]
-            for u in stale_users:
-                del self._private_reply_ts[u]
+        # _private_processing: evict stale entries (> 60s)
+        stale_users = [u for u, ts in self._private_processing.items() if now - ts > 60]
+        for u in stale_users:
+            del self._private_processing[u]
+
+        # _private_last_reply_ts: evict entries older than 2 hours
+        stale_priv = [u for u, ts in self._private_last_reply_ts.items() if now - ts > 7200]
+        for u in stale_priv:
+            del self._private_last_reply_ts[u]
+            self._private_consecutive_replies.pop(u, None)
+            self._private_urgent_pings.pop(u, None)
+
+        # _last_like_back: evict entries older than 60s (only needed for 1s cooldown)
+        if hasattr(self, "_last_like_back"):
+            stale_likes = [u for u, ts in self._last_like_back.items() if now - ts > 60]
+            for u in stale_likes:
+                del self._last_like_back[u]
 
         # _non_friend_notified: evict entries older than 24h
         if hasattr(self, "_non_friend_notified"):
             stale_nf = [u for u, ts in self._non_friend_notified.items() if now - ts > 86400]
             for u in stale_nf:
                 del self._non_friend_notified[u]
+
+        # _seen_msg_ids: evict entries older than 30 minutes
+        if hasattr(self, "_seen_msg_ids") and len(self._seen_msg_ids) > 500:
+            cutoff = now - 1800  # 30 min
+            stale_mids = [mid for mid, ts in list(self._seen_msg_ids.items()) if ts < cutoff]
+            for mid in stale_mids:
+                del self._seen_msg_ids[mid]
+
+        # _web_search_cache: evict entries older than 30 min
+        if hasattr(self, "_web_search_cache"):
+            stale_ws = [k for k, v in self._web_search_cache.items()
+                       if isinstance(v, dict) and now - v.get("ts", 0) > 1800]
+            for k in stale_ws:
+                self._web_search_cache.pop(k, None)
 
         # _image_desc_cache: evict entries older than 1 hour; cap at 500
         if hasattr(self, "_image_desc_cache"):
@@ -257,6 +289,10 @@ class Dispatcher:
             pt = event.get("post_type", "")
             if pt == "message":
                 await self._handle_message(event)
+            elif pt == "message_sent":
+                # Bot's own outgoing messages — feed into context buffer
+                # so AI knows what it just said (self-awareness)
+                await self._handle_self_message(event)
             elif pt == "notice":
                 from .notice_handler import handle_notice
                 await handle_notice(self, event)
@@ -265,6 +301,37 @@ class Dispatcher:
                 await handle_request(self, event)
         except Exception as e:
             log.error("Dispatch error: %s", e, exc_info=True)
+
+    async def _handle_self_message(self, event):
+        """Handle message_sent events — bot's own outgoing messages.
+
+        Feeds them into the group/private message buffer so AI
+        context includes what the bot itself just said.
+        """
+        msg_type = event.get("message_type", "")
+        group_id = event.get("group_id", 0)
+        user_id = event.get("user_id", 0)
+        raw = event.get("raw_message", "") or ""
+        message = event.get("message", [])
+        sender = event.get("sender", {})
+        sender_card = sender.get("card") or sender.get("nickname", "小汐")
+
+        if msg_type == "group" and group_id and raw:
+            bot_qq = self.config.get("bot_qq", 0)
+            # Store in buffer so _build_chat_context sees it
+            self._group_msg_buffer[group_id].append(
+                (bot_qq, raw, time.time(), sender_card)
+            )
+            # Dedup self-messages
+            message_id = event.get("message_id", 0)
+            if message_id:
+                self._seen_msg_ids[message_id] = time.time()
+            log.debug("[SELF] group=%s said: %s", group_id, raw[:60])
+
+        elif msg_type == "private" and raw:
+            # Private chat self-messages: log for future context
+            # Currently private AI context doesn't use buffer, but log for debug
+            log.debug("[SELF] private said: %s", raw[:60])
 
     async def _handle_message(self, event):
         msg_type = event.get("message_type", "")
@@ -284,9 +351,11 @@ class Dispatcher:
                 now_ts = time.time()
                 self._seen_msg_ids[message_id] = now_ts
                 if len(self._seen_msg_ids) > self._seen_msg_ids_maxlen:
-                    sorted_items = sorted(self._seen_msg_ids.items(), key=lambda x: x[1])
-                    for old_id, _ in sorted_items[:1000]:
-                        del self._seen_msg_ids[old_id]
+                    # Evict entries older than 10 minutes to keep recent-only
+                    cutoff_ts = time.time() - 600
+                    for mid in list(self._seen_msg_ids.keys()):
+                        if self._seen_msg_ids[mid] < cutoff_ts:
+                            del self._seen_msg_ids[mid]
 
         # Sender role from NapCat (provided in real-time with each message)
         sender_role = sender.get("role", "member")
@@ -500,6 +569,12 @@ class Dispatcher:
                     if now - last < cd:
                         return
                     self._group_last_name_reply[group_id] = now
+                    # Per-user cooldown: prevent single user from rapid-firing name triggers
+                    user_last = self._user_last_name_reply.get(user_id, 0)
+                    user_cd = nm_cfg.get("user_cooldown_seconds", 15)
+                    if now - user_last < user_cd:
+                        return
+                    self._user_last_name_reply[user_id] = now
                 
                 
                 # Refresh member cache for @ parsing
@@ -522,7 +597,8 @@ class Dispatcher:
                                      image_context=img_ctx, chat_context=chat_ctx,
                                      message_id=message_id, rate_warning=rate_warning,
                                      web_search_results=web_rs,
-                                     reply_intent="直接回应")
+                                     reply_intent="直接回应",
+                                     consecutive_replies=self._group_consecutive_replies.get(group_id, 0))
                 if result:
                     self._record_bot_reply(group_id, user_id)
                     self._record_rate_limit(group_id)
@@ -572,6 +648,30 @@ class Dispatcher:
                 )
                 self._record_decision(group_id, decision)
                 if decision.get("should_reply"):
+                    # === Stage 2: AI judgment (for interjections, skip followups to save cost) ===
+                    if not is_followup:
+                        ai_choice = await self._ai_judge_participation(
+                            group_id, user_id, sender_card, raw, chat_ctx or "",
+                            is_followup, is_image_msg,
+                        )
+                        if ai_choice == "SKIP":
+                            decision["should_reply"] = False
+                            decision["intent"] = "SKIP"
+                            decision["reasons"].append("AI判断不该说话")
+                            self._record_decision(group_id, decision)
+                            return
+                        elif ai_choice == "REACT":
+                            # Send emoji reaction instead of full reply
+                            if message_id:
+                                await self._send_emoji_reaction(group_id, message_id, raw)
+                            decision["should_reply"] = False
+                            decision["intent"] = "REACT"
+                            decision["reasons"].append("AI选择表情表态")
+                            self._record_decision(group_id, decision)
+                            self._group_interject_ts[group_id] = time.time()
+                            return
+                        # ai_choice == "JOIN": continue to full reply generation
+
                     allowed, remaining = self._check_rate_limit(group_id)
                     if not allowed:
                         return
@@ -588,7 +688,8 @@ class Dispatcher:
                     result = await handle_ai_chat(self, group_id, user_id, clean_raw, sender_card,
                                           image_context=img_ctx, chat_context=chat_ctx,
                                           message_id=message_id, web_search_results=web_ctx,
-                                          reply_intent=decision.get("intent", "自然接话"))
+                                          reply_intent=decision.get("intent", "自然接话"),
+                                          consecutive_replies=self._group_consecutive_replies.get(group_id, 0))
                     if result:
                         self._record_bot_reply(group_id, user_id)
                         self._record_rate_limit(group_id)
@@ -622,7 +723,7 @@ class Dispatcher:
             await self._handle_owner_command(cmd, args, user_id, sender, message, raw)
             return
 
-        # Non-command message → AI chat (same as non-owner path)
+        # Non-command messages from owner → treat as normal AI chat
         await self._handle_private_ai_chat(user_id, message, raw, sender, message_id)
 
     async def _handle_owner_command(self, cmd, args, user_id, sender, message, raw):
@@ -707,7 +808,7 @@ class Dispatcher:
                     hours = int(parts2[3]) if len(parts2) > 3 else 48
                 except Exception:
                     pass
-                add_blacklist(gid, uid, hours)
+                add_blacklist(gid, uid, hours, bot_owner=self.config.get("bot_owner"), bot_qq=self.config.get("bot_qq"))
                 await self._reply(None, user_id, f"加进黑名单了：群 {gid}，QQ {uid}，{hours} 小时")
             elif parts2[0] == "remove" and len(parts2) >= 3:
                 from .guard import remove_blacklist
@@ -872,24 +973,22 @@ class Dispatcher:
             await self._reply(None, user_id, f"群 {gid} 的数据清掉了，包括记忆、表情包、黑名单和用户记忆")
 
         else:
-            # Unknown command → fall through to AI chat
-            from .ai import handle_ai_chat, search_web
-            await handle_ai_chat(self, None, user_id, raw, sender_name,
-                                 image_context="", message_id=message_id)
+            # Unknown command → just say so, don't trigger AI
+            await self._reply(None, user_id, "未知命令，输入 /help 查看可用命令")
 
     async def _is_friend(self, user_id):
-        """Check if user is a friend of the bot (cached, 5 min TTL).
+        """Check if user is a friend of the bot (lazy-load, no periodic refresh).
 
-        On API failure: keeps using old cache (extends TTL by 10 min).
-        On first-ever call with empty cache: one retry, then lenient (returns True)
-        so real friends aren't blocked by a transient timeout.
+        Cache populated on first private message only. Never proactively
+        refreshes — on low-spec servers with 800+ friends, periodic
+        get_friend_list is wasteful.
         """
         now = time.time()
         if not hasattr(self, "_friend_cache"):
             self._friend_cache = set()
             self._friend_cache_ts = 0
             self._friend_fetching = False  # prevent concurrent fetches
-        if now - self._friend_cache_ts < 300:
+        if self._friend_cache and now - self._friend_cache_ts < 3600:
             return user_id in self._friend_cache
         # Prevent concurrent refresh storms
         if getattr(self, "_friend_fetching", False):
@@ -903,7 +1002,7 @@ class Dispatcher:
                     friends.add(int(f.get("user_id", 0)))
                 self._friend_cache = friends
                 self._friend_cache_ts = now
-                log.info("Friend cache refreshed: %d friends", len(friends))
+                log.info("Friend cache loaded on demand: %d friends", len(friends))
                 return user_id in friends
             # API returned non-ok status
             log.warning("get_friend_list returned %s", result.get("status", "?"))
@@ -913,7 +1012,7 @@ class Dispatcher:
             self._friend_fetching = False
         # API failed: extend TTL of existing cache so we don't hammer it
         if self._friend_cache:
-            self._friend_cache_ts = now + 600  # 10 min grace
+            self._friend_cache_ts = now + 3600  # 1h grace
             log.debug("Friend API failed, using stale cache (%d entries)", len(self._friend_cache))
             return user_id in self._friend_cache
         # Cache is empty (first-ever call failed): be lenient
@@ -921,78 +1020,95 @@ class Dispatcher:
         return True
 
     async def _handle_private_ai_chat(self, user_id, message, raw, sender, message_id):
-        """AI auto-reply for non-owner private chat. Friends only, no rate limits."""
+        """AI auto-reply for non-owner private chat. Friends only.
+
+        Minimal code intervention — AI decides everything:
+        - Whether to reply (output [SKIP] to skip)
+        - What to reply
+        - How long the reply should be
+        - When to end the conversation
+
+        Code only handles: blacklist, friend check, typing delay, sending.
+        """
         import re as _re_priv
-
-        # Blacklist check
-        from .guard import is_blacklisted
-        if is_blacklisted(0, user_id):
-            return
-
-        # Friend-only gate
-        if not await self._is_friend(user_id):
-            # Send guidance once per user (don't spam)
-            if not hasattr(self, '_non_friend_notified'):
-                self._non_friend_notified = {}
-            if user_id not in self._non_friend_notified:
-                try:
-                    await self.client.send_private_msg(user_id,
-                        "你好！我是小汐，目前只有好友才能跟我聊天哦～先加个好友吧")
-                except Exception:
-                    pass
-                self._non_friend_notified[user_id] = time.time()
-            return
-
-        now = time.time()
-
-        # Sticker collection from images (respect collect config)
-        sticker_cfg = self.config.get("sticker_mode", {})
-        if sticker_cfg.get("enabled", True) and sticker_cfg.get("collect", True):
-            for seg in message:
-                if seg.get("type") == "image":
-                    file_id = seg.get("data", {}).get("file", "")
-                    sub_type = seg.get("data", {}).get("sub_type", "0")
-                    summary = seg.get("data", {}).get("summary", "")
-                    if file_id:
-                        from .ai import collect_sticker_async
-                        self.create_background_task(
-                            collect_sticker_async(self, user_id, file_id, sub_type, summary,
-                                                  is_private=True),
-                            name="sticker-collect-private",
-                        )
-
-        # Strip CQ codes for clean text
-        clean_raw = _re_priv.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
-        # Check if message contains images — always process those
-        has_image = any(seg.get("type") == "image" for seg in message if isinstance(seg, dict))
-        if not clean_raw and not has_image:
-            return
 
         sender_name = sender.get("nickname", str(user_id))
 
-        # Build image context
-        from .media import extract_message_context
-        img_ctx = await extract_message_context(self, None, message)
-        if img_ctx:
-            img_ctx = img_ctx[:300]
+        # === Safety: blacklist ===
+        from .guard import is_blacklisted
+        if is_blacklisted(0, user_id):
+            log.debug("Private chat blocked (blacklisted): %s(%s)", sender_name, user_id)
+            return
 
-        # Search web for factual questions
-        from .ai import search_web
-        import re as _re_clean
-        search_text = _re_clean.sub(r"\[CQ:[^\]]+\]", "", raw).strip()[:100]
-        web_ctx = await search_web(self, search_text) if self._should_search_web(search_text) else ""
+        # === Dedup: prevent concurrent AI calls for same user ===
+        now = time.time()
+        if user_id in self._private_processing:
+            log.debug("Private dedup: user %s(%s) already processing, skipping", sender_name, user_id)
+            return
+        self._private_processing[user_id] = now
 
-        # Call AI chat (group_id=None for private)
-        from .ai import handle_ai_chat
-        result = await handle_ai_chat(
-            self, None, user_id, clean_raw, sender_name,
-            image_context=img_ctx or "",
-            message_id=message_id,
-            web_search_results=web_ctx,
-            reply_intent="直接回应",
-        )
-        if result:
-            log.debug("Private AI replied to %s(%s)", sender_name, user_id)
+        try:
+            # === Friend-only gate ===
+            if not await self._is_friend(user_id):
+                if not hasattr(self, '_non_friend_notified'):
+                    self._non_friend_notified = {}
+                if user_id not in self._non_friend_notified:
+                    try:
+                        await self.client.send_private_msg(user_id,
+                            "你好！我是小汐，目前只有好友才能跟我聊天哦～先加个好友吧")
+                    except Exception:
+                        pass
+                    self._non_friend_notified[user_id] = now
+                log.debug("Private chat skipped (not friend): %s(%s)", sender_name, user_id)
+                return
+
+            # === Strip CQ codes for clean text ===
+            clean_raw = _re_priv.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
+            has_image = any(seg.get("type") == "image" for seg in message if isinstance(seg, dict))
+
+            # Truly empty (no text + no image) → skip even AI call
+            if not clean_raw and not has_image:
+                log.debug("Private chat skipped (empty): %s(%s)", sender_name, user_id)
+                return
+
+            # Build image context (only for non-sticker images)
+            from .media import extract_message_context
+            img_ctx = await extract_message_context(self, None, message)
+            if img_ctx:
+                img_ctx = img_ctx[:300]
+
+            # Search web for factual questions
+            from .ai import search_web
+            search_text = clean_raw[:100]
+            web_ctx = await search_web(self, search_text) if self._should_search_web(search_text) else ""
+
+            # Call AI — it decides whether to reply and what to say
+            from .ai import handle_ai_chat
+            consecutive = self._private_consecutive_replies.get(user_id, 0)
+            log.info("Private AI evaluating: %s(%s) msg='%s' img=%s consec=%d",
+                     sender_name, user_id, clean_raw[:60], bool(img_ctx), consecutive)
+            result = await handle_ai_chat(
+                self, None, user_id, clean_raw, sender_name,
+                image_context=img_ctx or "",
+                message_id=message_id,
+                web_search_results=web_ctx,
+                reply_intent="直接回应",
+                consecutive_replies=consecutive,
+            )
+            if result is True:
+                log.info("Private AI replied to %s(%s)", sender_name, user_id)
+                self._private_last_reply_ts[user_id] = time.time()
+                self._private_consecutive_replies[user_id] = consecutive + 1
+                self._private_urgent_pings.pop(user_id, None)
+            elif result is None:
+                log.debug("Private AI anti-echo skipped: %s(%s)", sender_name, user_id)
+            else:
+                log.debug("Private AI chose to skip: %s(%s) (consec=%d)", sender_name, user_id, consecutive)
+                # Reset consecutive count when AI skips
+                self._private_consecutive_replies.pop(user_id, None)
+                # Reset after 10 min gap (handled by _cleanup_stale_state)
+        finally:
+            self._private_processing.pop(user_id, None)
 
 
     def _parse_private_group_args(self, args):
@@ -1013,25 +1129,20 @@ class Dispatcher:
 
 
     async def _refresh_member_cache(self, group_id):
-        """Refresh the member nickname->QQ cache for a group."""
+        """Build nickname->QQ cache from recent message buffer (zero API calls).
+        Only active speakers are cached — silent members don't need @-resolution."""
         now = time.time()
         if group_id in self._member_cache_ts and now - self._member_cache_ts.get(group_id, 0) < 600:
             return
-        try:
-            result = await self.client.call("get_group_member_list", {"group_id": group_id})
-            if result.get("status") == "ok":
-                data = result.get("data", [])
-                cache = {}
-                for member in data:
-                    nick = member.get("card") or member.get("nickname", "")
-                    qq = member.get("user_id", 0)
-                    if nick and qq:
-                        cache[nick] = qq
-                self._group_member_cache[group_id] = cache
-                self._member_cache_ts[group_id] = now
-                log.info("Member cache refreshed for group %s: %d members", group_id, len(cache))
-        except Exception as e:
-            log.error("Member cache refresh failed for %s: %s", group_id, e)
+        cache = {}
+        buffer = self._group_msg_buffer.get(group_id, [])
+        for user_id, _raw, _ts, sender_card in buffer:
+            if sender_card and user_id:
+                cache[sender_card] = user_id
+        if cache:
+            self._group_member_cache[group_id] = cache
+            self._member_cache_ts[group_id] = now
+            log.debug("Member cache from buffer for group %s: %d speakers", group_id, len(cache))
 
     async def _get_image_context(self, group_id, message):
         """Return accurate image context. Cache hit → instant. Cache miss → wait for vision API."""
@@ -1175,9 +1286,9 @@ class Dispatcher:
     def _get_rate_limit_warning(self, remaining):
         """Get a warning message when approaching limit."""
         if remaining <= 3:
-            return "\n（累了 歇会 回头聊）"
+            return "\n（快超限了 我潜了 回头聊）"
         elif remaining <= 10:
-            return "\n（今天说太多了 我先潜了）"
+            return "\n（今天说不少了 省着点回）"
         return ""
 
     def _record_bot_reply(self, group_id, user_id):
@@ -1196,15 +1307,32 @@ class Dispatcher:
     def _is_short_or_image_only(self, message, raw):
         """Check if message is too short or image-only (not worth AI).
 
-        Images/stickers are always worth processing — the vision API can
-        describe them, and the sender may be trying to show the bot something.
+        Normal images (sub_type=0) still pass through for vision-based replies.
+        Stickers/emoji (sub_type≠0) are treated as emotional expression —
+        the sender doesn't expect a description, so we skip unless there's
+        meaningful accompanying text.
         """
-        # Images/stickers always pass through
-        if message and any(seg.get("type") == "image" for seg in message if isinstance(seg, dict)):
-            return False
-        # Count non-CQ text
         import re as _re
         text_only = _re.sub(r'\[CQ:[^\]]+\]', '', raw).strip()
+
+        if message:
+            images = [seg for seg in message
+                      if isinstance(seg, dict) and seg.get("type") == "image"]
+            if images:
+                # Check if ALL images are stickers/emoji (sub_type != "0")
+                all_stickers = all(
+                    str(seg.get("data", {}).get("sub_type", "0")) != "0"
+                    for seg in images
+                )
+                if all_stickers:
+                    # Pure sticker with no or trivial text: skip
+                    if len(text_only) < 3:
+                        return True
+                else:
+                    # Contains at least one normal image → let it through
+                    return False
+
+        # Count non-CQ text for non-image messages
         if len(text_only) < 3:
             return True
         # Check if it is all image/face CQ codes with no text
@@ -1246,6 +1374,16 @@ class Dispatcher:
             score += value
             reasons.append(reason)
 
+        # Check if this is a pure sticker/emoji message (not a normal image)
+        is_pure_sticker = False
+        if is_image_msg and message:
+            images_in_msg = [seg for seg in message
+                           if isinstance(seg, dict) and seg.get("type") == "image"]
+            is_pure_sticker = images_in_msg and all(
+                str(seg.get("data", {}).get("sub_type", "0")) != "0"
+                for seg in images_in_msg
+            )
+
         if is_followup:
             add(58, "对方像是在接着和我聊")
         if self._looks_like_question(text):
@@ -1254,8 +1392,10 @@ class Dispatcher:
             add(18, "像是需要核对事实")
         if self._looks_like_opinion_request(text):
             add(22, "像是在问看法")
-        if is_image_msg and len(text) >= 2:
+        if is_image_msg and not is_pure_sticker and len(text) >= 2:
             add(24, "图片带了说明")
+        elif is_pure_sticker and len(text) < 5:
+            add(-25, "纯表情包，不值得评价")
         if self._matches_interest_topic(text):
             add(18, "话题适合小汐参与")
         if len(text) >= 8:
@@ -1307,7 +1447,7 @@ class Dispatcher:
                 "reasons": reasons, "need_search": False,
             }
 
-        intent = self._choose_reply_intent(text, is_followup, is_image_msg)
+        intent = self._choose_reply_intent(text, is_followup, is_image_msg, is_pure_sticker)
         return {
             "should_reply": True,
             "score": score,
@@ -1341,8 +1481,8 @@ class Dispatcher:
             return True
         return t in {"。", "？", "?", "！", "!", "哈哈", "哈哈哈", "草", "笑死", "6", "666"}
 
-    def _choose_reply_intent(self, text, is_followup, is_image_msg):
-        if is_image_msg:
+    def _choose_reply_intent(self, text, is_followup, is_image_msg, is_pure_sticker=False):
+        if is_image_msg and not is_pure_sticker:
             return "评论图片"
         if self._looks_like_question(text):
             return "回答问题"
@@ -1353,6 +1493,79 @@ class Dispatcher:
         if any(w in text for w in ("笑死", "绷不住", "离谱", "草")):
             return "轻轻吐槽"
         return "自然接话"
+
+    async def _ai_judge_participation(self, group_id, user_id, sender_name, raw_text,
+                                       chat_context, is_followup, is_image_msg):
+        """Stage 2: Lightweight AI call to decide whether to join conversation.
+
+        Returns ("SKIP" | "REACT" | "JOIN").
+        Only called after Stage 1 (local filter) passes.
+        SKIP=stay silent, REACT=emoji reaction only, JOIN=full reply.
+        Followups skip this stage to save cost (already high confidence).
+        """
+        # Followups already high confidence — skip AI judgment to save API cost
+        if is_followup:
+            return "JOIN"
+
+        from .ai import _call_deepseek
+        config = self.config
+
+        sys_prompt = (
+            "你是小汐的内心判断。看群聊记录，决定要不要说话。\n"
+            "判断标准：消息是跟小汐有关吗？小汐了解这个话题吗？现在插话合适吗？\n"
+            "SKIP - 跟我无关/不了解/别人在私聊/氛围不适合插话\n"
+            "REACT - 跟我有关但不用认真回，发个表情表态就行\n"
+            "JOIN - 应该认真回复\n"
+            "只回答这三个词之一，不要解释。"
+        )
+
+        ctx = chat_context[:800] if chat_context else "（无最近聊天记录）"
+        user_prompt = (
+            f"【最近群聊】\n{ctx}\n\n"
+            f"【当前消息】{sender_name}: {raw_text[:200]}\n\n"
+            f"小汐要不要说话？"
+        )
+
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            result = await _call_deepseek(config, messages, max_tokens=5, temperature=0.1)
+        except Exception:
+            return "SKIP"
+
+        if not result:
+            return "SKIP"
+
+        result = result.strip().upper()
+        if "JOIN" in result:
+            return "JOIN"
+        elif "REACT" in result:
+            return "REACT"
+        return "SKIP"
+
+    _EMOJI_REACTION_MAP = {
+        "😂": ["笑死", "哈哈", "好笑", "绷不住", "草", "搞笑"],
+        "😭": ["惨", "呜呜", "哭", "太难了", "心疼", "伤心"],
+        "👍": ["牛", "厉害", "强", "赞", "666", "确实", "好的"],
+        "😱": ["离谱", "震惊", "离谱了", "我靠", "不对劲"],
+        "❤️": ["爱", "喜欢", "可爱", "好看", "好美"],
+    }
+
+    async def _send_emoji_reaction(self, group_id, message_id, raw_text):
+        """Send an emoji reaction (表情表态) on a message based on its content."""
+        import random as _random
+        emoji_id = "👍"  # default
+        for eid, keywords in self._EMOJI_REACTION_MAP.items():
+            if any(kw in (raw_text or "") for kw in keywords):
+                emoji_id = eid
+                break
+        try:
+            await self.client.set_msg_emoji_like(message_id, emoji_id)
+        except Exception:
+            pass  # Emoji reaction is best-effort
 
     async def _check_repeat(self, group_id, raw, sender_user_id):
         cfg = self.config.get("repeat_mode", {})
@@ -1401,6 +1614,11 @@ class Dispatcher:
             clean = raw[:100].replace('\n', ' ')
             lines.append(f'{card}: {clean}')
         return '\n'.join(lines) if lines else ''
+
+    def append_to_buffer(self, group_id, user_id, raw_message, card):
+        """Append a message to the group buffer so _build_chat_context can see it.
+        Used by ai.py after sending a bot reply."""
+        self._group_msg_buffer[group_id].append((user_id, raw_message, time.time(), card))
 
     def _check_at_bot(self, message):
         bot_qq = str(self.config["bot_qq"])

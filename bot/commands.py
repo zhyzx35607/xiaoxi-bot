@@ -48,6 +48,7 @@ def register_all(d):
     d.register("sysmsg", cmd_sysmsg, "查看入群申请/邀请列表", bot_owner=True)
     d.register("点赞信息", cmd_profile_like, "查看机器人点赞统计")
     d.register("health", cmd_health, "查看运行状态")
+    d.register("生图", cmd_generate_image, "AI 生成图片 /生图 提示词")
     d.register("安全", cmd_security, "安全功能 /安全 status|log|url on/off|gray on/off",
                admin_only=True)
 
@@ -118,6 +119,7 @@ async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
     lines.append("  /weather <城市>             查询天气")
     lines.append("  /translate <文本>           翻译成中文")
     lines.append("  /calc <算式>                计算器")
+    lines.append("  /生图 <提示词>              AI 生成图片")
     lines.append("  /ocr                       识别图片文字")
     lines.append("  /转发摘要                  摘要合并转发")
     lines.append("  /群文件 [关键词]            查看群文件")
@@ -1555,3 +1557,29 @@ async def cmd_profile_like(d, group_id, user_id, args, role, sender_card, messag
         f"{recent_label}: {recent}",
     ]
     await d._reply(group_id, user_id, "\n".join(lines))
+
+
+# ==================== IMAGE GENERATION ====================
+
+async def cmd_generate_image(d, group_id, user_id, args, role, sender_card, message):
+    """Generate an image using Agnes AI."""
+    text = args.strip()
+    if not text:
+        await d._reply(group_id, user_id, "这样用：/生图 提示词\n例：/生图 一只在草地上跑的橘猫")
+        return
+    from .ai import generate_image
+    url, err = await generate_image(d, text)
+    if url:
+        # Send as image segment
+        img_seg = [{"type": "image", "data": {"file": url}}]
+        try:
+            if group_id:
+                await d.client.send_group_msg(group_id, img_seg)
+            else:
+                await d.client.send_private_msg(user_id, img_seg)
+        except Exception as e:
+            log.error("Failed to send generated image: %s", e)
+            await d._reply(group_id, user_id, f"图片生成成功但发送失败: {str(e)[:100]}")
+    else:
+        await d._reply(group_id, user_id, err or "生图失败，请稍后重试")
+

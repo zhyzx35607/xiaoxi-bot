@@ -73,6 +73,9 @@ async def describe_image_with_ocr(dispatcher, group_id, seg):
     file_id = data.get("file") or data.get("file_id") or ""
     sub_type = data.get("sub_type", "")
     summary = _clean_text(data.get("summary", ""))
+    # Skip vision/OCR for stickers/emojis (sub_type != "0")
+    if file_id and str(sub_type) != "0":
+        return ""
     parts = []
     has_good_desc = False
     if file_id:

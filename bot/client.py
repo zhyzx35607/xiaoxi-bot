@@ -350,6 +350,10 @@ class OneBotClient:
             "is_dismiss": is_dismiss,
         })
 
+    async def send_group_sign(self, group_id):
+        """群打卡"""
+        return await self.call("send_group_sign", {"group_id": group_id})
+
     async def get_group_honor_info(self, group_id, honor_type="all"):
         return await self.call("get_group_honor_info", {
             "group_id": group_id,
