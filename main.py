@@ -26,6 +26,17 @@ logging.basicConfig(
 )
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 log = logging.getLogger("qqbot")
+chat_log = logging.getLogger("qqbot.chat")
+chat_log.setLevel(logging.INFO)
+chat_log.propagate = False
+chat_handler = RotatingFileHandler(
+    os.path.join(_BASE_DIR, "chat.log"),
+    maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+)
+chat_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+))
+chat_log.addHandler(chat_handler)
 
 
 def apply_env_overrides(config):
@@ -108,6 +119,10 @@ def migrate_config(config):
         "max_event_tasks": 3,
         "max_background_tasks": 6,
         "api_timeout_seconds": 6,
+        "ai_timeout_seconds": 15,
+        "agnes_timeout_seconds": 15,
+        "deepseek_timeout_seconds": 20,
+        "agnes_fallback_delay_seconds": 4,
         "connect_timeout_seconds": 5,
         "reconnect_max_delay_seconds": 60,
         "ai_concurrency": 1,
@@ -172,7 +187,11 @@ async def amain():
     config = apply_env_overrides(config)
 
     log.info("Bot %s starting...", config["bot_qq"])
-    log.info("Groups: %s", list(config.get("groups", {}).keys()))
+    enabled_groups = [
+        group_id for group_id, group_cfg in config.get("groups", {}).items()
+        if isinstance(group_cfg, dict) and group_cfg.get("enabled") is True
+    ]
+    log.info("Enabled groups: %s", enabled_groups)
 
     client = OneBotClient(config)
     dispatcher = Dispatcher(config, client, config_path)

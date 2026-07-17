@@ -6,7 +6,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from .permission import (
     get_user_level, get_bot_role, get_group_config,
     add_master, remove_master, list_masters,
-    save_group_config, LEVEL_MASTER, LEVEL_ADMIN
+    save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN
 )
 from .utils import atomic_write_json
 
@@ -24,6 +24,28 @@ def _save(c):
 
 
 def register_all(d):
+    d.register("api", cmd_api_status, "查看 NapCat/OneBot API 能力状态")
+    d.register("群信息", cmd_group_info, "查看群信息")
+    d.register("成员", cmd_member_info, "查看群成员信息 /成员 QQ号")
+    d.register("成员列表", cmd_member_list, "查看群成员列表 /成员列表 [关键词]")
+    d.register("文件状态", cmd_file_system_info, "查看群文件存储状态")
+    d.register("图片描述", cmd_image_description, "描述图片内容（发送图片或回复图片）")
+    d.register("表情回应", cmd_message_reaction, "给回复的消息添加表情 /表情回应 emoji_id")
+    d.register("戳", cmd_poke_user, "戳一戳用户 /戳 QQ号")
+    d.register("陌生人信息", cmd_stranger_info, "查看 QQ 资料 /陌生人信息 QQ号")
+    d.register("好友列表", cmd_friend_list, "查看机器人好友列表", bot_owner_only=True)
+    d.register("删除文件", cmd_delete_group_file, "删除群文件 /删除文件 file_id busid",
+               admin_only=True, bot_admin_required=True)
+    d.register("新建文件夹", cmd_create_group_folder, "新建群文件夹 /新建文件夹 名称",
+               admin_only=True, bot_admin_required=True)
+    d.register("删除文件夹", cmd_delete_group_folder, "删除群文件夹 /删除文件夹 folder_id",
+               admin_only=True, bot_admin_required=True)
+    d.register("移动文件", cmd_move_group_file, "移动群文件 /移动文件 file_id 当前目录 目标目录",
+               admin_only=True, bot_admin_required=True)
+    d.register("重命名文件", cmd_rename_group_file, "重命名群文件 /重命名文件 file_id 当前目录 新名称",
+               admin_only=True, bot_admin_required=True)
+    d.register("删公告", cmd_delete_group_notice, "删除群公告 /删公告 notice_id",
+               admin_only=True, bot_admin_required=True)
     # Basic commands
     d.register("help", cmd_help, "查看可用命令")
     d.register("like", cmd_like, "给用户点赞")
@@ -97,6 +119,218 @@ def register_all(d):
 
 
 # ==================== HELP ====================
+
+async def cmd_api_status(d, group_id, user_id, args, role, sender_card, message):
+    """Show the registered API catalog without probing every endpoint."""
+    from api_registry import get_api_specs
+    parts = args.strip().lower().split()
+    category = parts[0] if parts and parts[0] not in ("summary", "状态") else None
+    specs = get_api_specs(category)
+    current = await d.client.api_status()
+    statuses = {item["name"]: item["status"] for item in current}
+    counts = {}
+    for value in statuses.values():
+        counts[value] = counts.get(value, 0) + 1
+    lines = ["NapCat API 能力状态",
+             "已确认支持={} 不支持={} 临时失败={} 未探测={}".format(
+                 counts.get("supported", 0), counts.get("unsupported", 0),
+                 counts.get("temporary_failed", 0), counts.get("unknown", 0))]
+    for spec in specs:
+        lines.append("{} [{}] risk={} AI={} status={}".format(
+            spec.name, spec.category, spec.risk,
+            "yes" if spec.ai_allowed else "no", statuses.get(spec.name, "unknown")))
+    await d._reply(group_id, user_id, "\n".join(lines[:60]))
+
+async def cmd_group_info(d, group_id, user_id, args, role, sender_card, message):
+    if not group_id:
+        await d._reply(group_id, user_id, "这个命令只能在群里用")
+        return
+    result = await d.client.get_group_info(group_id)
+    data = result.get("data") or {}
+    if result.get("status") != "ok":
+        await d._reply(group_id, user_id, "群信息读取失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+        return
+    lines = ["群名：{}".format(data.get("group_name", "未知")),
+             "群号：{}".format(data.get("group_id", group_id)),
+             "成员数：{}".format(data.get("member_count", "未知")),
+             "上限：{}".format(data.get("max_member_count", "未知"))]
+    await d._reply(group_id, user_id, "\n".join(lines))
+
+async def cmd_member_info(d, group_id, user_id, args, role, sender_card, message):
+    if not group_id:
+        await d._reply(group_id, user_id, "这个命令只能在群里用")
+        return
+    target = args.strip()
+    if not target.isdigit():
+        target = str(user_id)
+    result = await d.client.get_group_member_info(group_id, int(target))
+    data = result.get("data") or {}
+    if result.get("status") != "ok":
+        await d._reply(group_id, user_id, "成员信息读取失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+        return
+    lines = ["QQ：{}".format(data.get("user_id", target)),
+             "昵称：{}".format(data.get("nickname", "未知")),
+             "名片：{}".format(data.get("card", "")),
+             "角色：{}".format(data.get("role", "member")),
+             "入群时间：{}".format(data.get("join_time", "未知"))]
+    await d._reply(group_id, user_id, "\n".join(lines))
+
+async def cmd_member_list(d, group_id, user_id, args, role, sender_card, message):
+    if not group_id:
+        await d._reply(group_id, user_id, "这个命令只能在群里用")
+        return
+    result = await d.client.get_group_member_list(group_id)
+    members = result.get("data") or []
+    if result.get("status") != "ok" or not isinstance(members, list):
+        await d._reply(group_id, user_id, "成员列表读取失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+        return
+    keyword = args.strip().lower()
+    if keyword:
+        members = [m for m in members if keyword in str(m.get("nickname", "")).lower()
+                   or keyword in str(m.get("card", "")).lower() or keyword == str(m.get("user_id", ""))]
+    lines = ["群成员（最多显示20人）"]
+    for item in members[:20]:
+        name = item.get("card") or item.get("nickname") or "未知"
+        lines.append("{}  {}  {}".format(item.get("user_id", ""), name, item.get("role", "member")))
+    await d._reply(group_id, user_id, "\n".join(lines) if len(lines) > 1 else "没有匹配的成员")
+
+async def cmd_file_system_info(d, group_id, user_id, args, role, sender_card, message):
+    if not group_id:
+        await d._reply(group_id, user_id, "这个命令只能在群里用")
+        return
+    result = await d.client.get_group_file_system_info(group_id)
+    data = result.get("data") or {}
+    if result.get("status") != "ok":
+        await d._reply(group_id, user_id, "群文件状态读取失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+        return
+    lines = ["群文件状态",
+             "文件数：{} / {}".format(data.get("file_count", "未知"), data.get("limit_count", "未知")),
+             "已用空间：{}".format(data.get("used_space", "未知")),
+             "总空间：{}".format(data.get("total_space", "未知"))]
+    await d._reply(group_id, user_id, "\n".join(lines))
+
+async def cmd_image_description(d, group_id, user_id, args, role, sender_card, message):
+    target_message = message
+    replied, _ = await _message_from_reply(d, message)
+    if replied:
+        target_message = replied.get("message", [])
+    image_seg = next((seg for seg in target_message if isinstance(seg, dict) and seg.get("type") == "image"), None)
+    if not image_seg:
+        await d._reply(group_id, user_id, "请发送图片时带 /图片描述，或者回复图片使用")
+        return
+    data = image_seg.get("data", {})
+    from .ai import describe_image
+    desc = await describe_image(d, group_id, data.get("file", ""), data.get("sub_type", "0"), data.get("summary", ""))
+    await d._reply(group_id, user_id, desc or "没有识别出图片内容")
+
+async def cmd_message_reaction(d, group_id, user_id, args, role, sender_card, message):
+    message_id = _reply_message_id(message)
+    if not message_id:
+        await d._reply(group_id, user_id, "请回复一条消息再使用 /表情回应 emoji_id")
+        return
+    emoji_id = args.strip() or "128077"
+    result = await d.client.set_msg_emoji_like(message_id, emoji_id)
+    if result.get("status") != "ok":
+        await d._reply(group_id, user_id, "表情回应失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+
+async def cmd_poke_user(d, group_id, user_id, args, role, sender_card, message):
+    mentions = d._extract_mentions(message) if group_id else []
+    target = mentions[0] if mentions else (int(args.strip()) if args.strip().isdigit() else user_id)
+    result = await (d.client.group_poke(group_id, target) if group_id else d.client.friend_poke(target))
+    if result.get("status") != "ok":
+        await d._reply(group_id, user_id, "戳一戳失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+
+async def cmd_stranger_info(d, group_id, user_id, args, role, sender_card, message):
+    target = args.strip()
+    if not target.isdigit():
+        await d._reply(group_id, user_id, "用法：/陌生人信息 QQ号")
+        return
+    result = await d.client.get_stranger_info(int(target))
+    data = result.get("data") or {}
+    if result.get("status") != "ok":
+        await d._reply(group_id, user_id, "资料读取失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+        return
+    lines = ["QQ：{}".format(data.get("user_id", target)),
+             "昵称：{}".format(data.get("nickname", "未知")),
+             "性别：{}".format(data.get("sex", "未知")),
+             "年龄：{}".format(data.get("age", "未知"))]
+    await d._reply(group_id, user_id, "\n".join(lines))
+
+async def cmd_friend_list(d, group_id, user_id, args, role, sender_card, message):
+    result = await d.client.get_friend_list()
+    friends = result.get("data") or []
+    if result.get("status") != "ok" or not isinstance(friends, list):
+        await d._reply(group_id, user_id, "好友列表读取失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+        return
+    keyword = args.strip().lower()
+    if keyword:
+        friends = [f for f in friends if keyword in str(f.get("nickname", "")).lower()
+                   or keyword in str(f.get("remark", "")).lower() or keyword == str(f.get("user_id", ""))]
+    lines = ["好友列表（最多30人）"]
+    for item in friends[:30]:
+        lines.append("{}  {}{}".format(item.get("user_id", ""), item.get("nickname", "未知"),
+                     "（{}）".format(item.get("remark")) if item.get("remark") else ""))
+    await d._reply(group_id, user_id, "\n".join(lines) if len(lines) > 1 else "没有匹配好友")
+
+async def cmd_delete_group_file(d, group_id, user_id, args, role, sender_card, message):
+    parts = args.split()
+    if not group_id or len(parts) < 2:
+        await d._reply(group_id, user_id, "用法：/删除文件 file_id busid")
+        return
+    result = await d.client.delete_group_file(group_id, parts[0], parts[1])
+    log.warning("ADMIN_ACTION actor=%s group=%s action=delete_file file=%s status=%s",
+                user_id, group_id, parts[0], result.get("status"))
+    await d._reply(group_id, user_id, "文件已删除" if result.get("status") == "ok" else
+                   "删除失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+
+async def cmd_create_group_folder(d, group_id, user_id, args, role, sender_card, message):
+    name = args.strip()[:120]
+    if not group_id or not name:
+        await d._reply(group_id, user_id, "用法：/新建文件夹 名称")
+        return
+    result = await d.client.create_group_file_folder(group_id, name)
+    await d._reply(group_id, user_id, "文件夹已创建" if result.get("status") == "ok" else
+                   "创建失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+
+async def cmd_delete_group_folder(d, group_id, user_id, args, role, sender_card, message):
+    folder_id = args.strip()
+    if not group_id or not folder_id:
+        await d._reply(group_id, user_id, "用法：/删除文件夹 folder_id")
+        return
+    result = await d.client.delete_group_folder(group_id, folder_id)
+    log.warning("ADMIN_ACTION actor=%s group=%s action=delete_folder folder=%s status=%s",
+                user_id, group_id, folder_id, result.get("status"))
+    await d._reply(group_id, user_id, "文件夹已删除" if result.get("status") == "ok" else
+                   "删除失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+
+async def cmd_move_group_file(d, group_id, user_id, args, role, sender_card, message):
+    parts = args.split()
+    if not group_id or len(parts) < 3:
+        await d._reply(group_id, user_id, "用法：/移动文件 file_id 当前目录 目标目录")
+        return
+    result = await d.client.move_group_file(group_id, parts[0], parts[1], parts[2])
+    await d._reply(group_id, user_id, "文件已移动" if result.get("status") == "ok" else
+                   "移动失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+
+async def cmd_rename_group_file(d, group_id, user_id, args, role, sender_card, message):
+    parts = args.split(maxsplit=2)
+    if not group_id or len(parts) < 3:
+        await d._reply(group_id, user_id, "用法：/重命名文件 file_id 当前目录 新名称")
+        return
+    result = await d.client.rename_group_file(group_id, parts[0], parts[1], parts[2])
+    await d._reply(group_id, user_id, "文件已重命名" if result.get("status") == "ok" else
+                   "重命名失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+
+async def cmd_delete_group_notice(d, group_id, user_id, args, role, sender_card, message):
+    notice_id = args.strip()
+    if not group_id or not notice_id:
+        await d._reply(group_id, user_id, "用法：/删公告 notice_id")
+        return
+    result = await d.client.del_group_notice(group_id, notice_id)
+    log.warning("ADMIN_ACTION actor=%s group=%s action=delete_notice notice=%s status=%s",
+                user_id, group_id, notice_id, result.get("status"))
+    await d._reply(group_id, user_id, "公告已删除" if result.get("status") == "ok" else
+                   "删除失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
 
 async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
     caller_level, caller_name = await get_user_level(d, group_id, user_id, role)
@@ -728,11 +962,13 @@ async def cmd_kick(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, "请 @要踢出的人")
         return
     for tid in mentions:
-        if tid == d.config["bot_qq"]:
-            await d._reply(group_id, user_id, "这个不行，我不能踢自己")
+        target_ok, target_error = await can_moderate_target(d, group_id, user_id, tid, role)
+        if not target_ok:
+            await d._reply(group_id, user_id, target_error)
             continue
         r = await d.client.set_group_kick(group_id, tid, False)
         if r.get("status") == "ok":
+            log.warning("ADMIN_ACTION actor=%s group=%s action=kick target=%s", user_id, group_id, tid)
             await d._reply(group_id, user_id, "踢掉了：" + str(tid))
         else:
             err = r.get("msg", "") or r.get("wording", "") or str(r)
@@ -757,11 +993,14 @@ async def cmd_ban(d, group_id, user_id, args, role, sender_card, message):
     if m:
         duration = max(1, min(int(m.group(1)), 43200))
     for tid in mentions:
-        if tid == d.config["bot_qq"]:
-            await d._reply(group_id, user_id, "这个不行，我不能禁言自己")
+        target_ok, target_error = await can_moderate_target(d, group_id, user_id, tid, role)
+        if not target_ok:
+            await d._reply(group_id, user_id, target_error)
             continue
         r = await d.client.set_group_ban(group_id, tid, duration * 60)
         if r.get("status") == "ok":
+            log.warning("ADMIN_ACTION actor=%s group=%s action=ban target=%s duration=%s",
+                        user_id, group_id, tid, duration * 60)
             await d._reply(group_id, user_id, "禁言了：" + str(tid) + "，" + str(duration) + " 分钟")
         else:
             err = r.get("msg", "") or r.get("wording", "") or str(r)
@@ -782,8 +1021,13 @@ async def cmd_unban(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, "请 @要解禁的人")
         return
     for tid in mentions:
+        target_ok, target_error = await can_moderate_target(d, group_id, user_id, tid, role)
+        if not target_ok:
+            await d._reply(group_id, user_id, target_error)
+            continue
         r = await d.client.set_group_ban(group_id, tid, 0)
         if r.get("status") == "ok":
+            log.warning("ADMIN_ACTION actor=%s group=%s action=unban target=%s", user_id, group_id, tid)
             await d._reply(group_id, user_id, "解开了")
         else:
             err = r.get("msg", "") or r.get("wording", "") or str(r)
@@ -1582,4 +1826,3 @@ async def cmd_generate_image(d, group_id, user_id, args, role, sender_card, mess
             await d._reply(group_id, user_id, f"图片生成成功但发送失败: {str(e)[:100]}")
     else:
         await d._reply(group_id, user_id, err or "生图失败，请稍后重试")
-
