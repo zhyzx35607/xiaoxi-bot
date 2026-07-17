@@ -153,6 +153,19 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
     return True, None
 
 
+async def can_moderate_target(dispatcher, group_id, actor_id, target_id, actor_role="member"):
+    """Enforce role hierarchy for kick/ban style operations."""
+    owner = dispatcher.config.get("bot_owner")
+    bot_qq = dispatcher.config.get("bot_qq")
+    if target_id in {owner, bot_qq}:
+        return False, "这个目标受保护"
+    actor_level, _ = await get_user_level(dispatcher, group_id, actor_id, actor_role)
+    target_level, _ = await get_user_level(dispatcher, group_id, target_id, "member")
+    if actor_id != owner and target_level >= actor_level:
+        return False, "不能操作同级或更高权限的成员"
+    return True, None
+
+
 def add_master(dispatcher, group_id, master_qq):
     gid = str(group_id)
     groups = dispatcher.config.setdefault("groups", {})

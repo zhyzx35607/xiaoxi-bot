@@ -12,6 +12,60 @@ from .guard import is_blacklisted, add_blacklist, get_warning_count, add_warning
 from .utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
+chat_log = logging.getLogger("qqbot.chat")
+
+
+def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, sender_name=""):
+    """Write bounded chat history, excluding groups not explicitly enabled."""
+    if group_id and not is_group_enabled(dispatcher, group_id):
+        return False
+    text = str(raw or "").replace("\r", "\\r").replace("\n", "\\n")[:500]
+    if group_id:
+        chat_log.info("%s group=%s user=%s name=%s text=%s",
+                      direction, group_id, user_id, sender_name, text)
+    else:
+        chat_log.info("%s user=%s name=%s text=%s",
+                      direction, user_id, sender_name, text)
+    return True
+
+
+def _read_tail_text(path, line_count=30, max_bytes=65536, max_chars=4000):
+    """Read a small tail window without loading the whole rotating log."""
+    line_count = max(1, min(int(line_count), 200))
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            position = handle.tell()
+            chunks = []
+            total = 0
+            newline_count = 0
+            while position > 0 and total < max_bytes and newline_count <= line_count:
+                size = min(4096, position, max_bytes - total)
+                position -= size
+                handle.seek(position)
+                chunk = handle.read(size)
+                chunks.append(chunk)
+                total += len(chunk)
+                newline_count += chunk.count(b"\n")
+        text = b"".join(reversed(chunks)).decode("utf-8", errors="replace")
+        return "\n".join(text.splitlines()[-line_count:])[-max_chars:]
+    except FileNotFoundError:
+        return ""
+
+
+async def _service_state(service_name):
+    proc = await asyncio.create_subprocess_exec(
+        "systemctl", "is-active", service_name,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        return "timeout"
+    return stdout.decode("utf-8", errors="replace").strip() or "unknown"
 
 
 class Dispatcher:
@@ -50,6 +104,8 @@ class Dispatcher:
         self._private_consecutive_replies = {}  # user_id -> int; track consecutive bot replies
         self._private_last_reply_ts = {}  # user_id -> timestamp; cooldown between replies
         self._private_urgent_pings = {}  # user_id -> [timestamps]; fast messages during cooldown
+        self._friend_refresh_lock = asyncio.Lock()
+        self._friend_retry_after = 0.0
         runtime = config.get("runtime", {})
         self._max_background_tasks = int(runtime.get("max_background_tasks", 16))
         self._background_tasks = set()
@@ -247,6 +303,8 @@ class Dispatcher:
     def create_background_task(self, coro, name="background"):
         if len(self._background_tasks) >= self._max_background_tasks:
             log.warning("Dropping %s task: background backlog is full", name)
+            if hasattr(coro, "close"):
+                coro.close()
             return None
         task = asyncio.create_task(coro)
         self._background_tasks.add(task)
@@ -317,6 +375,12 @@ class Dispatcher:
         sender_card = sender.get("card") or sender.get("nickname", "小汐")
 
         if msg_type == "group" and group_id and raw:
+            if not is_group_enabled(self, group_id):
+                return
+            _log_chat_message(
+                self, "GROUP_OUT", raw, group_id=group_id,
+                user_id=self.config.get("bot_qq", 0), sender_name=sender_card,
+            )
             bot_qq = self.config.get("bot_qq", 0)
             # Store in buffer so _build_chat_context sees it
             self._group_msg_buffer[group_id].append(
@@ -329,8 +393,10 @@ class Dispatcher:
             log.debug("[SELF] group=%s said: %s", group_id, raw[:60])
 
         elif msg_type == "private" and raw:
-            # Private chat self-messages: log for future context
-            # Currently private AI context doesn't use buffer, but log for debug
+            _log_chat_message(
+                self, "PRIVATE_OUT", raw,
+                user_id=event.get("target_id") or user_id, sender_name=sender_card,
+            )
             log.debug("[SELF] private said: %s", raw[:60])
 
     async def _handle_message(self, event):
@@ -363,6 +429,12 @@ class Dispatcher:
 
         # Group message handling
         if msg_type == "group" and raw:
+            group_enabled = is_group_enabled(self, group_id)
+            if group_enabled:
+                _log_chat_message(
+                    self, "GROUP_IN", raw, group_id=group_id,
+                    user_id=user_id, sender_name=sender_card,
+                )
             # enable/disable are special - only bot_qq can use
             cmd_lower = raw.strip().lower()
             if cmd_lower == prefix + "enable" or cmd_lower == prefix + "disable" or \
@@ -383,7 +455,7 @@ class Dispatcher:
                     )
                 return
 
-            if not is_group_enabled(self, group_id):
+            if not group_enabled:
                 return
 
             gcfg = get_group_config(self, group_id)
@@ -452,6 +524,10 @@ class Dispatcher:
                                                 group_id, user_id, sender_role, sender_card, message)
 
         elif msg_type == "private" and raw:
+            _log_chat_message(
+                self, "PRIVATE_IN", raw,
+                user_id=user_id, sender_name=sender_card,
+            )
             if user_id == self.config.get("bot_owner"):
                 await self._handle_owner_private(user_id, message, raw, sender, message_id)
             else:
@@ -548,6 +624,15 @@ class Dispatcher:
                 await self._run_command(cmd_name, "", group_id, user_id, sender_role, sender_card, message)
             return
 
+        # AI-assisted admin intent: the target must come from a real @ segment.
+        # The model only chooses the action/duration; permissions stay in code.
+        from event_policy import automation_enabled
+        if (is_at_others
+                and automation_enabled(self.config, "ai_admin_intent", default=False)
+                and await self._maybe_execute_admin_intent(
+                    group_id, user_id, sender_role, raw, message)):
+            return
+
         # === NEW AI CHAT LOGIC: Layer 1 rules + Layer 2 AI decision ===
         if feats.get("ai_chat", True):
             from .ai import handle_ai_chat, search_web
@@ -604,42 +689,19 @@ class Dispatcher:
                     self._record_rate_limit(group_id)
                 return
             
-            # For non-explicit triggers: use local attention scoring first.
-            if self._is_short_or_image_only(message, raw):
-                return
-            # Skip if message @mentions someone else (clearly not talking to us)
-            if is_at_others:
-                self._group_at_others_ts[group_id] = time.time()
-                return
-            # Also skip the next 1-2 messages after someone was @-mentioned
-            # (they're continuing a conversation with someone specific, not us)
-            last_at_others = self._group_at_others_ts.get(group_id, 0)
-            if last_at_others and (time.time() - last_at_others) < 15:
-                return
-            
+            # Use a cheap local gate before spending a model request on social
+            # relevance. Follow-ups remain responsive; unsolicited interjections
+            # are deliberately rate-limited on low-resource hosts.
             is_followup = self._check_followup(group_id, user_id)
             if is_followup or feats.get("interject", True):
                 now_ts = time.time()
-                
-                # === Tiered cooldown logic ===
-                if is_followup:
-                    # Followup chain limit: max 2 consecutive followup replies per group
-                    fup_count = self._group_followup_count.get(group_id, 0)
-                    if fup_count >= 2:
-                        return  # Already replied twice in a row, let others talk
-                else:
-                    # Regular interjection: enforce 90s cooldown
-                    last_interject = self._group_interject_ts.get(group_id, 0)
-                    if (now_ts - last_interject) < 90:
-                        return
-                    last_judge = self._group_last_ai_judge.get(group_id, 0)
-                    judge_cooldown = self.config.get("runtime", {}).get("non_explicit_judge_cooldown", 180)
-                    if (now_ts - last_judge) < judge_cooldown:
-                        return
-                    # Reset followup count when starting a fresh interjection
-                    self._group_followup_count[group_id] = 0
-                    self._group_last_ai_judge[group_id] = now_ts
-                
+
+                runtime = self.config.get("runtime", {})
+                last_judge = self._group_last_ai_judge.get(group_id, 0)
+                judge_cooldown = runtime.get("non_explicit_judge_cooldown", 180)
+                if not is_followup and now_ts - last_judge < judge_cooldown:
+                    return
+
                 from .ai import search_web, handle_ai_chat
                 chat_ctx = self._build_chat_context(group_id)
                 decision = self._decide_ai_participation(
@@ -648,29 +710,28 @@ class Dispatcher:
                 )
                 self._record_decision(group_id, decision)
                 if decision.get("should_reply"):
-                    # === Stage 2: AI judgment (for interjections, skip followups to save cost) ===
+                    ai_choice = "JOIN"
                     if not is_followup:
+                        self._group_last_ai_judge[group_id] = now_ts
                         ai_choice = await self._ai_judge_participation(
                             group_id, user_id, sender_card, raw, chat_ctx or "",
                             is_followup, is_image_msg,
                         )
-                        if ai_choice == "SKIP":
-                            decision["should_reply"] = False
-                            decision["intent"] = "SKIP"
-                            decision["reasons"].append("AI判断不该说话")
-                            self._record_decision(group_id, decision)
-                            return
-                        elif ai_choice == "REACT":
-                            # Send emoji reaction instead of full reply
-                            if message_id:
-                                await self._send_emoji_reaction(group_id, message_id, raw)
-                            decision["should_reply"] = False
-                            decision["intent"] = "REACT"
-                            decision["reasons"].append("AI选择表情表态")
-                            self._record_decision(group_id, decision)
-                            self._group_interject_ts[group_id] = time.time()
-                            return
-                        # ai_choice == "JOIN": continue to full reply generation
+                    if ai_choice == "SKIP":
+                        decision["should_reply"] = False
+                        decision["intent"] = "SKIP"
+                        decision["reasons"].append("AI判断不该说话")
+                        self._record_decision(group_id, decision)
+                        return
+                    if ai_choice == "REACT":
+                        if message_id:
+                            await self._send_emoji_reaction(group_id, message_id, raw)
+                        decision["should_reply"] = False
+                        decision["intent"] = "REACT"
+                        decision["reasons"].append("AI选择表情表态")
+                        self._record_decision(group_id, decision)
+                        self._group_interject_ts[group_id] = time.time()
+                        return
 
                     allowed, remaining = self._check_rate_limit(group_id)
                     if not allowed:
@@ -726,6 +787,47 @@ class Dispatcher:
         # Non-command messages from owner → treat as normal AI chat
         await self._handle_private_ai_chat(user_id, message, raw, sender, message_id)
 
+    async def _maybe_execute_admin_intent(self, group_id, actor_id, sender_role, raw, message):
+        mentions = self._extract_mentions(message)
+        if not mentions:
+            return False
+        text = re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
+        if not any(word in text for word in ("踢", "禁言", "解禁", "闭嘴", "放出来")):
+            return False
+        from .permission import get_user_level, LEVEL_ADMIN
+        level, _ = await get_user_level(self, group_id, actor_id, sender_role)
+        if actor_id != self.config.get("bot_owner") and level < LEVEL_ADMIN:
+            return False
+        from .ai import _call_deepseek
+        prompt = (
+            "把管理员的QQ群管理语句解析为JSON。只允许 action=kick_member、ban_member、"
+            "unban_member、none。duration为秒，默认禁言600秒，最大2592000秒。"
+            "只输出JSON，不要解释。目标用户由系统提供，不要输出用户号。"
+        )
+        result = await _call_deepseek(
+            self.config,
+            [{"role": "system", "content": prompt}, {"role": "user", "content": text[:160]}],
+            max_tokens=60, temperature=0.1, session=self.client.session)
+        try:
+            match = re.search(r"\{.*\}", result or "", re.S)
+            payload = json.loads(match.group(0) if match else "{}")
+            action = payload.get("action", "none")
+            if action == "none":
+                return False
+            from ai_tools import execute_admin_tool
+            tool_result = await execute_admin_tool(self, action, {
+                "group_id": group_id, "user_id": mentions[0],
+                "duration": payload.get("duration", 600),
+            }, actor_id, sender_role)
+            if tool_result.get("ok"):
+                await self._reply(group_id, actor_id, "处理好了")
+            else:
+                await self._reply(group_id, actor_id, "没处理成：" + str(tool_result.get("error") or tool_result.get("message", "未知错误")))
+            return True
+        except Exception as exc:
+            log.debug("Admin intent parse failed: %s", exc)
+            return False
+
     async def _handle_owner_command(self, cmd, args, user_id, sender, message, raw):
         """Route owner private commands to handlers."""
         sender_name = sender.get("nickname", str(user_id))
@@ -737,8 +839,12 @@ class Dispatcher:
 群组: {groups_list}
 
 /status - 查看状态
+/AI状态 - 查看 Agnes 和 DeepSeek 运行状态
+/打卡状态 - 查看定时群打卡状态
+/打卡测试 <群号> - 手动测试原生群打卡
 /list - 查看所有群组数据概览
 /log N - 查看最近N条日志 (默认30)
+/chatlog N - 查看最近N条聊天日志 (默认30)
 /bl list - 查看黑名单
 /bl add <群号> <QQ> <小时> - 添加黑名单
 /bl remove <群号> <QQ> - 移除黑名单
@@ -762,6 +868,23 @@ class Dispatcher:
         elif cmd in ("enable", "disable"):
             await self._run_command(cmd, args, None, user_id, "member", sender_name, message)
 
+        elif cmd in ("ai状态", "aistatus"):
+            from .ai import format_ai_provider_status
+            await self._reply(None, user_id, format_ai_provider_status(self.config))
+
+        elif cmd in ("打卡状态", "checkinstatus"):
+            from .scheduler import format_checkin_status
+            await self._reply(None, user_id, format_checkin_status(self))
+
+        elif cmd in ("打卡测试", "checkintest"):
+            gid = args.strip()
+            if not gid.isdigit():
+                await self._reply(None, user_id, "用法：/打卡测试 群号")
+                return
+            from .scheduler import run_manual_checkin
+            _ok, result_text = await run_manual_checkin(self, gid)
+            await self._reply(None, user_id, result_text)
+
         elif cmd in self._private_group_command_names():
             target_group, rest_args = self._parse_private_group_args(args)
             if not target_group:
@@ -771,7 +894,7 @@ class Dispatcher:
                 cmd, rest_args, target_group, user_id, "member", sender_name, message,
             )
 
-        elif cmd == "log":
+        elif cmd in ("log", "chatlog", "聊天日志"):
             n = 30
             if args.strip():
                 try:
@@ -779,11 +902,11 @@ class Dispatcher:
                 except Exception:
                     pass
             try:
-                import subprocess
-                log_path = os.path.join(_ROOT, "bot.log")
-                result = subprocess.run(["tail", f"-n{n}", log_path],
-                                        capture_output=True, text=True, timeout=5)
-                await self._reply(None, user_id, result.stdout[-2000:] or "无日志")
+                filename = "chat.log" if cmd in ("chatlog", "聊天日志") else "bot.log"
+                log_path = os.path.join(_ROOT, filename)
+                text = await asyncio.to_thread(
+                    _read_tail_text, log_path, n, 65536, 4000 if filename == "chat.log" else 2000)
+                await self._reply(None, user_id, text or "无日志")
             except Exception as e:
                 await self._reply(None, user_id, f"读取日志失败: {e}")
 
@@ -816,10 +939,11 @@ class Dispatcher:
                 await self._reply(None, user_id, f"移出黑名单了：群 {parts2[1]}，QQ {parts2[2]}")
 
         elif cmd == "status" or cmd == "state":
-            import subprocess
             try:
-                bot_state = subprocess.run(["systemctl", "is-active", "qqbot.service"], capture_output=True, text=True, timeout=3)
-                napcat_state = subprocess.run(["systemctl", "is-active", "napcat.service"], capture_output=True, text=True, timeout=3)
+                bot_state, napcat_state = await asyncio.gather(
+                    _service_state("qqbot.service"),
+                    _service_state("napcat.service"),
+                )
                 def _cn_state(text):
                     value = (text or "").strip()
                     return {"active": "运行中", "inactive": "未运行", "failed": "异常", "activating": "启动中"}.get(value, value or "未知")
@@ -842,8 +966,8 @@ class Dispatcher:
                     mem_text = f"内存：可用 {available} 兆 / 总计 {total} 兆\n交换分区：可用 {swap_free} 兆 / 总计 {swap_total} 兆"
                 except Exception:
                     mem_text = "内存：未知"
-                status = f"NapCat：{_cn_state(napcat_state.stdout)}\n"
-                status += f"小汐：{_cn_state(bot_state.stdout)}\n"
+                status = f"NapCat：{_cn_state(napcat_state)}\n"
+                status += f"小汐：{_cn_state(bot_state)}\n"
                 status += mem_text + "\n"
                 status += uptime_text
                 await self._reply(None, user_id, status)
@@ -987,37 +1111,41 @@ class Dispatcher:
         if not hasattr(self, "_friend_cache"):
             self._friend_cache = set()
             self._friend_cache_ts = 0
-            self._friend_fetching = False  # prevent concurrent fetches
         if self._friend_cache and now - self._friend_cache_ts < 3600:
             return user_id in self._friend_cache
-        # Prevent concurrent refresh storms
-        if getattr(self, "_friend_fetching", False):
+        if now < self._friend_retry_after:
             return user_id in self._friend_cache
-        self._friend_fetching = True
-        try:
-            result = await self.client.call("get_friend_list", {})
-            if result.get("status") == "ok":
-                friends = set()
-                for f in result.get("data", []):
-                    friends.add(int(f.get("user_id", 0)))
-                self._friend_cache = friends
+
+        async with self._friend_refresh_lock:
+            now = time.time()
+            if self._friend_cache and now - self._friend_cache_ts < 3600:
+                return user_id in self._friend_cache
+            if now < self._friend_retry_after:
+                return user_id in self._friend_cache
+            try:
+                result = await self.client.call("get_friend_list", {})
+                if result.get("status") == "ok":
+                    friends = {
+                        int(item.get("user_id", 0))
+                        for item in result.get("data", [])
+                        if item.get("user_id")
+                    }
+                    self._friend_cache = friends
+                    self._friend_cache_ts = now
+                    self._friend_retry_after = 0.0
+                    log.info("Friend cache loaded on demand: %d friends", len(friends))
+                    return user_id in friends
+                log.warning("get_friend_list returned %s", result.get("status", "?"))
+            except Exception as e:
+                log.warning("get_friend_list failed: %s", e)
+
+            self._friend_retry_after = now + 60
+            if self._friend_cache:
                 self._friend_cache_ts = now
-                log.info("Friend cache loaded on demand: %d friends", len(friends))
-                return user_id in friends
-            # API returned non-ok status
-            log.warning("get_friend_list returned %s", result.get("status", "?"))
-        except Exception as e:
-            log.warning("get_friend_list failed: %s", e)
-        finally:
-            self._friend_fetching = False
-        # API failed: extend TTL of existing cache so we don't hammer it
-        if self._friend_cache:
-            self._friend_cache_ts = now + 3600  # 1h grace
-            log.debug("Friend API failed, using stale cache (%d entries)", len(self._friend_cache))
-            return user_id in self._friend_cache
-        # Cache is empty (first-ever call failed): be lenient
-        log.warning("Friend list never loaded, allowing user %s through", user_id)
-        return True
+                log.debug("Friend API failed, using stale cache (%d entries)", len(self._friend_cache))
+                return user_id in self._friend_cache
+            log.warning("Friend list never loaded, rejecting user %s until retry", user_id)
+            return False
 
     async def _handle_private_ai_chat(self, user_id, message, raw, sender, message_id):
         """AI auto-reply for non-owner private chat. Friends only.
@@ -1085,8 +1213,8 @@ class Dispatcher:
             # Call AI — it decides whether to reply and what to say
             from .ai import handle_ai_chat
             consecutive = self._private_consecutive_replies.get(user_id, 0)
-            log.info("Private AI evaluating: %s(%s) msg='%s' img=%s consec=%d",
-                     sender_name, user_id, clean_raw[:60], bool(img_ctx), consecutive)
+            log.info("Private AI evaluating: %s(%s) img=%s consec=%d",
+                     sender_name, user_id, bool(img_ctx), consecutive)
             result = await handle_ai_chat(
                 self, None, user_id, clean_raw, sender_name,
                 image_context=img_ctx or "",
@@ -1503,19 +1631,17 @@ class Dispatcher:
         SKIP=stay silent, REACT=emoji reaction only, JOIN=full reply.
         Followups skip this stage to save cost (already high confidence).
         """
-        # Followups already high confidence — skip AI judgment to save API cost
-        if is_followup:
-            return "JOIN"
-
         from .ai import _call_deepseek
         config = self.config
 
         sys_prompt = (
             "你是小汐的内心判断。看群聊记录，决定要不要说话。\n"
-            "判断标准：消息是跟小汐有关吗？小汐了解这个话题吗？现在插话合适吗？\n"
+            "小汐性格安静偏高冷，默认选择沉默。判断消息是否真的需要她参与："
+            "消息是否明确和她有关、是否真的在问她、她是否确定了解、现在插话是否自然。"
+            "即使是接着小汐说的话，如果对方在收尾、只回嗯好行、或已经不需要回应，也应 SKIP。\n"
             "SKIP - 跟我无关/不了解/别人在私聊/氛围不适合插话\n"
-            "REACT - 跟我有关但不用认真回，发个表情表态就行\n"
-            "JOIN - 应该认真回复\n"
+            "REACT - 明确和我有关但一句话都没必要说，只做轻量表情回应\n"
+            "JOIN - 明确需要回复，且我能自然、有把握地说一句\n"
             "只回答这三个词之一，不要解释。"
         )
 
@@ -1523,7 +1649,10 @@ class Dispatcher:
         user_prompt = (
             f"【最近群聊】\n{ctx}\n\n"
             f"【当前消息】{sender_name}: {raw_text[:200]}\n\n"
-            f"小汐要不要说话？"
+            f"【状态】像接话={is_followup}，有图片={is_image_msg}，"
+            f"最近连续回复={self._group_consecutive_replies.get(group_id, 0)}，"
+            f"距上次发言约={int(time.time() - self._group_conversation_state[group_id].get('last_bot_ts', 0)) if self._group_conversation_state[group_id].get('last_bot_ts', 0) else -1}秒。\n"
+            "综合完整语境自行判断 SKIP、REACT 或 JOIN。"
         )
 
         messages = [
@@ -1547,17 +1676,17 @@ class Dispatcher:
         return "SKIP"
 
     _EMOJI_REACTION_MAP = {
-        "😂": ["笑死", "哈哈", "好笑", "绷不住", "草", "搞笑"],
-        "😭": ["惨", "呜呜", "哭", "太难了", "心疼", "伤心"],
-        "👍": ["牛", "厉害", "强", "赞", "666", "确实", "好的"],
-        "😱": ["离谱", "震惊", "离谱了", "我靠", "不对劲"],
-        "❤️": ["爱", "喜欢", "可爱", "好看", "好美"],
+        "128514": ["笑死", "哈哈", "好笑", "绷不住", "草", "搞笑"],
+        "128557": ["惨", "呜呜", "哭", "太难了", "心疼", "伤心"],
+        "128077": ["牛", "厉害", "强", "赞", "666", "确实", "好的"],
+        "128561": ["离谱", "震惊", "离谱了", "我靠", "不对劲"],
+        "10084": ["爱", "喜欢", "可爱", "好看", "好美"],
     }
 
     async def _send_emoji_reaction(self, group_id, message_id, raw_text):
         """Send an emoji reaction (表情表态) on a message based on its content."""
         import random as _random
-        emoji_id = "👍"  # default
+        emoji_id = "128077"  # thumbs-up
         for eid, keywords in self._EMOJI_REACTION_MAP.items():
             if any(kw in (raw_text or "") for kw in keywords):
                 emoji_id = eid

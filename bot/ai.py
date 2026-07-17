@@ -22,24 +22,50 @@ _last_replies_by_user = {}  # user_id -> deque of recent AI replies, for anti-ec
 _last_replies_ts = {}  # user_id -> last used timestamp, for cleanup
 _REPLIES_CLEANUP_INTERVAL = 3600  # 1 hour
 _LAST_REPLY_CLEANUP_TS = 0  # monotonic fallback
+_STICKER_LAST_SENT = {}
+_STICKER_DAILY_COUNT = {}
+_PROVIDER_COOLDOWNS = {}
+_PROVIDER_STATS = {}
+_LONG_MEMORY_TASKS = set()
+
+
+def _schedule_long_memory(coro):
+    """Run at most one memory compression task at a time."""
+    if len(_LONG_MEMORY_TASKS) >= 1:
+        coro.close()
+        return None
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError:
+        coro.close()
+        return None
+    _LONG_MEMORY_TASKS.add(task)
+
+    def _done(completed):
+        _LONG_MEMORY_TASKS.discard(completed)
+        if not completed.cancelled() and completed.exception():
+            log.error("Long-memory task failed: %s", completed.exception())
+
+    task.add_done_callback(_done)
+    return task
 
 # ========== PERSONA ==========
 
 PERSONALITY = (
     "你是小汐，20岁，中文系大二。平时上课摸鱼刷手机，回宿舍就打游戏追番。\n"
-    "性格温柔好说话，不调侃不抬杠，别人认真跟你说话你就好好回。\n"
+    "性格安静克制，稍微有点高冷，但不是没礼貌。别人认真跟你说话你就正常回。\n"
     "你的回复原则就三条：\n"
     "1. 知道就说，不知道就说「不清楚诶」「没了解过」，不硬编。\n"
     "2. 别人好好说话你就好好回，别开玩笑别调侃。\n"
     "3. 遇到搞颜色/性骚扰的直接拒绝，用 [R18] 标记回复。\n"
     "\n"
     "你是真人，不是AI助手。不用每句话都回答，不用每件事都帮忙，不用每条消息都回。\n"
-    "像跟朋友聊天那样自然松弛就好。"
+    "像安静的朋友聊天：不主动刷存在感，不追着问，不为了热闹硬接话。"
 )
 
 SAFETY_RULES = (
     "说话风格：\n"
-    "- 语气温柔友好，像跟熟人聊天那样。不要怼人不要阴阳怪气。\n"
+    "- 语气克制自然，稍微高冷。不要客服式热情，也不要怼人阴阳怪气。\n"
     "- 简短自然，多数时候1-2句话。像群友闲聊，不像写作文。\n"
     "- 不用括号动作描写、不用「你好呀」「好呢」「作为AI」等客服语气。\n"
     "- 不确定的事直接说不知道，别编。\n"
@@ -52,7 +78,8 @@ SAFETY_RULES = (
     "- 同一张图发两次以上 → 用「又来了」「这图刚才不是发过了吗」带过。\n"
     "\n"
     "功能标记（需要时使用，不要每条都加）：\n"
-    "- [STICKER:情绪标签] → 发表情包。标签：开心/伤心/生气/无语/惊讶/害羞/尴尬/得意/困惑/拒绝/赞同/嘲讽/安慰/庆祝/卖萌/敷衍/打招呼/告别/晚安/点赞\n"
+    "- [STICKER:情绪标签] → 发表情包。只有确实有表达价值时使用。\n"
+    "- [VOICE] → 将不超过15字的短回复发送为语音；仅在语音比文字自然时使用。\n"
     "- [REPLY] → 引用回复上一条消息（当你想特别针对某人说的话回应时）\n"
     "- [POKE:昵称] → 戳某人一下（对方说了有趣的事或者跟你互动时）\n"
     "- [AT:昵称] → @某人（需要特定对某人说话时）\n"
@@ -61,14 +88,15 @@ SAFETY_RULES = (
     "群聊注意：\n"
     "- 别人@了你、叫了你的名字、在接你的话 → 该回就回。\n"
     "- 别人在跟别人聊天、话题你不懂、你刚说完话 → 潜着就好。\n"
-    "- 大多数时候潜水是正常的——真人群友也不是每条都回。\n"
+    "- 大多数时候潜水是正常的。群里没有明确需要你时，宁可不说。\n"
+    "- 别人已经回答、正在互相聊天、话题只是随口一说时不要插话。\n"
     "\n"
     "私聊注意：\n"
     "- 不用秒回每条消息。有时候看到了等会再回，有时候干脆不回。\n"
     "- 对方只发了表情包没说话 → 可以不回。\n"
     "- 对方回复很敷衍（「嗯」「好」「行」）→ 说明不想聊了，别追着回。\n"
     "- 聊了好几轮了可以自然收尾（「先溜了」「晚点聊」「睡了」）。\n"
-    "- 像跟真朋友聊天那样松弛。"
+    "- 不主动追问、不连续发很多条。没必要继续时直接不回。"
 )
 
 
@@ -228,10 +256,13 @@ def _cleanup_replies_by_user():
 
 def _save_memory(group_id, memory, config=None, session=None):
     """Save working memory. Caps at 20, triggers compression to long-term."""
+    from .memory import sanitize_for_memory
     now = time.time()
     for e in memory:
         if "ts" not in e:
             e["ts"] = now
+        if "content" in e:
+            e["content"] = sanitize_for_memory(e.get("content", ""))
     # Periodic cleanup: evict groups not accessed in > 1 hour
     stale = [g for g, ts in _memory_timestamps.items() if now - ts > 3600]
     for g in stale:
@@ -254,14 +285,10 @@ def _save_memory(group_id, memory, config=None, session=None):
     if len(memory) > 20:
         overflow = memory[:len(memory)-20]
         memory = memory[-20:]
-        # Trigger async compression (fire-and-forget)
+        # Trigger bounded async compression.
         runtime = config.get("runtime", {}) if config else {}
         if config and session and overflow and runtime.get("enable_long_memory_compress", False):
-            import asyncio as _asyncio_save
-            try:
-                _asyncio_save.create_task(_compress_to_long_term(group_id, overflow, config, session))
-            except RuntimeError:
-                pass
+            _schedule_long_memory(_compress_to_long_term(group_id, overflow, config, session))
     _memories[group_id] = memory
     _memory_timestamps[group_id] = now
     path = _memory_file(group_id)
@@ -297,10 +324,13 @@ def _load_user_memory(group_id, user_id):
     return []
 
 def _save_user_memory(group_id, user_id, memory, config=None):
+    from .memory import sanitize_for_memory
     now = time.time()
     for e in memory:
         if "ts" not in e:
             e["ts"] = now
+        if "content" in e:
+            e["content"] = sanitize_for_memory(e.get("content", ""))
     # Cap at user_memory_max from config (default 15)
     max_entries = int((config or {}).get("user_memory_max", 15))
     if len(memory) > max_entries:
@@ -395,25 +425,15 @@ async def _compress_private_to_long(user_id, old_entries, config, session):
         + "\n".join(parts[-8:])
     )
     try:
-        headers = {"Authorization": "Bearer {}".format(config["deepseek_api_key"]), "Content-Type": "application/json"}
-        payload = {
-            "model": config.get("deepseek_model", "deepseek-v4-flash"),
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 80, "temperature": 0.3,
-        }
-        if session:
-            async with session.post(
-                "{}/v1/chat/completions".format(config.get("deepseek_base_url", "https://api.deepseek.com")),
-                headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    summary = data["choices"][0]["message"]["content"].strip()
-                    if summary and len(summary) > 5:
-                        long = _load_private_long_memory(user_id)
-                        long.append({"ts": time.time(), "content": summary})
-                        _save_private_long_memory(user_id, long)
-                        log.info("Private long-term memory saved for user %s: %s", user_id, summary[:60])
+        summary = await _call_deepseek(
+            config, [{"role": "user", "content": prompt}],
+            max_tokens=80, temperature=0.3, session=session,
+        )
+        if summary and len(summary) > 5:
+            long = _load_private_long_memory(user_id)
+            long.append({"ts": time.time(), "content": summary})
+            _save_private_long_memory(user_id, long)
+            log.info("Private long-term memory saved for user %s: %s", user_id, summary[:60])
     except Exception as e:
         log.error("Private long-term compression failed: %s", e)
 
@@ -432,25 +452,15 @@ async def _compress_to_long_term(group_id, old_entries, config, session):
         + "\n".join(parts[-8:])
     )
     try:
-        headers = {"Authorization": "Bearer {}".format(config["deepseek_api_key"]), "Content-Type": "application/json"}
-        payload = {
-            "model": config.get("deepseek_model", "deepseek-v4-flash"),
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 80, "temperature": 0.3,
-        }
-        if session:
-            async with session.post(
-                "{}/v1/chat/completions".format(config.get("deepseek_base_url", "https://api.deepseek.com")),
-                headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    summary = data["choices"][0]["message"]["content"].strip()
-                    if summary and len(summary) > 5:
-                        long = _load_long_memory(group_id)
-                        long.append({"ts": time.time(), "content": summary})
-                        _save_long_memory(group_id, long)
-                        log.info("Long-term memory saved for group %s: %s", group_id, summary[:60])
+        summary = await _call_deepseek(
+            config, [{"role": "user", "content": prompt}],
+            max_tokens=80, temperature=0.3, session=session,
+        )
+        if summary and len(summary) > 5:
+            long = _load_long_memory(group_id)
+            long.append({"ts": time.time(), "content": summary})
+            _save_long_memory(group_id, long)
+            log.info("Long-term memory saved for group %s: %s", group_id, summary[:60])
     except Exception as e:
         log.error("Long-term compression failed: %s", e)
 
@@ -572,9 +582,36 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
     agnes_cfg = _get_agnes_config(config)
     deepseek_cfg = _get_deepseek_config(config)
 
-    async def _call_api(cfg, model_label, use_session):
+    async def _call_api(cfg, model_label, use_session, timeout_seconds):
         if not cfg["api_key"]:
             return None
+        provider_key = (cfg["base_url"], cfg["model"])
+        stats = _PROVIDER_STATS.setdefault(model_label, {
+            "attempts": 0,
+            "successes": 0,
+            "failures": 0,
+            "last_attempt": 0,
+            "last_success": 0,
+            "last_failure": 0,
+            "last_latency_seconds": None,
+            "last_error": "",
+        })
+        if _PROVIDER_COOLDOWNS.get(provider_key, 0) > time.monotonic():
+            return None
+        stats["attempts"] += 1
+        stats["last_attempt"] = time.time()
+        started_at = time.monotonic()
+
+        def _record_result(success, error=""):
+            stats["last_latency_seconds"] = round(time.monotonic() - started_at, 3)
+            if success:
+                stats["successes"] += 1
+                stats["last_success"] = time.time()
+                stats["last_error"] = ""
+            else:
+                stats["failures"] += 1
+                stats["last_failure"] = time.time()
+                stats["last_error"] = str(error or "unknown")[:120]
         headers = {
             "Authorization": f"Bearer {cfg['api_key']}",
             "Content-Type": "application/json"
@@ -591,18 +628,26 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
         url = f"{cfg['base_url']}/chat/completions"
 
         async def _do_post(sess):
+            request_timeout = max(5, min(30, int(timeout_seconds)))
             async with sess.post(url, headers=headers, json=payload,
-                                timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                                timeout=aiohttp.ClientTimeout(total=request_timeout)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     content_text = data["choices"][0]["message"]["content"].strip()
+                    _PROVIDER_COOLDOWNS.pop(provider_key, None)
                     if not content_text:
+                        _record_result(False, "empty_content")
                         log.warning("%s returned empty content. finish_reason=%s",
                                    model_label, data["choices"][0].get("finish_reason", "?"))
+                    else:
+                        _record_result(True)
                     return content_text
                 else:
                     body = await resp.text()
+                    _record_result(False, "HTTP {}".format(resp.status))
                     log.warning("%s API returned %d: %s", model_label, resp.status, body[:200])
+                    cooldown = 3600 if resp.status in (400, 401, 403, 404) else 60
+                    _PROVIDER_COOLDOWNS[provider_key] = time.monotonic() + cooldown
                     return None  # Signal caller to try fallback
 
         try:
@@ -611,26 +656,146 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
             async with aiohttp.ClientSession() as s:
                 return await _do_post(s)
         except asyncio.TimeoutError:
+            _record_result(False, "timeout")
             log.warning("%s API timeout", model_label)
+            _PROVIDER_COOLDOWNS[provider_key] = time.monotonic() + 60
         except Exception as e:
+            _record_result(False, type(e).__name__)
             log.error("%s API error: %s", model_label, e)
+            _PROVIDER_COOLDOWNS[provider_key] = time.monotonic() + 30
         return None
 
-    # Step 1: Try Agnes first
-    if agnes_cfg["api_key"]:
-        result = await _call_api(agnes_cfg, "Agnes", session)
-        if result:
-            return result
-        log.info("Agnes failed or returned empty, falling back to DeepSeek")
+    runtime = config.get("runtime", {})
+    agnes_timeout = runtime.get("agnes_timeout_seconds", runtime.get("ai_timeout_seconds", 15))
+    deepseek_timeout = runtime.get("deepseek_timeout_seconds", 20)
+    fallback_delay = max(1.0, min(10.0, float(runtime.get("agnes_fallback_delay_seconds", 4))))
 
-    # Step 2: Fall back to DeepSeek
+    if agnes_cfg["api_key"]:
+        agnes_task = asyncio.create_task(
+            _call_api(agnes_cfg, "Agnes", session, agnes_timeout)
+        )
+        try:
+            result = await asyncio.wait_for(asyncio.shield(agnes_task), timeout=fallback_delay)
+            if result:
+                return result
+            log.info("Agnes failed or returned empty, falling back to DeepSeek")
+        except asyncio.TimeoutError:
+            if deepseek_cfg["api_key"]:
+                log.info("Agnes is slow; starting hedged DeepSeek fallback")
+                deepseek_task = asyncio.create_task(
+                    _call_api(deepseek_cfg, "DeepSeek", session, deepseek_timeout)
+                )
+                pending = {agnes_task, deepseek_task}
+                while pending:
+                    done, pending = await asyncio.wait(
+                        pending, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in done:
+                        result = task.result()
+                        if result:
+                            for other in pending:
+                                other.cancel()
+                            if pending:
+                                await asyncio.gather(*pending, return_exceptions=True)
+                            return result
+                return None
+            return await agnes_task
+
     if deepseek_cfg["api_key"]:
-        return await _call_api(deepseek_cfg, "DeepSeek", session)
+        return await _call_api(deepseek_cfg, "DeepSeek", session, deepseek_timeout)
 
     log.warning("No AI model API key configured (Agnes or DeepSeek)")
     return None
 
+
+def get_ai_provider_status(config):
+    """Return safe, in-memory provider health data without exposing secrets."""
+    providers = (
+        ("Agnes", _get_agnes_config(config)),
+        ("DeepSeek", _get_deepseek_config(config)),
+    )
+    now = time.monotonic()
+    result = []
+    for label, cfg in providers:
+        stats = dict(_PROVIDER_STATS.get(label, {}))
+        provider_key = (cfg["base_url"], cfg["model"])
+        stats.update({
+            "name": label,
+            "model": cfg["model"],
+            "configured": bool(cfg["api_key"]),
+            "cooldown_seconds": max(
+                0, int(_PROVIDER_COOLDOWNS.get(provider_key, 0) - now)),
+        })
+        result.append(stats)
+    return result
+
+
+def format_ai_provider_status(config):
+    def _time_text(timestamp):
+        if not timestamp:
+            return "暂无"
+        return time.strftime("%m-%d %H:%M:%S", time.localtime(timestamp))
+
+    lines = ["AI 供应商状态（本次启动以来）"]
+    for item in get_ai_provider_status(config):
+        name = item["name"]
+        if not item["configured"]:
+            lines.append("{}：未配置".format(name))
+            continue
+        cooldown = item.get("cooldown_seconds", 0)
+        state = "冷却中 {}秒".format(cooldown) if cooldown else "可用"
+        latency = item.get("last_latency_seconds")
+        latency_text = "暂无" if latency is None else "{:.2f}秒".format(latency)
+        lines.append(
+            "{}（{}）：{}\n"
+            "  成功 {}/失败 {}，最近耗时 {}\n"
+            "  最近成功 {}，最近失败 {}{}".format(
+                name, item["model"], state,
+                item.get("successes", 0), item.get("failures", 0), latency_text,
+                _time_text(item.get("last_success")),
+                _time_text(item.get("last_failure")),
+                "（{}）".format(item.get("last_error")) if item.get("last_error") else "",
+            )
+        )
+    fallback_delay = config.get("runtime", {}).get("agnes_fallback_delay_seconds", 4)
+    lines.append("Agnes 超过 {} 秒时并行启动 DeepSeek 兜底。".format(fallback_delay))
+    return "\n".join(lines)
+
 # _call_deepseek_vision removed - DeepSeek API does not support vision models
+
+
+async def _await_with_private_typing(dispatcher, user_id, awaitable):
+    """Keep QQ's private typing state balanced around one AI request."""
+    started = False
+    try:
+        try:
+            result = await dispatcher.client.call("set_input_status", {
+                "user_id": user_id, "event_type": 1,
+            })
+            started = result.get("status") == "ok" if isinstance(result, dict) else False
+        except Exception:
+            pass
+        return await awaitable
+    finally:
+        if started:
+            try:
+                await dispatcher.client.call("set_input_status", {
+                    "user_id": user_id, "event_type": 0,
+                })
+            except Exception:
+                pass
+
+
+async def _notify_ai_unavailable(dispatcher, group_id, user_id, explicit=False):
+    """Tell direct callers about an outage without adding group-chat noise."""
+    if group_id and not explicit:
+        return False
+    text = "刚才接口有点卡，等会再叫我一下"
+    if group_id:
+        result = await dispatcher.client.send_group_msg_with_at(group_id, text, [user_id])
+    else:
+        result = await dispatcher.client.send_private_msg(user_id, text)
+    return isinstance(result, dict) and result.get("status") == "ok"
 
 
 # ========== VISION API (jeniya.cn) ==========
@@ -913,7 +1078,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         '对方只回「嗯」「好」「行」「知道了」→ 说明不想聊了，打住。\n'
         '聊得差不多了可以自然收尾（「先溜了」「晚点聊」「睡了」）。\n'
         '遇到不确定的事就说不知道，别编。\n'
-        '像跟真朋友聊天那样自然，放松，随意。'
+        '像安静的朋友聊天，克制一点，不主动追问，不需要每条都回。'
         )
 
     if chat_hint:
@@ -977,90 +1142,36 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     if clean_msg is not None:
         messages.append({"role": "user", "content": f"{sender_name}: {clean_msg}"})
 
+    # Allow one bounded, read-only NapCat tool request before the final reply.
+    if group_id and _should_consider_napcat_tool(original_clean_msg or raw_message):
+        tool_result = await _maybe_call_napcat_tool(
+            dispatcher, group_id, user_id, original_clean_msg or raw_message, chat_context)
+        if tool_result:
+            messages.append({"role": "system", "content": "【NapCat工具查询结果】\n" + tool_result})
+
     temperature = 0.65
 
-    # Human-like delay: power-law distribution (simulates real phone-checking patterns)
+    # Keep a small typing jitter without occupying scarce event workers for
+    # tens of seconds. Provider and vision latency already add natural delay.
     has_image = bool(image_context)
     has_search = bool(web_search_results or web_text)
     context_key = f"private_{user_id}" if not group_id else str(group_id)
-    last_ts = _last_reply_ts.get(context_key, 0)
-
-    # Power-law delay: most replies fast, some slow, rare very slow
     roll = random.random()
-    if roll < 0.05:
-        delay = random.uniform(0.5, 2.0)   # 5%: already looking at phone
-    elif roll < 0.65:
-        delay = random.uniform(2.0, 7.0)   # 60%: glanced and replied
-    elif roll < 0.88:
-        delay = random.uniform(8.0, 20.0)  # 23%: doing something else
-    else:
-        delay = random.uniform(22.0, 50.0) # 12%: away from phone
-
-    # Late-night: reply slower (sleepier)
-    if is_late_night:
-        delay *= random.uniform(1.3, 2.5)
-
-    # Image/search already took time → reply faster
-    if has_image or has_search:
-        delay *= random.uniform(0.35, 0.65)
-
-    # If last reply was > 3 min ago, add a bit (need to re-read context)
-    if (time.time() - last_ts) > 180:
-        delay += random.uniform(1.0, 4.0)
-
-    # --- Private chat: natural typing delay (short, based on message pacing) ---
     is_private = not group_id
     if is_private:
-        # Private chat is just typing — no "away from phone" simulation.
-        # Delay is short and natural: 1-4 seconds, like a real person typing.
-        delay = random.uniform(1.0, 4.0)
-        # Late night: a tiny bit slower (sleepier typing)
-        if is_late_night:
-            delay += random.uniform(0.5, 2.0)
-
-    # Clamp to reasonable range
-    delay = max(0.5, min(60.0, delay))
+        delay = random.uniform(0.4, 1.8)
+    else:
+        delay = random.uniform(0.8, 3.0)
+    if is_late_night:
+        delay += random.uniform(0.2, 0.8)
+    if has_image or has_search:
+        delay *= 0.6
+    delay = max(0.2, min(4.0, delay))
     log.debug("Human-like delay: %.1fs (roll=%.2f%s%s) for user %s",
               delay, roll,
               " night" if is_late_night else "",
               " img/search" if has_image or has_search else "",
               user_id)
-    # Show "typing..." during delay
-    try:
-        if group_id:
-            await dispatcher.client.call("set_input_status", {
-                "group_id": group_id, "event_type": 1})
-        else:
-            await dispatcher.client.call("set_input_status", {
-                "user_id": user_id, "event_type": 1})
-    except Exception:
-        pass
-    await asyncio.sleep(delay)
-
-    # === Hesitation mode: simulate typing uncertainty ===
-    _hesitation_roll = random.random()
-    _hesitation_threshold = 0.50 if is_late_night else 0.30
-    if _hesitation_roll < _hesitation_threshold:
-        try:
-            # Cancel typing (pause to think)
-            if group_id:
-                await dispatcher.client.call("set_input_status", {"group_id": group_id, "event_type": 0})
-            else:
-                await dispatcher.client.call("set_input_status", {"user_id": user_id, "event_type": 0})
-        except Exception:
-            pass
-        await asyncio.sleep(random.uniform(0.5, 2.0))
-        try:
-            # Resume typing
-            if group_id:
-                await dispatcher.client.call("set_input_status", {"group_id": group_id, "event_type": 1})
-            else:
-                await dispatcher.client.call("set_input_status", {"user_id": user_id, "event_type": 1})
-        except Exception:
-            pass
-        await asyncio.sleep(random.uniform(0.5, 1.5))
-        log.debug("Hesitation mode activated (roll=%.2f) for user %s", _hesitation_roll, user_id)
-
     # Dynamic max_tokens: match reply length to context
     is_question = bool(clean_msg) and ("?" in str(clean_msg) or "？" in str(clean_msg) or
                     any(w in str(clean_msg) for w in ("怎么", "为什么", "如何", "啥", "什么")))
@@ -1077,8 +1188,18 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     else:
         dyn_max_tokens = random.randint(80, 350)  # private chat: wider range
 
-    reply = await _call_deepseek(config, messages, max_tokens=dyn_max_tokens,
-                                  temperature=temperature, session=dispatcher.client.session)
+    async def _delayed_ai_request():
+        await asyncio.sleep(delay)
+        return await _call_deepseek(
+            config, messages, max_tokens=dyn_max_tokens,
+            temperature=temperature, session=dispatcher.client.session,
+        )
+
+    if group_id:
+        reply = await _delayed_ai_request()
+    else:
+        reply = await _await_with_private_typing(
+            dispatcher, user_id, _delayed_ai_request())
 
     # === R18 / inappropriate content interception ===
     # AI uses [R18] marker to flag explicit content - intercept and escalate
@@ -1125,37 +1246,19 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         log.debug("AI chose to skip reply for user %s%s", user_id,
                   f" in group {group_id}" if group_id else "")
         _last_reply_ts[context_key] = time.time()
-        return True  # message processed but nothing sent
+        return False
 
     if not reply or len(reply.strip()) == 0:
-        log.warning("AI returned empty reply for user %s in group %s - retrying once", user_id, group_id)
-        # Retry once with simpler prompt
-        retry_msg = [{"role": "user", "content": f"{sender_name}: {original_clean_msg or raw_message}"}]
-        reply2 = await _call_deepseek(config, [messages[0]] + retry_msg, max_tokens=200,
-                                       temperature=0.8, session=dispatcher.client.session)
-        if reply2:
-            reply2 = _post_process_reply(reply2)
-        if not reply2 or len(reply2.strip()) == 0:
-            log.warning("AI empty after retry for user %s", user_id)
-            return False
-        reply = reply2
+        log.warning("AI returned empty reply for user %s in group %s", user_id, group_id)
+        await _notify_ai_unavailable(
+            dispatcher, group_id, user_id,
+            explicit=(not group_id or reply_intent == "直接回应"),
+        )
+        return False
 
     # Delay removed - web search is free and fast now
 
-    # Slacker mode: occasionally give minimal replies (group chat only)
-    # Private chat: AI decides its own tone via system prompt rules
-    if group_id:
-        slacker_base = 0.06
-        if is_late_night:
-            slacker_base += 0.12
-        elif random.random() < 0.2:
-            slacker_base += 0.06
-        if random.random() < slacker_base:
-            slackers = ["草", "笑死", "确实", "6", "牛的", "哈哈", "确实确实",
-                        "好家伙", "嗯", "对", "行", "真实", "离谱"]
-            reply = random.choice(slackers)
-            log.debug("Slacker mode: replaced reply with '%s' (prob=%.2f)", reply, slacker_base)
-
+    # The model, not a local random branch, decides brevity and tone.
     # === AI-driven sticker: parse [STICKER:xxx] tag ===
     wanted_emotion = None
     _sticker_match = re.search(r'\[STICKER:([^\]]+)\]', reply)
@@ -1184,6 +1287,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                     matches = same_group_tag if same_group_tag else tag_matches
                 if matches:
                     sticker_file = random.choice(matches)["file"]
+                    if not _allow_sticker_send(config, group_id, user_id):
+                        sticker_file = None
                     log.info("AI-driven sticker: emotion=%s -> file=%s (from %d matches, same_group=%s)",
                              wanted_emotion, sticker_file[:16], len(matches),
                              bool(same_group or same_group_tag))
@@ -1220,13 +1325,23 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                     if nick and qq:
                         member_map[nick] = qq
 
-            clean_reply, at_qqs, quote_text = _parse_reply_actions(reply, member_map)
+            clean_reply, tagged_actions = _parse_reply_tags(reply, member_map)
+            at_qqs = [int(a["qq"]) for a in tagged_actions
+                      if a.get("type") == "at" and str(a.get("qq", "")).isdigit()]
+            wants_reply = any(a.get("type") == "reply" for a in tagged_actions)
+            poke_targets = [a.get("target") for a in tagged_actions if a.get("type") == "poke"]
+            # Backward-compatible natural @nickname and quoted-text parsing.
+            clean_reply, legacy_at, quote_text = _parse_reply_actions(clean_reply, member_map)
+            at_qqs.extend(legacy_at)
+            at_qqs = list(dict.fromkeys(at_qqs))[:2]
+            if wants_reply and message_id:
+                quote_text = quote_text or "reply"
             if not clean_reply:
                 clean_reply = reply
 
             # === AI Voice: occasionally send short replies as voice instead of text ===
             voice_used = False
-            if not at_qqs and not quote_text and len(clean_reply) <= 15:
+            if not at_qqs and not quote_text and not sticker_file and len(clean_reply) <= 15 and any(a.get("type") == "voice" for a in tagged_actions):
                 voice_used = await _maybe_send_as_voice(dispatcher, group_id, clean_reply, is_late_night)
 
             if not voice_used:
@@ -1280,6 +1395,9 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                         await dispatcher.client.send_group_msg(group_id, _at_segs)
                     else:
                         await dispatcher.client.send_group_msg(group_id, _segs)
+            for target in poke_targets[:1]:
+                if target:
+                    await dispatcher.client.group_poke(group_id, target)
         except Exception as e:
             log.error("Reply send error: %s", e, exc_info=True)
             await dispatcher.client.send_group_msg(group_id, reply)
@@ -1365,15 +1483,91 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             overflow = user_mem[:len(user_mem) - private_max]
             user_mem = user_mem[-private_max:]
             if config and dispatcher.client.session and len(overflow) >= 4:
-                import asyncio as _asyncio_priv
-                try:
-                    _asyncio_priv.create_task(
-                        _compress_private_to_long(user_id, overflow, config, dispatcher.client.session))
-                except RuntimeError:
-                    pass
+                _schedule_long_memory(
+                    _compress_private_to_long(user_id, overflow, config, dispatcher.client.session)
+                )
+        from .memory import sanitize_for_memory
+        for entry in user_mem:
+            if "content" in entry:
+                entry["content"] = sanitize_for_memory(entry.get("content", ""))
         atomic_write_json(_user_memory_file(0, user_id), user_mem)
 
     return True
+
+
+def _allow_sticker_send(config, group_id, user_id):
+    """Resource/spam boundary only; AI still decides whether a sticker fits."""
+    cfg = config.get("sticker_mode", {})
+    now = time.time()
+    key = "g:{}".format(group_id) if group_id else "u:{}".format(user_id)
+    cooldown = int(cfg.get("group_cooldown_seconds", 180) if group_id
+                   else cfg.get("private_cooldown_seconds", 90))
+    if now - _STICKER_LAST_SENT.get(key, 0) < cooldown:
+        return False
+    day_key = time.strftime("%Y%m%d") + ":" + key
+    limit = int(cfg.get("daily_send_limit", 12))
+    if _STICKER_DAILY_COUNT.get(day_key, 0) >= limit:
+        return False
+    _STICKER_LAST_SENT[key] = now
+    _STICKER_DAILY_COUNT[day_key] = _STICKER_DAILY_COUNT.get(day_key, 0) + 1
+    if len(_STICKER_DAILY_COUNT) > 500:
+        today = time.strftime("%Y%m%d") + ":"
+        for item in list(_STICKER_DAILY_COUNT):
+            if not item.startswith(today):
+                _STICKER_DAILY_COUNT.pop(item, None)
+    return True
+
+
+def _should_consider_napcat_tool(text):
+    value = str(text or "").lower()
+    keywords = (
+        "群信息", "群资料", "群人数", "成员", "谁是", "群主", "管理员",
+        "聊天记录", "历史消息", "刚才说", "群文件", "文件链接", "群公告",
+        "群荣誉", "龙王", "禁言列表", "qq资料", "qq信息",
+    )
+    return any(keyword in value for keyword in keywords)
+
+
+async def _maybe_call_napcat_tool(dispatcher, group_id, user_id, text, chat_context):
+    """Ask the model for at most one whitelisted read-only tool call."""
+    prompt = (
+        "你负责选择是否调用QQ/NapCat只读工具。只输出一行JSON或NONE。\n"
+        "可用工具：\n"
+        "get_group_info 参数 group_id\n"
+        "get_member_info 参数 group_id,user_id\n"
+        "get_recent_messages 参数 group_id,count(1-20)\n"
+        "get_group_files 参数 group_id,keyword\n"
+        "get_group_notice 参数 group_id\n"
+        "get_group_honor 参数 group_id,honor_type\n"
+        "get_shut_list 参数 group_id\n"
+        "get_friend_info 参数 user_id\n"
+        "当前群号和用户号由系统提供，不得编造。\n"
+        "示例：{\"tool\":\"get_group_info\",\"arguments\":{}}\n"
+        "如果无需工具只输出NONE。"
+    )
+    user_prompt = "当前群={} 当前用户={} 消息={}\n最近上下文={}".format(
+        group_id, user_id, str(text)[:160], str(chat_context or "")[-500:])
+    decision = await _call_deepseek(
+        dispatcher.config,
+        [{"role": "system", "content": prompt}, {"role": "user", "content": user_prompt}],
+        max_tokens=80, temperature=0.1, session=dispatcher.client.session)
+    if not decision or decision.strip().upper().startswith("NONE"):
+        return ""
+    try:
+        match = re.search(r'\{.*\}', decision, re.S)
+        payload = json.loads(match.group(0) if match else decision)
+        name = payload.get("tool", "")
+        args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+        if group_id:
+            args["group_id"] = group_id
+        if name == "get_member_info" and not args.get("user_id"):
+            args["user_id"] = user_id
+        from ai_tools import execute_tool, format_tool_result
+        result = await execute_tool(dispatcher, name, args)
+        return format_tool_result(result)
+    except Exception as exc:
+        log.debug("NapCat tool decision ignored: %s", exc)
+        return ""
 
 # ========== RELEVANCE JUDGE ==========
 
@@ -2067,6 +2261,10 @@ def _parse_reply_tags(reply, member_map):
         reply = reply.replace(_at_match.group(0), '@' + nick, 1)
 
     # 4. [REPLY] — flag to reply to the original message
+    if '[VOICE]' in reply:
+        actions.append({"type": "voice"})
+        reply = reply.replace('[VOICE]', '').strip()
+
     if '[REPLY]' in reply:
         actions.append({"type": "reply"})
         reply = reply.replace('[REPLY]', '').strip()
@@ -2112,6 +2310,9 @@ def _should_split_reply(text, is_private=False):
     Splits if text >= 4 chars (private) or >= 8 chars (group).
     Private chat: 75% chance. Group chat: 60%.
     """
+    # Message shape is selected by the model through explicit tags; never
+    # split ordinary replies using a local random probability.
+    return False
     if not text:
         return False
     if is_private:
