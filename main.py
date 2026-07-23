@@ -26,6 +26,17 @@ logging.basicConfig(
 )
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 log = logging.getLogger("qqbot")
+chat_log = logging.getLogger("qqbot.chat")
+chat_log.setLevel(logging.INFO)
+chat_log.propagate = False
+chat_handler = RotatingFileHandler(
+    os.path.join(_BASE_DIR, "chat.log"),
+    maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+)
+chat_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+))
+chat_log.addHandler(chat_handler)
 
 
 def apply_env_overrides(config):
@@ -41,10 +52,14 @@ def apply_env_overrides(config):
         "QQBOT_DEEPSEEK_BASE_URL": "deepseek_base_url",
         "DEEPSEEK_MODEL": "deepseek_model",
         "QQBOT_DEEPSEEK_MODEL": "deepseek_model",
+        "SIGMAI_API_KEY": "sigmai_api_key",
+        "QQBOT_SIGMAI_API_KEY": "sigmai_api_key",
+        "SIGMAI_BASE_URL": "sigmai_base_url",
+        "QQBOT_SIGMAI_BASE_URL": "sigmai_base_url",
+        "SIGMAI_MODEL": "sigmai_model",
+        "QQBOT_SIGMAI_MODEL": "sigmai_model",
         "AGNES_API_KEY": "agnes_api_key",
         "QQBOT_AGNES_API_KEY": "agnes_api_key",
-        "AGNES_BASE_URL": "agnes_base_url",
-        "AGNES_MODEL": "agnes_model",
     }
     for env_name, cfg_key in env_map.items():
         value = os.getenv(env_name)
@@ -108,6 +123,10 @@ def migrate_config(config):
         "max_event_tasks": 3,
         "max_background_tasks": 6,
         "api_timeout_seconds": 6,
+        "ai_timeout_seconds": 15,
+        "sigmai_timeout_seconds": 15,
+        "deepseek_timeout_seconds": 20,
+        "sigmai_fallback_delay_seconds": 6,
         "connect_timeout_seconds": 5,
         "reconnect_max_delay_seconds": 60,
         "ai_concurrency": 1,
@@ -129,19 +148,31 @@ def migrate_config(config):
             sticker_mode[key] = value
             migrated = True
 
-    natural_chat_defaults = {
-        "interject_threshold": 68,
-        "followup_threshold": 42,
-        "interject_min_probability": 0.08,
-        "interject_max_probability": 0.62,
-        "followup_probability": 0.85,
-        "quiet_after_reply_seconds": 75,
-    }
-    natural_chat = config.setdefault("natural_chat", {})
-    for key, value in natural_chat_defaults.items():
-        if key not in natural_chat:
-            natural_chat[key] = value
-            migrated = True
+        # Legacy migration: remove old chat-judge settings and Agnes chat config.
+    if "natural_chat" in config:
+        del config["natural_chat"]
+        migrated = True
+    if "agnes_base_url" in config:
+        del config["agnes_base_url"]
+        migrated = True
+    if "agnes_model" in config:
+        del config["agnes_model"]
+        migrated = True
+    config.setdefault("agnes_api_key", "")
+    if "sigmai_base_url" not in config:
+        config["sigmai_base_url"] = "https://www.sigmai.net/v1"
+        migrated = True
+    if "sigmai_model" not in config:
+        config["sigmai_model"] = "DeepSeek-V4-Flash"
+        migrated = True
+
+    runtime = config.setdefault("runtime", {})
+    if "agnes_timeout_seconds" in runtime and "sigmai_timeout_seconds" not in runtime:
+        runtime["sigmai_timeout_seconds"] = runtime.pop("agnes_timeout_seconds")
+        migrated = True
+    if "agnes_fallback_delay_seconds" in runtime and "sigmai_fallback_delay_seconds" not in runtime:
+        runtime["sigmai_fallback_delay_seconds"] = runtime.pop("agnes_fallback_delay_seconds")
+        migrated = True
 
     security_defaults = {
         "url_check_enabled": True,
@@ -172,7 +203,11 @@ async def amain():
     config = apply_env_overrides(config)
 
     log.info("Bot %s starting...", config["bot_qq"])
-    log.info("Groups: %s", list(config.get("groups", {}).keys()))
+    enabled_groups = [
+        group_id for group_id, group_cfg in config.get("groups", {}).items()
+        if isinstance(group_cfg, dict) and group_cfg.get("enabled") is True
+    ]
+    log.info("Enabled groups: %s", enabled_groups)
 
     client = OneBotClient(config)
     dispatcher = Dispatcher(config, client, config_path)
@@ -198,6 +233,7 @@ async def amain():
     if client_task.done():
         log.warning("Client task exited during startup; stopping main loop")
         return
+    dispatcher.start_delayed_worker()
     dispatcher.start_scheduler()
 
     stop_task = asyncio.create_task(stop_event.wait())
@@ -211,6 +247,7 @@ async def amain():
     if client_task in done:
         log.warning("Client task exited; stopping bot")
     dispatcher.save_runtime_state(force=True)
+    await dispatcher.stop_delayed_worker()
     await dispatcher.stop_scheduler()
     await client.stop()
     await dispatcher.stop_background_tasks()

@@ -1,19 +1,14 @@
 """bot/permission.py - Unified permission system for QQ Bot"""
-
+import copy
 import json
 import time
 import logging
 from .utils import atomic_write_json
-
 log = logging.getLogger("qqbot")
-
 LEVEL_MASTER = 4
 LEVEL_ADMIN = 2
 LEVEL_MEMBER = 1
-
 LEVEL_NAMES = {4: "master", 2: "admin", 1: "member"}
-
-
 def get_group_config(dispatcher, group_id):
     if not group_id:
         return {}
@@ -28,22 +23,21 @@ def get_group_config(dispatcher, group_id):
         "bad_words": {**defaults.get("bad_words", {}), **group_cfg.get("bad_words", {})},
         "features": {**defaults.get("features", {}), **group_cfg.get("features", {})},
     }
+    # Merge bad_words as union of default and group-specific lists
+    default_words = set(defaults.get("bad_words", {}).get("words", []))
+    group_words = set(group_cfg.get("bad_words", {}).get("words", []))
+    merged["bad_words"]["words"] = sorted(list(default_words | group_words))
     return merged
-
-
 def is_group_enabled(dispatcher, group_id):
     if not group_id:
         return False
     gid = str(group_id)
     groups = dispatcher.config.get("groups", {})
     return groups.get(gid, {}).get("enabled", False)
-
-
 async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
     # Bot owner has master level everywhere
     if user_id == dispatcher.config.get("bot_owner"):
         return LEVEL_MASTER, "master"
-
     if not group_id:
         return LEVEL_MEMBER, "member"
     gcfg = get_group_config(dispatcher, group_id)
@@ -64,14 +58,10 @@ async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
         log.warning("get_user_level API failed for user=%s: %s, using hint=%s",
                     user_id, e, sender_role_hint)
     return role_map.get(sender_role_hint or "member", (LEVEL_MEMBER, "member"))
-
-
 # Role cache (per-group, 60s TTL)
 _bot_role_cache = {}
 _bot_role_cache_ttl = 60
 _BOT_ROLE_CACHE_MAX_AGE = 300  # hard eviction after 5 minutes
-
-
 async def get_bot_role(dispatcher, group_id):
     if not group_id:
         log.warning('get_bot_role: no group_id')
@@ -96,8 +86,6 @@ async def get_bot_role(dispatcher, group_id):
     if cached:
         return cached['role'], cached['role']
     return 'member', 'member'
-
-
 async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info):
     """Unified permission check.
     
@@ -111,22 +99,18 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
     owner = dispatcher.config.get("bot_owner")
     bot_qq = dispatcher.config.get("bot_qq")
     caller_level, caller_name = await get_user_level(dispatcher, group_id, user_id, sender_role)
-
     # Some QQ operations are owner-only for the bot account itself, such as group special titles.
     # Caller privilege cannot bypass QQ's real group-role restriction.
     if cmd_info.get("bot_owner_required"):
         bot_role_str, _ = await get_bot_role(dispatcher, group_id)
         if bot_role_str != "owner":
             return False, "这个只有群主号能做，我现在不是群主"
-
     # Bot owner (446697984) bypasses ALL checks
     if user_id == owner:
         return True, None
-
     # /master command: only bot owner can use (already handled above, this is for safety)
     if cmd_info.get("bot_owner_only"):
         return False, "只有最高主人能使用此命令"
-
     # Commands for bot owner + bot_qq + group masters
     if cmd_info.get("bot_owner"):
         if user_id == bot_qq:
@@ -134,25 +118,30 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
         if caller_level < LEVEL_MASTER:
             return False, "只有群主人或机器人账号能使用此命令"
         return True, None
-
     # Masters bypass admin checks
     if caller_level >= LEVEL_MASTER:
         return True, None
-
     # Admin-only commands
     if cmd_info.get("admin_only"):
         if caller_level < LEVEL_ADMIN:
             return False, "需要管理员权限"
-
     # Bot must be admin/owner in the group
     if cmd_info.get("bot_admin_required"):
         bot_role_str, _ = await get_bot_role(dispatcher, group_id)
         if bot_role_str not in ("admin", "owner"):
             return False, "我现在不是管理员，做不了这个"
-
     return True, None
-
-
+async def can_moderate_target(dispatcher, group_id, actor_id, target_id, actor_role="member"):
+    """Enforce role hierarchy for kick/ban style operations."""
+    owner = dispatcher.config.get("bot_owner")
+    bot_qq = dispatcher.config.get("bot_qq")
+    if target_id in {owner, bot_qq}:
+        return False, "这个目标受保护"
+    actor_level, _ = await get_user_level(dispatcher, group_id, actor_id, actor_role)
+    target_level, _ = await get_user_level(dispatcher, group_id, target_id, "member")
+    if actor_id != owner and target_level >= actor_level:
+        return False, "不能操作同级或更高权限的成员"
+    return True, None
 def add_master(dispatcher, group_id, master_qq):
     gid = str(group_id)
     groups = dispatcher.config.setdefault("groups", {})
@@ -165,8 +154,6 @@ def add_master(dispatcher, group_id, master_qq):
         save_group_config(dispatcher)
         return True
     return False
-
-
 def remove_master(dispatcher, group_id, master_qq):
     gid = str(group_id)
     groups = dispatcher.config.get("groups", {})
@@ -177,12 +164,20 @@ def remove_master(dispatcher, group_id, master_qq):
             save_group_config(dispatcher)
             return True
     return False
-
-
 def list_masters(dispatcher, group_id):
     gcfg = get_group_config(dispatcher, group_id)
     return gcfg.get("masters", [])
-
-
 def save_group_config(dispatcher):
-    atomic_write_json(dispatcher._config_path, dispatcher.config, indent=2)
+    cfg = copy.deepcopy(dispatcher.config)
+    # Never persist secrets to disk
+    for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key"):
+        cfg.pop(secret_key, None)
+    if isinstance(cfg.get("vision_api"), dict):
+        cfg["vision_api"].pop("api_key", None)
+    for gcfg in cfg.get("groups", {}).values():
+        if isinstance(gcfg, dict):
+            for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key"):
+                gcfg.pop(secret_key, None)
+            if isinstance(gcfg.get("vision_api"), dict):
+                gcfg["vision_api"].pop("api_key", None)
+    atomic_write_json(dispatcher._config_path, cfg, indent=2)

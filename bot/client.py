@@ -2,6 +2,7 @@
 import asyncio, fcntl, json, logging, os, uuid
 import websockets
 import aiohttp, time
+from api_registry import REGISTRY
 
 log = logging.getLogger("qqbot")
 
@@ -28,6 +29,8 @@ class OneBotClient:
         self._reconnect_max_delay = float(runtime.get("reconnect_max_delay_seconds", 60))
         self._dispatch_sem = asyncio.Semaphore(self._max_event_tasks)
         self._stop_event = asyncio.Event()
+        self._capabilities = {}
+        self._last_queue_warning = 0.0
 
     def set_dispatcher(self, dispatcher):
         self._dispatcher = dispatcher
@@ -118,7 +121,30 @@ class OneBotClient:
                         async def ws_reader():
                             try:
                                 async for raw in ws:
-                                    await msg_queue.put(raw)
+                                    try:
+                                        data = json.loads(raw)
+                                    except json.JSONDecodeError:
+                                        log.warning("Invalid JSON: %s", str(raw)[:80])
+                                        continue
+
+                                    # API replies must never wait behind event dispatch. Event
+                                    # handlers often await these futures themselves.
+                                    if "echo" in data:
+                                        echo = data["echo"]
+                                        fut = self._pending.pop(echo, None)
+                                        if fut is not None and not fut.done():
+                                            fut.set_result(data)
+                                        continue
+                                    if data.get("post_type") == "meta_event":
+                                        continue
+
+                                    try:
+                                        msg_queue.put_nowait(data)
+                                    except asyncio.QueueFull:
+                                        now = time.monotonic()
+                                        if now - self._last_queue_warning >= 10:
+                                            log.warning("Dropping event because WebSocket event queue is full")
+                                            self._last_queue_warning = now
                             except Exception as e:
                                 log.error("Reader error: %s", e)
                             finally:
@@ -137,31 +163,18 @@ class OneBotClient:
                         reader_task = asyncio.create_task(ws_reader())
 
                         while self._running:
-                            raw = await msg_queue.get()
-                            if raw is None:
+                            data = await msg_queue.get()
+                            if data is None:
                                 break
                             try:
-                                data = json.loads(raw)
-                                if "echo" in data:
-                                    echo = data["echo"]
-                                    if echo in self._pending:
-                                        fut = self._pending.pop(echo)
-                                        if not fut.done():
-                                            fut.set_result(data)
-                                    continue
-
-                                pt = data.get("post_type", "")
-                                if pt == "meta_event":
-                                    continue
-                                if len(self._event_tasks) >= self._max_event_tasks * 2:
-                                    log.warning("Dropping event because dispatch backlog is high")
-                                    continue
+                                # Bound dispatch task objects while the reader continues
+                                # processing API replies independently.
+                                while self._running and len(self._event_tasks) >= self._max_event_tasks * 2:
+                                    await asyncio.sleep(0.05)
                                 t = asyncio.create_task(self._dispatch_safe(data))
                                 self._event_tasks.add(t)
                                 t.add_done_callback(self._event_tasks.discard)
 
-                            except json.JSONDecodeError:
-                                log.warning("Invalid JSON: %s", str(raw)[:80])
                             except Exception as e:
                                 log.error("Message loop error: %s", e, exc_info=True)
 
@@ -225,15 +238,58 @@ class OneBotClient:
         try:
             await self._ws.send(json.dumps(req, ensure_ascii=False))
             result = await asyncio.wait_for(fut, timeout=self._api_timeout)
-            return result
+            normalized = self._normalize_result(action, result)
+            self._record_capability(action, normalized)
+            return normalized
         except asyncio.TimeoutError:
             self._pending.pop(echo, None)
             log.warning("API %s -> TIMEOUT", action)
-            return {"status": "timeout", "msg": "API call timed out"}
+            self._capabilities[action] = "temporary_failed"
+            return {"status": "timeout", "msg": "API call timed out", "action": action,
+                    "error_kind": "timeout"}
         except Exception as e:
             self._pending.pop(echo, None)
             log.error("API %s error: %s", action, e)
-            return {"status": "failed", "msg": str(e)}
+            self._capabilities[action] = "temporary_failed"
+            return {"status": "failed", "msg": str(e), "action": action,
+                    "error_kind": "exception"}
+
+    @staticmethod
+    def _normalize_result(action, result):
+        result = result if isinstance(result, dict) else {"data": result}
+        status = result.get("status", "failed")
+        retcode = result.get("retcode", 0 if status == "ok" else -1)
+        return {**result, "action": action, "ok": status == "ok" and retcode == 0,
+                "retcode": retcode, "message": result.get("message", result.get("msg", "")),
+                "error_kind": None if status == "ok" and retcode == 0 else result.get("error_kind", "api")}
+
+    def _record_capability(self, action, result):
+        if result.get("ok"):
+            self._capabilities[action] = "supported"
+            return
+        text = " ".join(str(result.get(k, "")) for k in ("msg", "message", "wording")).lower()
+        retcode = result.get("retcode")
+        if retcode in (1404, 404) or "not found" in text or "不支持" in text or "不存在" in text:
+            self._capabilities[action] = "unsupported"
+        elif result.get("error_kind") in ("timeout", "exception"):
+            self._capabilities[action] = "temporary_failed"
+        else:
+            self._capabilities.setdefault(action, "unknown")
+
+    async def group_poke(self, group_id, user_id):
+        return await self.call("group_poke", {"group_id": group_id, "user_id": user_id})
+
+    async def api_status(self):
+        """Return registry status without probing every API on a low-memory host."""
+        connected = self._ws is not None
+        return [{"name": spec.name, "category": spec.category, "risk": spec.risk,
+                 "ai_allowed": spec.ai_allowed,
+                 "status": self._capabilities.get(spec.name, "unknown" if connected else "offline")}
+                for spec in REGISTRY.values()]
+
+    async def execute_message_action(self, **kwargs):
+        from actions import execute_message_action
+        return await execute_message_action(self, **kwargs)
 
     async def send_group_msg(self, group_id, message):
         if isinstance(message, str):
@@ -270,6 +326,18 @@ class OneBotClient:
 
     async def set_group_ban(self, group_id, user_id, duration=1800):
         return await self.call("set_group_ban", {"group_id": group_id, "user_id": user_id, "duration": duration})
+
+    async def set_group_whole_ban(self, group_id, enable=True):
+        return await self.call("set_group_whole_ban", {"group_id": group_id, "enable": bool(enable)})
+
+    async def set_group_admin(self, group_id, user_id, enable=True):
+        return await self.call("set_group_admin", {"group_id": group_id, "user_id": user_id, "enable": bool(enable)})
+
+    async def set_group_card(self, group_id, user_id, card=""):
+        return await self.call("set_group_card", {"group_id": group_id, "user_id": user_id, "card": str(card)[:60]})
+
+    async def set_group_name(self, group_id, group_name):
+        return await self.call("set_group_name", {"group_id": group_id, "group_name": str(group_name)[:120]})
 
     async def set_group_special_title(self, group_id, user_id, title=""):
         return await self.call("set_group_special_title",
@@ -326,23 +394,6 @@ class OneBotClient:
         except Exception:
             pass
         return None
-
-    async def set_group_admin(self, group_id, user_id, enable=True):
-        return await self.call("set_group_admin",
-                               {"group_id": group_id, "user_id": user_id, "enable": enable})
-
-    async def set_group_card(self, group_id, user_id, card=""):
-        return await self.call("set_group_card", {
-            "group_id": group_id,
-            "user_id": user_id,
-            "card": card,
-        })
-
-    async def set_group_name(self, group_id, group_name):
-        return await self.call("set_group_name", {
-            "group_id": group_id,
-            "group_name": group_name,
-        })
 
     async def set_group_leave(self, group_id, is_dismiss=False):
         return await self.call("set_group_leave", {
@@ -416,6 +467,19 @@ class OneBotClient:
             "user_id": user_id,
             "messages": messages,
         })
+
+    async def forward_friend_single_msg(self, user_id, message_id):
+        return await self.call("forward_friend_single_msg", {"user_id": user_id, "message_id": message_id})
+
+    async def send_forward_msg(self, message_type=None, user_id=None, group_id=None, messages=None):
+        params = {"messages": messages or []}
+        if message_type:
+            params["message_type"] = message_type
+        if user_id:
+            params["user_id"] = user_id
+        if group_id:
+            params["group_id"] = group_id
+        return await self.call("send_forward_msg", params)
 
     async def upload_group_file(self, group_id, file, name, folder=""):
         return await self.call("upload_group_file", {
@@ -581,6 +645,63 @@ class OneBotClient:
 
     async def get_group_msg_history(self, group_id, count=20):
         return await self.call("get_group_msg_history", {"group_id": group_id, "count": count})
+
+    async def get_friend_msg_history(self, user_id, message_seq="0", count=20, reverse_order=False):
+        return await self.call("get_friend_msg_history", {
+            "user_id": user_id, "message_seq": str(message_seq),
+            "count": max(1, min(int(count), 20)), "reverseOrder": bool(reverse_order),
+        })
+
+    async def get_recent_contact(self, count=10):
+        return await self.call("get_recent_contact", {"count": max(1, min(int(count), 30))})
+
+    async def get_friends_with_category(self):
+        return await self.call("get_friends_with_category", {})
+
+    async def get_robot_uin_range(self):
+        return await self.call("get_robot_uin_range", {})
+
+    async def mark_private_msg_as_read(self, user_id):
+        return await self.call("mark_private_msg_as_read", {"user_id": user_id})
+
+    async def set_group_sign(self, group_id):
+        return await self.call("set_group_sign", {"group_id": group_id})
+
+    async def send_poke(self, user_id, group_id=None):
+        params = {"user_id": user_id}
+        if group_id:
+            params["group_id"] = group_id
+        return await self.call("send_poke", params)
+
+    async def set_online_status(self, status, ext_status=0, battery_status=0):
+        return await self.call("set_online_status", {
+            "status": status, "ext_status": ext_status, "battery_status": battery_status,
+        })
+
+    async def set_qq_avatar(self, file):
+        return await self.call("set_qq_avatar", {"file": file})
+
+    async def set_self_longnick(self, long_nick):
+        return await self.call("set_self_longnick", {"longNick": str(long_nick)[:120]})
+
+    async def fetch_custom_face(self, count=48):
+        return await self.call("fetch_custom_face", {"count": max(1, min(int(count), 48))})
+
+    async def create_collection(self, messages):
+        return await self.call("create_collection", {"messages": messages or []})
+
+    async def get_collection_list(self):
+        return await self.call("get_collection_list", {})
+
+    async def ark_share_group(self, group_id):
+        return await self.call("ArkShareGroup", {"group_id": group_id})
+
+    async def ark_share_peer(self, user_id=None, group_id=None, phone_number=""):
+        params = {}
+        if user_id: params["user_id"] = user_id
+        if group_id: params["group_id"] = group_id
+        if phone_number: params["phoneNumber"] = phone_number
+        return await self.call("ArkSharePeer", params)
 
     async def set_group_portrait(self, group_id, file, cache=1):
         return await self.call("set_group_portrait", {"group_id": group_id, "file": file, "cache": cache})

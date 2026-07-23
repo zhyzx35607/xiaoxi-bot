@@ -80,6 +80,9 @@ async def handle_group_increase(dispatcher, event):
     if not is_group_enabled(dispatcher, group_id):
         return
     user_id = event.get("user_id", 0)
+    from event_policy import automation_enabled, allow_event
+    if not automation_enabled(dispatcher.config, "welcome", True) or not allow_event("welcome", group_id, 3):
+        return
     gcfg = get_group_config(dispatcher, group_id)
     wm = gcfg.get("welcome_msg", {})
     if not wm.get("enabled", True):
@@ -94,7 +97,10 @@ async def handle_group_increase(dispatcher, event):
             sex = data.get("sex", "")
     except Exception:
         pass
-    msg = await _generate_welcome_text(dispatcher, nickname, sex)
+    if automation_enabled(dispatcher.config, "ai_welcome", True):
+        msg = await _generate_welcome_text(dispatcher, nickname, sex)
+    else:
+        msg = (wm.get("template") or "欢迎 {nickname}").replace("{nickname}", nickname)
     await dispatcher.client.send_group_msg(group_id, msg)
 async def handle_group_decrease(dispatcher, event):
     group_id = event.get("group_id", 0)
@@ -126,8 +132,8 @@ async def handle_group_decrease(dispatcher, event):
     except Exception:
         pass
 
-    action = "被移出" if sub_type == "kick" else "离开了"
-    text = f"{nickname} 离开了群聊" if nickname != uid_str else f"{nickname}({user_id}) 离开了群聊"
+    action = "被移出群聊" if sub_type == "kick" else "离开了群聊"
+    text = f"{nickname}({user_id}) {action}"
 
     # Build message with QQ avatar image
     avatar_url = "https://q1.qlogo.cn/g?b=qq&nk=" + str(user_id) + "&s=640"
@@ -160,6 +166,9 @@ async def handle_group_recall(dispatcher, event):
 
 async def handle_group_upload(dispatcher, event):
     group_id = event.get("group_id", 0)
+    from event_policy import automation_enabled, allow_event
+    if not automation_enabled(dispatcher.config, "file_notice", True) or not allow_event("file_notice", group_id, 10):
+        return
     user_id = event.get("user_id", 0)
     file_info = event.get("file", {}) or {}
     name = file_info.get("name") or file_info.get("file_name") or file_info.get("id") or "未知文件"
@@ -212,11 +221,16 @@ async def handle_essence(dispatcher, event):
 async def handle_poke(dispatcher, event):
     """Handle poke (戳一戳) - poke back if bot is poked."""
     group_id = event.get("group_id", 0)
+    from event_policy import automation_enabled, allow_event
+    if not automation_enabled(dispatcher.config, "auto_poke", True):
+        return
     user_id = event.get("user_id", 0)
     target_id = event.get("target_id", 0)
     bot_qq = dispatcher.config["bot_qq"]
 
     if target_id != bot_qq:
+        return
+    if not allow_event("poke", group_id or user_id, 5):
         return
 
     if group_id:
@@ -328,6 +342,9 @@ async def handle_title_change(dispatcher, event):
 async def handle_profile_like(dispatcher, event):
     """个人资料点赞通知 — 秒回点赞，SVIP点满20个，普通10个"""
     operator_id = event.get("operator_id", 0)
+    from event_policy import automation_enabled
+    if not automation_enabled(dispatcher.config, "like_back", True):
+        return
     operator_nick = event.get("operator_nick", "")
     times = event.get("times", 0)
     log.info("Profile like: operator=%s(%s) times=%s", operator_id, operator_nick, times)
@@ -350,10 +367,11 @@ async def handle_profile_like(dispatcher, event):
         if r.get("status") == "ok":
             log.info("Liked back %s(%s) x%s", operator_nick, operator_id, like_times)
         else:
-            # 如果不是 SVIP 被拒绝，回退到 10
-            log.warning("Like back x%s failed for %s: %s, retrying x10",
-                       like_times, operator_id, r.get("msg", "") or str(r)[:80])
-            await dispatcher.client.send_like(operator_id, 10)
+            msg = r.get("msg", "") or r.get("wording", "") or str(r)[:120]
+            if r.get("retcode") == 1200 or "点赞数已达" in msg or "上限" in msg:
+                log.info("Like back skipped for %s: daily limit reached", operator_id)
+            else:
+                log.warning("Like back x%s failed for %s: %s", like_times, operator_id, msg)
     except Exception as e:
         log.error("Like back error for %s: %s", operator_id, e)
 

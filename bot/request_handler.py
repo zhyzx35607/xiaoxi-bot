@@ -5,6 +5,7 @@ import os
 import time
 
 from .guard import is_blacklisted
+from .permission import is_group_enabled
 from .utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
@@ -67,8 +68,13 @@ async def handle_request(dispatcher, event):
     comment = event.get("comment", "") or ""
     sub_type = event.get("sub_type", "")
 
-    log.info("Request event type=%s subtype=%s group=%s user=%s flag=%s comment=%s",
-             req_type, sub_type, group_id, user_id, _short_flag(flag), comment[:80])
+    request_log = log.info
+    if req_type == "group" and group_id and not is_group_enabled(dispatcher, group_id):
+        # Keep the request available for owner approval without filling the
+        # normal log with events from groups the bot has not enabled.
+        request_log = log.debug
+    request_log("Request event type=%s subtype=%s group=%s user=%s flag=%s comment=%s",
+                req_type, sub_type, group_id, user_id, _short_flag(flag), comment[:80])
 
     if req_type == "group" and group_id and is_blacklisted(group_id, user_id):
         reason = "黑名单用户"
@@ -98,8 +104,8 @@ async def handle_request(dispatcher, event):
             text = _format_owner_notice(req_type, sub_type, group_id, user_id, comment, flag)
             await dispatcher.client.send_private_msg(owner, text)
     else:
-        log.info("Request stored for owner pull: type=%s group=%s user=%s flag=%s",
-                 req_type, group_id, user_id, _short_flag(flag))
+        request_log("Request stored for owner pull: type=%s group=%s user=%s flag=%s",
+                    req_type, group_id, user_id, _short_flag(flag))
 
 
 def _format_owner_notice(req_type, sub_type, group_id, user_id, comment, flag):
