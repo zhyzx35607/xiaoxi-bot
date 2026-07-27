@@ -215,7 +215,7 @@ bot/
  ├── memory.py             从聊天里提取用户信息
  ├── scheduler.py          定时任务（群打卡、ACG 图、热榜推送）
  ├── uapi.py               uapis.cn 客户端（积分预算：每天 100，预留 30 给自动任务，每月 1 号重置）
- ├── bilibili.py           B站解析/下载（官方免登录接口）+ UP 主推送轮询（60 秒，uapis 兜底）
+ ├── bilibili.py           B站解析/下载 + UP 主新视频/新动态推送（配 SESSDATA 后走关注动态流，60 秒轮询）
  └── utils.py              原子化写 JSON 的工具
 ```
 

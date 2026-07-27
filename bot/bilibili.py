@@ -567,6 +567,27 @@ def parse_dynamic_item(item):
     }
 
 
+def parse_av_dynamic(item):
+    """Extract upload info from a DYNAMIC_TYPE_AV feed item -> video dict."""
+    if not isinstance(item, dict):
+        return None
+    modules = item.get("modules") or {}
+    author = modules.get("module_author") or {}
+    dyn = modules.get("module_dynamic") or {}
+    major = dyn.get("major") or {}
+    archive = major.get("archive") if isinstance(major.get("archive"), dict) else {}
+    bvid = str(archive.get("bvid") or "")
+    if not bvid:
+        return None
+    return {
+        "bvid": bvid,
+        "title": str(archive.get("title") or ""),
+        "author": str(author.get("name") or ""),
+        "cover": str(archive.get("cover") or ""),
+        "created": int(author.get("pub_ts", 0) or 0),
+    }
+
+
 def _dyn_entry(group_id, mid):
     entry = _push_entry(group_id, mid)
     entry.setdefault("dyn_seen", [])
@@ -588,7 +609,14 @@ async def _announce_dynamic(dispatcher, group_id, dyn):
 
 
 async def poll_dynamics_once(dispatcher):
-    """One dynamics polling round (single feed request for all watched mids)."""
+    """One dynamics polling round (single feed request for all watched mids).
+
+    The follow feed carries both regular dynamics and video uploads, so with
+    SESSDATA configured this replaces the risk-control-prone arc/search
+    polling entirely. First-sight entries (no watermark yet) announce at
+    most the single newest item and only if it is fresh (<=30 min old), so
+    the bot never floods groups with historical dynamics.
+    """
     watch = _watched_mids(dispatcher)
     if not watch or not _sessdata(dispatcher):
         return 0
@@ -598,26 +626,88 @@ async def poll_dynamics_once(dispatcher):
         log.warning("bili dynamics poll failed: %s", e)
         return 0
     announced = 0
+    now = int(time.time())
+    dyn_candidates = {}
+    av_candidates = {}
     for item in items:
-        dyn = parse_dynamic_item(item)
-        if not dyn or dyn["mid"] not in watch:
+        if not isinstance(item, dict):
             continue
-        for gid in watch[dyn["mid"]]:
-            entry = _dyn_entry(gid, dyn["mid"])
-            if dyn["id"] in entry["dyn_seen"]:
-                continue
+        author = ((item.get("modules") or {}).get("module_author")) or {}
+        try:
+            mid = int(author.get("mid", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if mid not in watch:
+            continue
+        if str(item.get("type") or "") == "DYNAMIC_TYPE_AV":
+            video = parse_av_dynamic(item)
+            if video:
+                av_candidates.setdefault(mid, []).append(video)
+            continue
+        dyn = parse_dynamic_item(item)
+        if dyn:
+            dyn_candidates.setdefault(mid, []).append(dyn)
+    # --- regular dynamics (text / picture / forward) ---
+    for mid, dyns in dyn_candidates.items():
+        max_ts = max([d["ts"] for d in dyns] or [0])
+        for gid in watch[mid]:
+            entry = _dyn_entry(gid, mid)
             watermark = int(entry["dyn_watermark"] or 0)
-            if watermark and (not dyn["ts"] or dyn["ts"] <= watermark):
-                continue
-            try:
-                await _announce_dynamic(dispatcher, gid, dyn)
-                announced += 1
-                entry["dyn_seen"].append(dyn["id"])
-                del entry["dyn_seen"][:-50]
-                entry["dyn_watermark"] = max(watermark, dyn["ts"] or 0)
-                await asyncio.sleep(1)
-            except Exception as e:
-                log.warning("bili dynamic announce failed g=%s: %s", gid, e)
+            virgin = not watermark and not entry["dyn_seen"]
+            fresh = []
+            for d in dyns:
+                if d["id"] in entry["dyn_seen"]:
+                    continue
+                if watermark and (not d["ts"] or d["ts"] <= watermark):
+                    continue
+                fresh.append(d)
+            if virgin:
+                fresh = [d for d in fresh
+                         if d["ts"] and d["ts"] >= now - 1800][:1]
+            for d in reversed(fresh):
+                try:
+                    await _announce_dynamic(dispatcher, gid, d)
+                    announced += 1
+                    entry["dyn_seen"].append(d["id"])
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    log.warning("bili dynamic announce failed g=%s: %s", gid, e)
+            del entry["dyn_seen"][:-50]
+            if max_ts:
+                entry["dyn_watermark"] = max(watermark, max_ts)
+    # --- video uploads carried by the feed ---
+    for mid, videos in av_candidates.items():
+        max_ts = max([v["created"] for v in videos] or [0])
+        for gid in watch[mid]:
+            seen = pushed_bvids(gid, mid)
+            watermark = push_watermark(gid, mid)
+            virgin = not watermark and not seen
+            new_videos = []
+            for v in videos:
+                if v["bvid"] in seen:
+                    continue
+                if watermark and (not v["created"] or v["created"] <= watermark):
+                    continue
+                new_videos.append(v)
+            if virgin:
+                new_videos = [v for v in new_videos
+                              if v["created"] and v["created"] >= now - 1800][:1]
+            announced_bvids = []
+            announced_max = 0
+            for video in reversed(new_videos):
+                try:
+                    await _announce_video(dispatcher, gid, video)
+                    announced += 1
+                    announced_bvids.append(video["bvid"])
+                    announced_max = max(announced_max, video["created"])
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    log.warning("bili announce failed g=%s: %s", gid, e)
+            if announced_bvids:
+                mark_pushed(gid, mid, announced_bvids,
+                            watermark=announced_max or None)
+            elif virgin and max_ts:
+                mark_pushed(gid, mid, [], watermark=max_ts)
     if announced:
         _save_push_state()
     return announced
@@ -723,8 +813,13 @@ async def push_loop(dispatcher):
             interval = max(30, int(cfg.get("poll_interval", 60) or 60))
             try:
                 if _watched_mids(dispatcher):
-                    await poll_once(dispatcher)
-                    await poll_dynamics_once(dispatcher)
+                    if _sessdata(dispatcher):
+                        # The follow feed carries dynamics and uploads in one
+                        # request; arc/search gets IP risk-controlled (-412)
+                        # from cloud hosts, so prefer the feed.
+                        await poll_dynamics_once(dispatcher)
+                    else:
+                        await poll_once(dispatcher)
             except Exception as e:
                 log.warning("bili poll round failed: %s", e)
             # Sleep in small chunks to stay responsive to shutdown

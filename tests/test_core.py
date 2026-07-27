@@ -987,3 +987,133 @@ class BiliDynamicsPollTests(unittest.IsolatedAsyncioTestCase):
                     announced = await bilibili.poll_dynamics_once(Stub())
                 self.assertEqual(announced, 0)  # 已推过的不重复
                 bilibili.reset_state_for_test()
+
+
+class BiliFeedAvTests(unittest.IsolatedAsyncioTestCase):
+    def _av_item(self, dyn_id="900", mid=42, name="UP", ts=3000,
+                 bvid="BV_feed1", title="新投稿"):
+        return {
+            "id_str": dyn_id, "type": "DYNAMIC_TYPE_AV",
+            "modules": {
+                "module_author": {"mid": mid, "name": name, "pub_ts": ts},
+                "module_dynamic": {"major": {"archive": {
+                    "bvid": bvid, "title": title,
+                    "cover": "https://i0.hdslb.com/c.jpg"}}},
+            },
+        }
+
+    def test_parse_av_dynamic(self):
+        from bot.bilibili import parse_av_dynamic
+        v = parse_av_dynamic(self._av_item(ts=1234, bvid="BV_x"))
+        self.assertEqual(v["bvid"], "BV_x")
+        self.assertEqual(v["created"], 1234)
+        self.assertIsNone(parse_av_dynamic({"type": "DYNAMIC_TYPE_AV",
+                                            "modules": {}}))
+
+    async def test_feed_av_video_pushed_and_deduped(self):
+        import time as _time
+        from bot import bilibili
+        with tempfile.TemporaryDirectory() as tmp:
+            bilibili.reset_state_for_test()
+            with patch.object(bilibili, "_PUSH_STATE_PATH",
+                              os.path.join(tmp, "push.json")):
+                sent = []
+
+                class Client:
+                    _running = True
+
+                    async def send_group_msg(self, group_id, message):
+                        sent.append((group_id, message))
+                        return {"status": "ok", "retcode": 0}
+
+                    async def get_group_member_info(self, group_id, user_id,
+                                                    no_cache=False):
+                        return {"status": "ok", "data": {"role": "member"}}
+
+                now = int(_time.time())
+
+                class Stub:
+                    config = {
+                        "bot_qq": 222, "bili_sessdata": "x",
+                        "groups": {"100": {"enabled": True,
+                                           "bili_push": {"mids": [42]}}},
+                    }
+                    client = Client()
+
+                items = [self._av_item(dyn_id="901", ts=now - 60,
+                                       bvid="BV_fresh"),
+                         self._av_item(dyn_id="900", ts=now - 7200,
+                                       bvid="BV_stale")]
+
+                async def fake_feed(dispatcher):
+                    return items
+
+                # virgin entry: only the single newest fresh video, no history
+                with patch.object(bilibili, "get_dynamics_feed", fake_feed):
+                    announced = await bilibili.poll_dynamics_once(Stub())
+                self.assertEqual(announced, 1)
+                self.assertEqual(len(sent), 1)
+                self.assertIn("BV_fresh", str(sent))
+                self.assertNotIn("BV_stale", str(sent))
+                # watermark sealed history; second round announces nothing
+                with patch.object(bilibili, "get_dynamics_feed", fake_feed):
+                    announced = await bilibili.poll_dynamics_once(Stub())
+                self.assertEqual(announced, 0)
+                bilibili.reset_state_for_test()
+
+    async def test_virgin_dynamics_only_newest_fresh(self):
+        import time as _time
+        from bot import bilibili
+        with tempfile.TemporaryDirectory() as tmp:
+            bilibili.reset_state_for_test()
+            with patch.object(bilibili, "_PUSH_STATE_PATH",
+                              os.path.join(tmp, "push.json")):
+                sent = []
+
+                class Client:
+                    async def send_group_msg(self, group_id, message):
+                        sent.append((group_id, message))
+                        return {"status": "ok", "retcode": 0}
+
+                now = int(_time.time())
+
+                class Stub:
+                    config = {
+                        "bot_qq": 222, "bili_sessdata": "x",
+                        "groups": {"100": {"enabled": True,
+                                           "bili_push": {"mids": [42]}}},
+                    }
+                    client = Client()
+
+                def draw(dyn_id, ts, text):
+                    return {
+                        "id_str": dyn_id, "type": "DYNAMIC_TYPE_DRAW",
+                        "modules": {
+                            "module_author": {"mid": 42, "name": "UP",
+                                              "pub_ts": ts},
+                            "module_dynamic": {"major": {
+                                "opus": {"summary": {"text": text},
+                                         "pics": []}}},
+                        },
+                    }
+
+                items = [draw("601", now - 120, "新鲜动态"),
+                         draw("600", now - 300, "稍早动态"),
+                         draw("599", now - 86400, "昨天动态")]
+
+                async def fake_feed(dispatcher):
+                    return items
+
+                with patch.object(bilibili, "get_dynamics_feed", fake_feed):
+                    announced = await bilibili.poll_dynamics_once(Stub())
+                # virgin: at most one, the newest fresh one
+                self.assertEqual(announced, 1)
+                self.assertIn("新鲜动态", str(sent))
+                self.assertNotIn("昨天动态", str(sent))
+                # history sealed even though un-announced
+                entry = bilibili._dyn_entry(100, 42)
+                self.assertEqual(entry["dyn_watermark"], now - 120)
+                with patch.object(bilibili, "get_dynamics_feed", fake_feed):
+                    announced = await bilibili.poll_dynamics_once(Stub())
+                self.assertEqual(announced, 0)
+                bilibili.reset_state_for_test()
