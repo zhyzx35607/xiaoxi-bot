@@ -1,5 +1,5 @@
 # bot/dispatcher.py - Fast message dispatcher with permission system
-import asyncio, json, logging, os, random, re, time
+import asyncio, heapq, json, logging, os, random, re, time
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 from collections import defaultdict, deque
@@ -78,14 +78,11 @@ class Dispatcher:
         self._group_msg_counts = defaultdict(lambda: defaultdict(int))
         self._group_msg_buffer = defaultdict(lambda: deque(maxlen=15))
         self._group_repeat_tracker = {}
-        self._group_last_interject = {}
         self._group_last_at_bot = {}
         self._group_last_name_reply = {}
         self._user_last_name_reply = {}  # per-user name mention cooldown
         self._group_last_reply_to = {}  # follow-up tracking
         self._group_interject_ts = {}  # last interjection timestamp per group
-        self._group_followup_count = {}  # count consecutive followup replies per group
-        self._group_at_others_ts = {}  # last time someone @-others (for skip window)
         self._seen_msg_ids = {}  # message_id -> timestamp
         self._seen_msg_ids_maxlen = 2000
         self._daily_likes = {}
@@ -95,6 +92,8 @@ class Dispatcher:
         self._last_state_save = 0
         self._message_stat_updates = 0
         self._scheduler_task = None
+        self._bili_push_task = None
+        self._rss_guard_task = None
         self._group_reply_timestamps = {}  # rate limit: group_id -> deque of timestamps
         # Chat limits tracking
         self._group_consecutive_replies = {}  # group_id -> int
@@ -111,8 +110,19 @@ class Dispatcher:
         self._background_tasks = set()
         self._web_search_cache = {}
         self._search_sem = asyncio.Semaphore(max(1, int(runtime.get("search_concurrency", 1))))
-        self._group_last_ai_judge = {}
         self._group_conversation_state = defaultdict(self._new_conversation_state)
+        # Delayed reply queue (group interjections only, lightweight heapq worker)
+        self._delayed_queue = []  # heap of [fire_ts, group_id, user_id, message_id, message, raw, sender_card]
+        self._delayed_queue_index = {}  # (group_id, user_id) -> active entry for merge
+        self._delayed_queue_cap = 20
+        self._delayed_queue_event = asyncio.Event()
+        self._delayed_worker_task = None
+        # Global safety valve: total bot replies across all groups
+        self._global_reply_timestamps = deque()
+        self._max_global_replies_per_window = 50
+        self._global_rate_window = 1800  # 30 min
+        # Lightweight stats for reply/skip ratio (logged during save cycle)
+        self._ai_outcome_stats = {}  # group_id -> {"reply": int, "skip": int}
         self._load_runtime_state()
 
     def _new_conversation_state(self):
@@ -124,7 +134,6 @@ class Dispatcher:
             "last_decision": None,
             "recent_images": deque(maxlen=4),
         }
-
     def _load_runtime_state(self):
         try:
             with open(self._state_path, encoding="utf-8") as f:
@@ -162,6 +171,14 @@ class Dispatcher:
         atomic_write_json(self._state_path, state, indent=2)
         self._state_dirty = False
         self._last_state_save = now
+        # Log per-group reply/skip ratio for observability
+        for gid, st in list(self._ai_outcome_stats.items()):
+            total = st.get("reply", 0) + st.get("skip", 0)
+            if total:
+                log.info("Group %s AI outcome: reply=%d skip=%d ratio=%.2f",
+                         gid, st["reply"], st["skip"], st["reply"] / total)
+        self._ai_outcome_stats.clear()
+
         # Periodic cleanup of stale state (runs with save cycle, no extra timer needed)
         self._cleanup_stale_state()
 
@@ -176,11 +193,11 @@ class Dispatcher:
         # --- A: Remove data for disabled/non-existent groups ---
         all_tracked_gids = set()
         for src in (self._group_msg_counts, self._group_msg_buffer, self._group_repeat_tracker,
-                     self._group_last_interject, self._group_last_at_bot, self._group_last_name_reply,
-                     self._group_interject_ts, self._group_followup_count, self._group_at_others_ts,
+                     self._group_last_at_bot, self._group_last_name_reply,
+                     self._group_last_reply_to, self._group_interject_ts,
                      self._group_reply_timestamps, self._group_consecutive_replies,
                      self._group_member_cache, self._member_cache_ts,
-                     self._group_last_ai_judge, self._group_conversation_state):
+                     self._group_conversation_state):
             all_tracked_gids.update(str(k) for k in list(src.keys()))
 
         stale_gids = all_tracked_gids - enabled_gids
@@ -190,19 +207,27 @@ class Dispatcher:
                 self._group_msg_counts.pop(gid_int, None)
                 self._group_msg_buffer.pop(gid_int, None)
                 self._group_repeat_tracker.pop(gid_int, None)
-                self._group_last_interject.pop(gid_int, None)
                 self._group_last_at_bot.pop(gid_int, None)
                 self._group_last_name_reply.pop(gid_int, None)
+                self._group_last_reply_to.pop(gid_int, None)
                 self._group_interject_ts.pop(gid_int, None)
-                self._group_followup_count.pop(gid_int, None)
-                self._group_at_others_ts.pop(gid_int, None)
                 self._group_reply_timestamps.pop(gid_int, None)
                 self._group_consecutive_replies.pop(gid_int, None)
                 self._group_member_cache.pop(gid_int, None)
                 self._member_cache_ts.pop(gid_int, None)
-                self._group_last_ai_judge.pop(gid_int, None)
                 self._group_conversation_state.pop(gid_int, None)
             log.info("Cleaned up %d disabled/non-existent groups from runtime state", len(stale_gids))
+
+        # Drop delayed-reply entries for disabled groups
+        if self._delayed_queue:
+            kept = []
+            for entry in self._delayed_queue:
+                if str(entry[1]) in enabled_gids:
+                    kept.append(entry)
+                else:
+                    self._delayed_queue_index.pop((entry[1], entry[2]), None)
+            self._delayed_queue = kept
+            heapq.heapify(self._delayed_queue)
 
         # --- B: Expired entries within active groups ---
         # _group_last_reply_to: remove (group, user) entries > 10 min inactive
@@ -219,6 +244,10 @@ class Dispatcher:
                                  if isinstance(v, tuple) and now - v[0] > 300]
                 for t in expired_texts:
                     del tracker[t]
+
+        # Global reply rate safety valve: evict expired timestamps
+        while self._global_reply_timestamps and now - self._global_reply_timestamps[0] > self._global_rate_window:
+            self._global_reply_timestamps.popleft()
 
         # _daily_likes / _daily_fortunes: remove non-today keys from memory
         today = time.strftime("%Y%m%d")
@@ -299,6 +328,92 @@ class Dispatcher:
             except asyncio.TimeoutError:
                 log.warning("Timed out waiting for scheduler to stop")
         self._scheduler_task = None
+
+    def start_bili_push(self):
+        """Start the UP主 new-video polling loop (idles when nothing watched)."""
+        if self._bili_push_task is None:
+            from .bilibili import push_loop
+            self._bili_push_task = asyncio.create_task(push_loop(self))
+
+    async def stop_bili_push(self):
+        if self._bili_push_task and not self._bili_push_task.done():
+            self._bili_push_task.cancel()
+            try:
+                await asyncio.wait_for(self._bili_push_task, timeout=2)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                log.warning("Timed out waiting for bili push loop to stop")
+        self._bili_push_task = None
+
+    def start_rss_guard(self):
+        """Periodic RSS watchdog: logs growth, gracefully restarts before OOM."""
+        if self._rss_guard_task is None:
+            self._rss_guard_task = asyncio.create_task(self._rss_guard_loop())
+
+    async def stop_rss_guard(self):
+        if self._rss_guard_task and not self._rss_guard_task.done():
+            self._rss_guard_task.cancel()
+            try:
+                await asyncio.wait_for(self._rss_guard_task, timeout=2)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                pass
+        self._rss_guard_task = None
+
+    @staticmethod
+    def _read_rss_kb():
+        try:
+            with open("/proc/self/status", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1])
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _gc_type_histogram(limit=15):
+        """Top object types by count — cheap snapshot to identify memory hogs."""
+        import gc
+        from collections import Counter
+        counts = Counter(type(obj).__name__ for obj in gc.get_objects())
+        return ", ".join("{}={}".format(name, cnt)
+                         for name, cnt in counts.most_common(limit))
+
+    async def _rss_guard_loop(self):
+        runtime = self.config.get("runtime", {})
+        restart_mb = int(runtime.get("rss_restart_mb", 260) or 0)
+        log_mb = int(runtime.get("rss_log_mb", 150) or 150)
+        last_diag = 0.0
+        try:
+            while True:
+                await asyncio.sleep(60)
+                rss_kb = self._read_rss_kb()
+                if rss_kb is None:
+                    continue
+                mb = rss_kb / 1024.0
+                if restart_mb > 0 and mb >= restart_mb:
+                    log.warning("RSS %.0fMB >= %dMB limit, graceful restart",
+                                mb, restart_mb)
+                    try:
+                        log.warning("GC histogram at restart: %s",
+                                    self._gc_type_histogram())
+                        self.save_runtime_state(force=True)
+                    except Exception:
+                        pass
+                    os.kill(os.getpid(), 15)  # SIGTERM -> clean shutdown, systemd restarts
+                    return
+                if mb >= log_mb and time.time() - last_diag > 600:
+                    last_diag = time.time()
+                    try:
+                        log.warning("RSS guard: %.0fMB | GC histogram: %s",
+                                    mb, self._gc_type_histogram())
+                    except Exception:
+                        log.info("RSS guard: %.0fMB", mb)
+        except asyncio.CancelledError:
+            pass
 
     def create_background_task(self, coro, name="background"):
         if len(self._background_tasks) >= self._max_background_tasks:
@@ -382,22 +497,64 @@ class Dispatcher:
                 user_id=self.config.get("bot_qq", 0), sender_name=sender_card,
             )
             bot_qq = self.config.get("bot_qq", 0)
-            # Store in buffer so _build_chat_context sees it
-            self._group_msg_buffer[group_id].append(
-                (bot_qq, raw, time.time(), sender_card)
-            )
+            # Store in buffer so _build_chat_context sees it. Skip if ai.py just
+            # appended the same reply (avoid duplicates from message_sent echo).
+            now = time.time()
+            buf = self._group_msg_buffer[group_id]
+            if not (buf and buf[-1][0] == bot_qq and buf[-1][1][:60] == raw[:60]
+                    and now - buf[-1][2] < 10):
+                buf.append((bot_qq, raw, now, sender_card))
             # Dedup self-messages
             message_id = event.get("message_id", 0)
             if message_id:
                 self._seen_msg_ids[message_id] = time.time()
             log.debug("[SELF] group=%s said: %s", group_id, raw[:60])
+            # Fixed commands and title requests sent from the bot account itself
+            await self._handle_self_group_command(group_id, raw, message, sender_card)
 
         elif msg_type == "private" and raw:
+            peer_id = event.get("target_id") or user_id
             _log_chat_message(
                 self, "PRIVATE_OUT", raw,
-                user_id=event.get("target_id") or user_id, sender_name=sender_card,
+                user_id=peer_id, sender_name=sender_card,
             )
             log.debug("[SELF] private said: %s", raw[:60])
+            # Commands typed from the bot account in the owner's chat window run
+            # as owner commands; replies land in the same window.
+            if peer_id == self.config.get("bot_owner"):
+                prefix = self.config.get("command_prefix", "/")
+                clean = re.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
+                if clean.startswith(prefix):
+                    parts = clean[len(prefix):].split(maxsplit=1)
+                    await self._handle_owner_command(
+                        parts[0].lower(), parts[1] if len(parts) > 1 else "",
+                        peer_id, {"nickname": sender_card}, message, raw,
+                    )
+
+    async def _handle_self_group_command(self, group_id, raw, message, sender_card):
+        """Run fixed commands / title requests sent from the bot account itself.
+
+        The bot account has master level (see permission.get_user_level), so
+        permission checks stay centralized in _run_command.
+        """
+        prefix = self.config.get("command_prefix", "/")
+        bot_qq = self.config.get("bot_qq", 0)
+        clean = re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
+        if clean.startswith(prefix):
+            parts = clean[len(prefix):].split(maxsplit=1)
+            cmd = parts[0].lower()
+            if cmd in self.commands:
+                log.info("[SELF] running command %s in group %s", cmd, group_id)
+                await self._run_command(
+                    cmd, parts[1] if len(parts) > 1 else "",
+                    group_id, bot_qq, "owner", sender_card, message,
+                )
+            return
+        from .natural_triggers import extract_title_request
+        title = extract_title_request(clean)
+        if title:
+            await self._run_command("mytitle", title, group_id, bot_qq, "owner",
+                                    sender_card, message)
 
     async def _handle_message(self, event):
         msg_type = event.get("message_type", "")
@@ -588,6 +745,21 @@ class Dispatcher:
                                     group_id, user_id, sender_role, sender_card, message)
             return
 
+        # B站 video share: auto parse + download (feature-gated, 30s cooldown)
+        bili_cfg = self.config.get("bilibili", {})
+        if (bili_cfg.get("parse_enabled", True)
+                and feats.get("bili_parse", True)
+                and ("BV1" in raw or "b23.tv" in raw
+                     or "bilibili.com/video" in raw)):
+            from event_policy import allow_event
+            if allow_event("bili_parse", group_id, 30):
+                from .bilibili import handle_share
+                try:
+                    if await handle_share(self, group_id, raw):
+                        return
+                except Exception as e:
+                    log.warning("bili share handle failed: %s", e)
+
         # Music search
         if feats.get("music", True):
             # Also check natural music triggers
@@ -620,6 +792,9 @@ class Dispatcher:
             elif cmd_name == "unban":
                 for target in trig_args.get("targets", []):
                     await self._run_command("unban", str(target), group_id, user_id, sender_role, sender_card, message)
+            elif cmd_name == "mytitle":
+                await self._run_command("mytitle", trig_args.get("title", ""),
+                                        group_id, user_id, sender_role, sender_card, message)
             elif cmd_name in ("like", "fortune", "rank", "精华"):
                 await self._run_command(cmd_name, "", group_id, user_id, sender_role, sender_card, message)
             return
@@ -633,139 +808,69 @@ class Dispatcher:
                     group_id, user_id, sender_role, raw, message)):
             return
 
-        # === NEW AI CHAT LOGIC: Layer 1 rules + Layer 2 AI decision ===
-        if feats.get("ai_chat", True):
-            from .ai import handle_ai_chat, search_web
-            
-            # Determine trigger level
-            is_explicit_trigger = is_at_bot or is_name_mentioned
-            is_image_msg = any(seg.get("type") == "image" for seg in message)
-            
+        # === NEW AI CHAT LOGIC: hard filters + AI-driven judgment ===
+        if not feats.get("ai_chat", True):
+            return
+        from .ai import handle_ai_chat, search_web, _schedule_state
+        is_explicit_trigger = is_at_bot or is_name_mentioned
+        text = re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
+        # Hard filters applied to every message
+        if is_blacklisted(group_id, user_id):
+            return
+        if not self._check_global_rate_limit():
             if is_explicit_trigger:
-                # @bot or name mention: always respond, reset limits
-                self._reset_consecutive_replies(group_id)
-                if is_at_bot:
-                    self._group_last_at_bot[group_id] = time.time()
-                if is_name_mentioned and not is_at_bot:
-                    now = time.time()
-                    nm_cfg = self.config.get("name_mention", {})
-                    cd = nm_cfg.get("cooldown_seconds", 10)
-                    last = self._group_last_name_reply.get(group_id, 0)
-                    if now - last < cd:
-                        return
-                    self._group_last_name_reply[group_id] = now
-                    # Per-user cooldown: prevent single user from rapid-firing name triggers
-                    user_last = self._user_last_name_reply.get(user_id, 0)
-                    user_cd = nm_cfg.get("user_cooldown_seconds", 15)
-                    if now - user_last < user_cd:
-                        return
-                    self._user_last_name_reply[user_id] = now
-                
-                
-                # Refresh member cache for @ parsing
-                await self._refresh_member_cache(group_id)
-                
-                # Rate limit check
-                allowed, remaining = self._check_rate_limit(group_id)
-                if not allowed:
-                    await self.client.send_group_msg(group_id, "不行了不行了 刷屏太多 我潜一会 回头聊")
-                    return
-                
-                chat_ctx = self._build_chat_context(group_id)
-                img_ctx = await self._get_image_context(group_id, message)
-                # Pre-search web for factual questions
-                import re as _re_clean3
-                clean_msg = _re_clean3.sub(r"\[CQ:[^\]]+\]", "", raw).strip()[:100]
-                web_rs = await search_web(self, clean_msg) if self._should_search_web(clean_msg) else ""
-                rate_warning = self._get_rate_limit_warning(remaining)
-                result = await handle_ai_chat(self, group_id, user_id, raw, sender_card,
-                                     image_context=img_ctx, chat_context=chat_ctx,
-                                     message_id=message_id, rate_warning=rate_warning,
-                                     web_search_results=web_rs,
-                                     reply_intent="直接回应",
-                                     consecutive_replies=self._group_consecutive_replies.get(group_id, 0))
-                if result:
-                    self._record_bot_reply(group_id, user_id)
-                    self._record_rate_limit(group_id)
+                await self.client.send_group_msg(group_id, "今天回太多 让我歇会")
+            return
+        # Sleep hours: only explicit triggers wake the bot
+        schedule_state, _ = _schedule_state()
+        if schedule_state == "sleep" and not is_explicit_trigger:
+            return
+        # Explicit trigger (@bot / name mention): immediate reply
+        if is_explicit_trigger:
+            now = time.time()
+            nm_cfg = self.config.get("name_mention", {})
+            group_cd = nm_cfg.get("cooldown_seconds", 10)
+            user_cd = nm_cfg.get("user_cooldown_seconds", 15)
+            if now - self._group_last_at_bot.get(group_id, 0) < group_cd:
                 return
-            
-            # Use a cheap local gate before spending a model request on social
-            # relevance. Follow-ups remain responsive; unsolicited interjections
-            # are deliberately rate-limited on low-resource hosts.
-            is_followup = self._check_followup(group_id, user_id)
-            if is_followup or feats.get("interject", True):
-                now_ts = time.time()
-
-                runtime = self.config.get("runtime", {})
-                last_judge = self._group_last_ai_judge.get(group_id, 0)
-                judge_cooldown = runtime.get("non_explicit_judge_cooldown", 180)
-                if not is_followup and now_ts - last_judge < judge_cooldown:
-                    return
-
-                from .ai import search_web, handle_ai_chat
-                chat_ctx = self._build_chat_context(group_id)
-                decision = self._decide_ai_participation(
-                    group_id, user_id, message, raw, sender_card,
-                    is_followup=is_followup, is_image_msg=is_image_msg,
-                )
-                self._record_decision(group_id, decision)
-                if decision.get("should_reply"):
-                    ai_choice = "JOIN"
-                    if not is_followup:
-                        self._group_last_ai_judge[group_id] = now_ts
-                        ai_choice = await self._ai_judge_participation(
-                            group_id, user_id, sender_card, raw, chat_ctx or "",
-                            is_followup, is_image_msg,
-                        )
-                    if ai_choice == "SKIP":
-                        decision["should_reply"] = False
-                        decision["intent"] = "SKIP"
-                        decision["reasons"].append("AI判断不该说话")
-                        self._record_decision(group_id, decision)
-                        return
-                    if ai_choice == "REACT":
-                        if message_id:
-                            await self._send_emoji_reaction(group_id, message_id, raw)
-                        decision["should_reply"] = False
-                        decision["intent"] = "REACT"
-                        decision["reasons"].append("AI选择表情表态")
-                        self._record_decision(group_id, decision)
-                        self._group_interject_ts[group_id] = time.time()
-                        return
-
-                    allowed, remaining = self._check_rate_limit(group_id)
-                    if not allowed:
-                        return
-                    search_text = raw[:80]
-                    if chat_ctx:
-                        ctx_lines = chat_ctx.split("\n")[-3:]
-                        ctx_text = " ".join([l.split(": ", 1)[-1] if ": " in l else l for l in ctx_lines])
-                        if len(ctx_text) > len(search_text):
-                            search_text = ctx_text[:200]
-                    web_ctx = await search_web(self, search_text) if decision.get("need_search") else ""
-                    img_ctx = await self._get_image_context(group_id, message)
-                    import re as _re_clean
-                    clean_raw = _re_clean.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
-                    result = await handle_ai_chat(self, group_id, user_id, clean_raw, sender_card,
-                                          image_context=img_ctx, chat_context=chat_ctx,
-                                          message_id=message_id, web_search_results=web_ctx,
-                                          reply_intent=decision.get("intent", "自然接话"),
-                                          consecutive_replies=self._group_consecutive_replies.get(group_id, 0))
-                    if result:
-                        self._record_bot_reply(group_id, user_id)
-                        self._record_rate_limit(group_id)
-                        self._group_last_reply_to[(group_id, user_id)] = time.time()
-                        self._group_interject_ts[group_id] = time.time()
-                        # Track followup chain
-                        if is_followup:
-                            self._group_followup_count[group_id] = (
-                                self._group_followup_count.get(group_id, 0) + 1
-                            )
-                        else:
-                            self._group_followup_count[group_id] = 1
+            if now - self._user_last_name_reply.get(user_id, 0) < user_cd:
+                return
+            self._group_last_at_bot[group_id] = now
+            self._user_last_name_reply[user_id] = now
+            self._reset_consecutive_replies(group_id)
+            allowed, remaining = self._check_rate_limit(group_id)
+            if not allowed:
+                await self.client.send_group_msg(group_id, "不行了不行了 刷屏太多 我潜一会 回头聊")
+                return
+            result = await self._do_ai_reply(
+                group_id, user_id, raw, sender_card, message, message_id,
+                reply_intent="直接回应",
+                rate_warning=self._get_rate_limit_warning(remaining),
+            )
+            self._record_ai_outcome(group_id, bool(result))
+            return
+        # Follow-up window (user is replying to our recent message)
+        is_followup = self._check_followup(group_id, user_id)
+        if is_followup:
+            allowed, remaining = self._check_rate_limit(group_id)
+            if not allowed:
+                return
+            result = await self._do_ai_reply(
+                group_id, user_id, raw, sender_card, message, message_id,
+                reply_intent="继续闲聊",
+            )
+            self._record_ai_outcome(group_id, bool(result))
             return
 
-
+        # Interjection candidate: cheap hard filter, then defer to delayed queue
+        if not self._is_trivial_for_interjection(text, message):
+            runtime = self.config.get("runtime", {})
+            last_interject = self._group_interject_ts.get(group_id, 0)
+            cooldown = runtime.get("non_explicit_judge_cooldown", 240)
+            if time.time() - last_interject >= cooldown:
+                max_consecutive = self.config.get("chat_limits", {}).get("max_consecutive_replies", 5)
+                if self._group_consecutive_replies.get(group_id, 0) < max_consecutive:
+                    await self._enqueue_delayed_reply(group_id, user_id, message_id, message, raw, sender_card)
 
     async def _handle_owner_private(self, user_id, message, raw, sender, message_id):
         """Handle private messages from bot owner: commands first, then AI chat."""
@@ -859,9 +964,17 @@ class Dispatcher:
 /approve flag尾号 - 同意申请
 /reject flag尾号 原因 - 拒绝申请
 /health - 查看运行状态
+/私聊AI on/off/allow/deny - 私聊AI开关与开放名单
+/AI聊天 群号 on/off - 开关指定群的AI聊天
 /安全 status/log - 查看安全功能和日志
 /info <QQ号> - 查看任意人资料
 /点赞信息 - 查看点赞统计
+/积分 - 查看uapis积分额度
+/b站推送 add 群号 mid - 盯UP主新投稿（mid=UP主空间网址 space.bilibili.com/ 后的数字，也可贴链接）
+/全体 群号 内容 - @全体成员
+/acg图 群号 on/off - 每日ACG图推送开关
+/热榜推送 群号 on/off - 每日热榜推送开关
+/b站解析 群号 on/off - B站自动解析开关
 """
             await self._reply(None, user_id, help_text)
 
@@ -884,6 +997,12 @@ class Dispatcher:
             from .scheduler import run_manual_checkin
             _ok, result_text = await run_manual_checkin(self, gid)
             await self._reply(None, user_id, result_text)
+
+        elif cmd in ("私聊ai", "privateai"):
+            await self._run_command("私聊ai", args, None, user_id, "member", sender_name, message)
+
+        elif cmd in ("积分", "uapi"):
+            await self._run_command("积分", args, None, user_id, "member", sender_name, message)
 
         elif cmd in self._private_group_command_names():
             target_group, rest_args = self._parse_private_group_args(args)
@@ -1168,6 +1287,19 @@ class Dispatcher:
             log.debug("Private chat blocked (blacklisted): %s(%s)", sender_name, user_id)
             return
 
+        # === Private AI gate: master switch + allowlist ===
+        # Default OFF. Replies only when globally enabled, or the user is in
+        # private_chat.allowed_users, or the user is the bot owner.
+        pc_cfg = self.config.get("private_chat", {})
+        pc_allowed_users = {int(u) for u in pc_cfg.get("allowed_users", [])
+                            if str(u).isdigit()}
+        is_allowed_user = user_id in pc_allowed_users
+        if (user_id != self.config.get("bot_owner")
+                and not pc_cfg.get("enabled", False)
+                and not is_allowed_user):
+            log.debug("Private AI disabled, ignoring: %s(%s)", sender_name, user_id)
+            return
+
         # === Dedup: prevent concurrent AI calls for same user ===
         now = time.time()
         if user_id in self._private_processing:
@@ -1176,19 +1308,11 @@ class Dispatcher:
         self._private_processing[user_id] = now
 
         try:
-            # === Friend-only gate ===
+            # === Friend-only gate (silent): non-friends get no response at all ===
             if not await self._is_friend(user_id):
-                if not hasattr(self, '_non_friend_notified'):
-                    self._non_friend_notified = {}
-                if user_id not in self._non_friend_notified:
-                    try:
-                        await self.client.send_private_msg(user_id,
-                            "你好！我是小汐，目前只有好友才能跟我聊天哦～先加个好友吧")
-                    except Exception:
-                        pass
-                    self._non_friend_notified[user_id] = now
-                log.debug("Private chat skipped (not friend): %s(%s)", sender_name, user_id)
-                return
+                if not is_allowed_user:
+                    log.debug("Private chat skipped (not friend): %s(%s)", sender_name, user_id)
+                    return
 
             # === Strip CQ codes for clean text ===
             clean_raw = _re_priv.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
@@ -1222,6 +1346,7 @@ class Dispatcher:
                 web_search_results=web_ctx,
                 reply_intent="直接回应",
                 consecutive_replies=consecutive,
+                interaction_allowed=True,
             )
             if result is True:
                 log.info("Private AI replied to %s(%s)", sender_name, user_id)
@@ -1252,7 +1377,7 @@ class Dispatcher:
             "kick", "ban", "unban", "allban", "welcome", "badword",
             "admin", "title", "头衔", "精华列表", "群荣誉",
             "群文件", "文件链接", "公告", "ocr", "转发摘要",
-            "已读", "history", "禁言列表", "转发", "setgroupavatar",
+            "已读", "history", "禁言列表", "转发", "setgroupavatar", "全体", "acg图", "热榜推送", "b站解析", "b站推送", "ai聊天",
         }
 
 
@@ -1307,27 +1432,6 @@ class Dispatcher:
             else:
                 contexts.append("[图片]")
         return "\n".join(contexts) if contexts else ""
-
-    async def _enhance_image_cache(self, group_id, file_id, sub_type, summary):
-        """Background pre-fetch: warm image cache so future @bot queries hit cache."""
-        cache_key = file_id
-        if not hasattr(self, "_image_desc_cache"):
-            self._image_desc_cache = {}
-        if cache_key in self._image_desc_cache:
-            return
-        try:
-            from .ai import describe_image
-            desc = await describe_image(self, group_id, file_id, sub_type, summary)
-            if desc and desc not in ("[图片]", "[表情/贴纸]"):
-                self._image_desc_cache[cache_key] = {"desc": desc, "ts": time.time()}
-                # Cap cache: remove oldest entries when over limit
-                if len(self._image_desc_cache) > 500:
-                    stale = sorted(self._image_desc_cache.items(),
-                                   key=lambda kv: kv[1].get("ts", 0) if isinstance(kv[1], dict) else 0)
-                    for k, _ in stale[:200]:
-                        del self._image_desc_cache[k]
-        except Exception as e:
-            log.error("Image enhance cache failed for %s: %s", file_id[:16], e)
 
     def _load_guard_file(self, path):
         try:
@@ -1386,6 +1490,17 @@ class Dispatcher:
             self._group_reply_timestamps[group_id] = deque()
         self._group_reply_timestamps[group_id].append(time.time())
 
+    def _check_global_rate_limit(self):
+        """Safety valve: cap total bot replies across all groups within 30min."""
+        now = time.time()
+        while self._global_reply_timestamps and now - self._global_reply_timestamps[0] > self._global_rate_window:
+            self._global_reply_timestamps.popleft()
+        return len(self._global_reply_timestamps) < self._max_global_replies_per_window
+
+    def _record_global_rate_limit(self):
+        """Record a reply timestamp for the global safety valve."""
+        self._global_reply_timestamps.append(time.time())
+
     def _record_human_turn(self, group_id, user_id, raw, message):
         state = self._group_conversation_state[group_id]
         now = time.time()
@@ -1402,15 +1517,6 @@ class Dispatcher:
                 summary = seg.get("data", {}).get("summary", "")
                 state["recent_images"].append({"ts": now, "summary": summary[:80]})
 
-    def _record_decision(self, group_id, decision):
-        self._group_conversation_state[group_id]["last_decision"] = {
-            "ts": time.time(),
-            "score": decision.get("score", 0),
-            "intent": decision.get("intent", ""),
-            "reason": ",".join(decision.get("reasons", [])[:5]),
-            "chosen": bool(decision.get("should_reply")),
-        }
-    
     def _get_rate_limit_warning(self, remaining):
         """Get a warning message when approaching limit."""
         if remaining <= 3:
@@ -1488,217 +1594,9 @@ class Dispatcher:
         # Mixed ASCII/CJK strings are often titles, software, models, songs, games, or errors.
         return bool(re.search(r"[A-Za-z][A-Za-z0-9_.+-]{2,}", text) and re.search(r"[\u4e00-\u9fff]", text))
 
-    def _decide_ai_participation(self, group_id, user_id, message, raw, sender_card,
-                                 is_followup=False, is_image_msg=False):
-        """Local low-cost gate for natural group participation."""
-        now = time.time()
-        cfg = self.config.get("natural_chat", {})
-        text = re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
-        score = 0
-        reasons = []
-
-        def add(value, reason):
-            nonlocal score
-            score += value
-            reasons.append(reason)
-
-        # Check if this is a pure sticker/emoji message (not a normal image)
-        is_pure_sticker = False
-        if is_image_msg and message:
-            images_in_msg = [seg for seg in message
-                           if isinstance(seg, dict) and seg.get("type") == "image"]
-            is_pure_sticker = images_in_msg and all(
-                str(seg.get("data", {}).get("sub_type", "0")) != "0"
-                for seg in images_in_msg
-            )
-
-        if is_followup:
-            add(58, "对方像是在接着和我聊")
-        if self._looks_like_question(text):
-            add(26, "像是在问问题")
-        if self._should_search_web(text):
-            add(18, "像是需要核对事实")
-        if self._looks_like_opinion_request(text):
-            add(22, "像是在问看法")
-        if is_image_msg and not is_pure_sticker and len(text) >= 2:
-            add(24, "图片带了说明")
-        elif is_pure_sticker and len(text) < 5:
-            add(-25, "纯表情包，不值得评价")
-        if self._matches_interest_topic(text):
-            add(18, "话题适合小汐参与")
-        if len(text) >= 8:
-            add(8, "内容足够完整")
-
-        recent = [
-            item for item in self._group_msg_buffer.get(group_id, [])
-            if now - item[2] <= 90
-        ]
-        active_users = {uid for uid, _, _, _ in recent}
-        if len(recent) >= 6 and len(active_users) >= 3:
-            add(12, "群聊正在活跃")
-        if any(self._check_name_mention(item[1]) for item in recent[-5:]):
-            add(15, "最近有人提到小汐")
-
-        if len(text) < 5 and not is_followup:
-            add(-32, "消息太短")
-        if self._is_low_signal_text(text):
-            add(-35, "更像语气词或表情")
-        from .ai import is_ai_busy
-        if is_ai_busy() and not is_followup:
-            add(-28, "AI正在忙")
-        if len(self._background_tasks) >= max(2, self._max_background_tasks // 2) and not is_followup:
-            add(-18, "后台任务较多")
-        last_bot_ts = self._group_conversation_state[group_id].get("last_bot_ts", 0)
-        if not is_followup and now - last_bot_ts < cfg.get("quiet_after_reply_seconds", 75):
-            add(-30, "刚刚说过话")
-        max_consecutive = self.config.get("chat_limits", {}).get("max_consecutive_replies", 5)
-        if self._group_consecutive_replies.get(group_id, 0) >= max_consecutive:
-            add(-60, "连续回复太多")
-
-        threshold = cfg.get("followup_threshold", 42) if is_followup else cfg.get("interject_threshold", 68)
-        if score < threshold:
-            return {
-                "should_reply": False, "score": score, "intent": "沉默",
-                "reasons": reasons, "need_search": False,
-            }
-
-        if is_followup:
-            chance = cfg.get("followup_probability", 0.85)
-        else:
-            base = cfg.get("interject_min_probability", 0.08)
-            cap = cfg.get("interject_max_probability", 0.62)
-            chance = min(cap, max(base, (score - threshold + 18) / 80))
-        if random.random() > chance:
-            reasons.append("随机选择继续潜水")
-            return {
-                "should_reply": False, "score": score, "intent": "沉默",
-                "reasons": reasons, "need_search": False,
-            }
-
-        intent = self._choose_reply_intent(text, is_followup, is_image_msg, is_pure_sticker)
-        return {
-            "should_reply": True,
-            "score": score,
-            "intent": intent,
-            "reasons": reasons,
-            "need_search": self._should_search_web(text),
-        }
-
-    def _looks_like_question(self, text):
-        if not text:
-            return False
-        words = ("吗", "么", "啥", "什么", "怎么", "咋", "为什么", "如何", "谁", "哪里", "哪个", "多少", "有没有", "是不是")
-        return "?" in text or "？" in text or any(w in text for w in words)
-
-    def _looks_like_opinion_request(self, text):
-        words = ("你觉得", "怎么看", "咋看", "推荐", "建议", "要不要", "能不能", "有没有必要", "值不值")
-        return any(w in (text or "") for w in words)
-
-    def _matches_interest_topic(self, text):
-        words = (
-            "番", "动漫", "漫画", "游戏", "二次元", "gal", "剧情", "角色", "音乐", "歌",
-            "电影", "剧", "小说", "梗", "表情包", "电脑", "手机", "ai", "模型", "代码",
-        )
-        return any(w in (text or "").lower() for w in words)
-
-    def _is_low_signal_text(self, text):
-        t = (text or "").strip()
-        if not t:
-            return True
-        if len(t) <= 4 and re.fullmatch(r"[\W_啊哈嘿草笑嗯哦喔呃额]+", t):
-            return True
-        return t in {"。", "？", "?", "！", "!", "哈哈", "哈哈哈", "草", "笑死", "6", "666"}
-
-    def _choose_reply_intent(self, text, is_followup, is_image_msg, is_pure_sticker=False):
-        if is_image_msg and not is_pure_sticker:
-            return "评论图片"
-        if self._looks_like_question(text):
-            return "回答问题"
-        if self._looks_like_opinion_request(text):
-            return "给出看法"
-        if is_followup:
-            return "继续闲聊"
-        if any(w in text for w in ("笑死", "绷不住", "离谱", "草")):
-            return "轻轻吐槽"
-        return "自然接话"
-
-    async def _ai_judge_participation(self, group_id, user_id, sender_name, raw_text,
-                                       chat_context, is_followup, is_image_msg):
-        """Stage 2: Lightweight AI call to decide whether to join conversation.
-
-        Returns ("SKIP" | "REACT" | "JOIN").
-        Only called after Stage 1 (local filter) passes.
-        SKIP=stay silent, REACT=emoji reaction only, JOIN=full reply.
-        Followups skip this stage to save cost (already high confidence).
-        """
-        from .ai import _call_deepseek
-        config = self.config
-
-        sys_prompt = (
-            "你是小汐的内心判断。看群聊记录，决定要不要说话。\n"
-            "小汐性格安静偏高冷，默认选择沉默。判断消息是否真的需要她参与："
-            "消息是否明确和她有关、是否真的在问她、她是否确定了解、现在插话是否自然。"
-            "即使是接着小汐说的话，如果对方在收尾、只回嗯好行、或已经不需要回应，也应 SKIP。\n"
-            "SKIP - 跟我无关/不了解/别人在私聊/氛围不适合插话\n"
-            "REACT - 明确和我有关但一句话都没必要说，只做轻量表情回应\n"
-            "JOIN - 明确需要回复，且我能自然、有把握地说一句\n"
-            "只回答这三个词之一，不要解释。"
-        )
-
-        ctx = chat_context[:800] if chat_context else "（无最近聊天记录）"
-        user_prompt = (
-            f"【最近群聊】\n{ctx}\n\n"
-            f"【当前消息】{sender_name}: {raw_text[:200]}\n\n"
-            f"【状态】像接话={is_followup}，有图片={is_image_msg}，"
-            f"最近连续回复={self._group_consecutive_replies.get(group_id, 0)}，"
-            f"距上次发言约={int(time.time() - self._group_conversation_state[group_id].get('last_bot_ts', 0)) if self._group_conversation_state[group_id].get('last_bot_ts', 0) else -1}秒。\n"
-            "综合完整语境自行判断 SKIP、REACT 或 JOIN。"
-        )
-
-        messages = [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        try:
-            result = await _call_deepseek(config, messages, max_tokens=5, temperature=0.1)
-        except Exception:
-            return "SKIP"
-
-        if not result:
-            return "SKIP"
-
-        result = result.strip().upper()
-        if "JOIN" in result:
-            return "JOIN"
-        elif "REACT" in result:
-            return "REACT"
-        return "SKIP"
-
-    _EMOJI_REACTION_MAP = {
-        "128514": ["笑死", "哈哈", "好笑", "绷不住", "草", "搞笑"],
-        "128557": ["惨", "呜呜", "哭", "太难了", "心疼", "伤心"],
-        "128077": ["牛", "厉害", "强", "赞", "666", "确实", "好的"],
-        "128561": ["离谱", "震惊", "离谱了", "我靠", "不对劲"],
-        "10084": ["爱", "喜欢", "可爱", "好看", "好美"],
-    }
-
-    async def _send_emoji_reaction(self, group_id, message_id, raw_text):
-        """Send an emoji reaction (表情表态) on a message based on its content."""
-        import random as _random
-        emoji_id = "128077"  # thumbs-up
-        for eid, keywords in self._EMOJI_REACTION_MAP.items():
-            if any(kw in (raw_text or "") for kw in keywords):
-                emoji_id = eid
-                break
-        try:
-            await self.client.set_msg_emoji_like(message_id, emoji_id)
-        except Exception:
-            pass  # Emoji reaction is best-effort
-
     async def _check_repeat(self, group_id, raw, sender_user_id):
         cfg = self.config.get("repeat_mode", {})
-        if not cfg.get("enabled", True) or len(raw) < 2:
+        if not cfg.get("enabled", True) or len(raw) < 2 or "[CQ:" in raw:
             return False
         # Skip blacklisted users in repeat tracking
         from .guard import is_blacklisted
@@ -1730,6 +1628,187 @@ class Dispatcher:
                     await self.client.send_group_msg(group_id, raw)
                     return True
             return False
+
+    def _is_trivial_for_interjection(self, text, message):
+        """Cheap hard filter for unsolicited interjection candidates.
+
+        Explicit triggers bypass this; delayed-queue items re-check it at fire time.
+        """
+        import re as _re_trivial
+        t = _re_trivial.sub(r"\[CQ:[^\]]+\]", "", text or "").strip()
+        if not t or len(t) < 3:
+            return True
+        if message:
+            images = [seg for seg in message if isinstance(seg, dict) and seg.get("type") == "image"]
+            if images and all(str(seg.get("data", {}).get("sub_type", "0")) != "0" for seg in images):
+                if len(t) < 5:
+                    return True
+        if t in {"。", "？", "?", "！", "!", "哈哈", "哈哈哈", "草", "笑死", "6", "666"}:
+            return True
+        if len(t) <= 4 and _re_trivial.fullmatch(r"[\W_啊哈嘿草笑嗯哦喔额]+", t):
+            return True
+        return False
+
+    def start_delayed_worker(self):
+        if self._delayed_worker_task is not None:
+            return
+        self._delayed_worker_task = asyncio.create_task(self._delayed_queue_worker())
+        log.debug("Delayed reply worker started")
+
+    async def stop_delayed_worker(self):
+        if self._delayed_worker_task is None:
+            return
+        self._delayed_queue_event.set()
+        self._delayed_worker_task.cancel()
+        try:
+            await asyncio.wait_for(self._delayed_worker_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+        self._delayed_worker_task = None
+        log.debug("Delayed reply worker stopped")
+
+    async def _delayed_queue_worker(self):
+        """Single lightweight worker: fire delayed replies when they mature."""
+        try:
+            while True:
+                now = time.time()
+                while self._delayed_queue and self._delayed_queue[0][0] <= now:
+                    entry = heapq.heappop(self._delayed_queue)
+                    if entry[5] is None:
+                        continue  # stale entry (merged or cancelled)
+                    key = (entry[1], entry[2])
+                    if self._delayed_queue_index.get(key) is not entry:
+                        continue  # stale entry
+                    del self._delayed_queue_index[key]
+                    self.create_background_task(
+                        self._trigger_delayed_reply(entry[1], entry[2], entry[3], entry[4], entry[5], entry[6]),
+                        name="delayed-reply",
+                    )
+                if not self._delayed_queue:
+                    self._delayed_queue_event.clear()
+                    await self._delayed_queue_event.wait()
+                else:
+                    wait = max(0.0, self._delayed_queue[0][0] - time.time())
+                    try:
+                        await asyncio.wait_for(self._delayed_queue_event.wait(), timeout=wait)
+                    except asyncio.TimeoutError:
+                        pass
+        except asyncio.CancelledError:
+            pass
+
+    async def _enqueue_delayed_reply(self, group_id, user_id, message_id, message, raw, sender_card):
+        """Queue a non-explicit interjection to be re-evaluated later.
+
+        Merges per-user entries (keeps only the latest message) and caps total size.
+        """
+        if not group_id or not user_id:
+            return
+        key = (group_id, user_id)
+        now = time.time()
+        existing = self._delayed_queue_index.get(key)
+        if existing:
+            existing[5] = None  # mark old entry stale
+            del self._delayed_queue_index[key]
+        if len(self._delayed_queue_index) >= self._delayed_queue_cap:
+            log.debug("Delayed queue full, dropping candidate from group=%s user=%s", group_id, user_id)
+            return
+        delay = random.randint(60, 300)
+        entry = [now + delay, group_id, user_id, message_id, message, raw, sender_card]
+        heapq.heappush(self._delayed_queue, entry)
+        self._delayed_queue_index[key] = entry
+        self._delayed_queue_event.set()
+        log.debug("Delayed reply queued group=%s user=%s delay=%ds", group_id, user_id, delay)
+
+    async def _trigger_delayed_reply(self, group_id, user_id, message_id, message, raw, sender_card):
+        """Re-evaluate a delayed candidate with fresh context and let the AI decide."""
+        from .ai import handle_ai_chat, search_web, _schedule_state
+        from .guard import is_blacklisted
+
+        log.debug("Delayed reply firing group=%s user=%s", group_id, user_id)
+
+        if is_blacklisted(group_id, user_id):
+            return
+        if message_id and message_id in self._seen_msg_ids:
+            return
+
+        import re as _re_clean
+        clean_raw = _re_clean.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
+        if self._is_trivial_for_interjection(clean_raw, message):
+            return
+
+        state_key, _ = _schedule_state()
+        if state_key == "sleep":
+            return
+
+        runtime = self.config.get("runtime", {})
+        last_interject = self._group_interject_ts.get(group_id, 0)
+        cooldown = runtime.get("non_explicit_judge_cooldown", 240)
+        if time.time() - last_interject < cooldown:
+            return
+
+        max_consecutive = self.config.get("chat_limits", {}).get("max_consecutive_replies", 5)
+        if self._group_consecutive_replies.get(group_id, 0) >= max_consecutive:
+            return
+
+        if not self._check_global_rate_limit():
+            return
+
+        allowed, remaining = self._check_rate_limit(group_id)
+        if not allowed:
+            return
+
+        chat_ctx = self._build_chat_context(group_id)
+        img_ctx = await self._get_image_context(group_id, message)
+        web_ctx = await search_web(self, clean_raw) if self._should_search_web(clean_raw) else ""
+        result = await handle_ai_chat(
+            self, group_id, user_id, clean_raw, sender_card,
+            image_context=img_ctx, chat_context=chat_ctx,
+            message_id=message_id, web_search_results=web_ctx,
+            reply_intent="自然接话",
+            consecutive_replies=self._group_consecutive_replies.get(group_id, 0),
+        )
+        self._record_ai_outcome(group_id, bool(result))
+        if result:
+            self._record_bot_reply(group_id, user_id)
+            self._record_rate_limit(group_id)
+            self._record_global_rate_limit()
+            self._group_interject_ts[group_id] = time.time()
+            self._group_last_reply_to[(group_id, user_id)] = time.time()
+
+    def _record_ai_outcome(self, group_id, replied):
+        """Track whether the AI chose to reply or skip for observability."""
+        stats = self._ai_outcome_stats.setdefault(group_id, {"reply": 0, "skip": 0})
+        if replied:
+            stats["reply"] += 1
+        else:
+            stats["skip"] += 1
+
+    async def _do_ai_reply(self, group_id, user_id, raw, sender_card, message, message_id,
+                         reply_intent="自然接话", rate_warning=""):
+        """Common helper for explicit and follow-up AI replies."""
+        from .ai import handle_ai_chat, search_web
+
+        await self._refresh_member_cache(group_id)
+        import re as _re_clean
+        clean_raw = _re_clean.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
+        chat_ctx = self._build_chat_context(group_id)
+        img_ctx = await self._get_image_context(group_id, message)
+        web_ctx = await search_web(self, clean_raw) if self._should_search_web(clean_raw) else ""
+        result = await handle_ai_chat(
+            self, group_id, user_id, clean_raw, sender_card,
+            image_context=img_ctx, chat_context=chat_ctx,
+            message_id=message_id, web_search_results=web_ctx,
+            reply_intent=reply_intent, rate_warning=rate_warning,
+            consecutive_replies=self._group_consecutive_replies.get(group_id, 0),
+            interaction_allowed=True,
+        )
+        if result:
+            self._record_bot_reply(group_id, user_id)
+            self._record_rate_limit(group_id)
+            self._record_global_rate_limit()
+            self._group_interject_ts[group_id] = time.time()
+            self._group_last_reply_to[(group_id, user_id)] = time.time()
+        return result
 
     def _build_chat_context(self, group_id, max_messages=15):
         buffer = list(self._group_msg_buffer.get(group_id, []))

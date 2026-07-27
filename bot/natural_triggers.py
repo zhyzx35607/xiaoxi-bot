@@ -32,6 +32,22 @@ PHRASE_TRIGGERS = [
     ]),
 ]
 
+# Title request prefixes: "我要头衔xxx" sets the sender's group special title
+TITLE_PREFIXES = [
+    "我要头衔",
+]
+
+
+def extract_title_request(text):
+    """Return the requested title if text starts with a title prefix, else None."""
+    for prefix in TITLE_PREFIXES:
+        if text.startswith(prefix):
+            title = text[len(prefix):].strip()
+            if title:
+                return title
+    return None
+
+
 # Music trigger prefixes: message starts with one of these
 MUSIC_PREFIXES = [
     "点歌", "我要点歌", "点首", "来首", "放首",
@@ -93,6 +109,11 @@ def check_natural_triggers(raw_message, message_segments):
             if text_only == phrase:
                 return (cmd_name, {})
     
+    # ---- Title request ----
+    title = extract_title_request(text_only)
+    if title:
+        return ("mytitle", {"title": title})
+
     # ---- Music prefixes ----
     for prefix in MUSIC_PREFIXES:
         if text_only.startswith(prefix):

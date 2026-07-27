@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from datetime import datetime, timedelta
 from .utils import atomic_write_json
@@ -161,19 +162,150 @@ def _api_succeeded(result):
             and result.get("retcode", 0) == 0)
 
 
+def _seconds_until_time(hour, minute=0):
+    """Seconds until the next local HH:MM:05 occurrence."""
+    now = datetime.now()
+    target = now.replace(hour=int(hour) % 24, minute=int(minute) % 60,
+                         second=5, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+BOARD_NAMES = {
+    "weibo": "微博", "zhihu": "知乎", "bilibili": "B站", "douyin": "抖音",
+    "baidu": "百度", "toutiao": "头条", "ithome": "IT之家", "v2ex": "V2EX",
+    "github": "GitHub", "36kr": "36氪", "douban-movie": "豆瓣电影",
+}
+
+
+def format_hotboard(board, items, limit=10):
+    """Format hot-board items into a compact group message."""
+    name = BOARD_NAMES.get(board, board)
+    lines = ["【{}热榜】".format(name)]
+    for index, item in enumerate(items[:limit], 1):
+        title = str(item.get("title") or "").strip()[:40]
+        hot = str(item.get("hot_value") or "").strip()
+        line = "{}. {}".format(index, title)
+        if hot:
+            line += "（{}）".format(hot)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _feature_on(dispatcher, gid, name):
+    from .permission import get_group_config
+    gcfg = get_group_config(dispatcher, gid)
+    return gcfg.get("features", {}).get(name, True)
+
+
+async def _daily_acg_push(dispatcher):
+    """Push random ACG images at 0/6/12/18. URLs are resolved once and
+    reused for every group; NapCat fetches them directly (no bot memory)."""
+    cfg = dispatcher.config.get("acg_images", {})
+    if not cfg.get("enabled", True):
+        return
+    lo, hi = int(cfg.get("min", 10) or 10), int(cfg.get("max", 20) or 20)
+    count = random.randint(min(lo, hi), max(lo, hi))
+    from .uapi import uapi_resolve_image_url
+    urls = []
+    for _ in range(count):
+        url = await uapi_resolve_image_url(
+            dispatcher, "/random/image", params={"category": "acg", "type": "pc"})
+        if url:
+            urls.append(url)
+        await asyncio.sleep(0.3)
+    if not urls:
+        log.info("ACG push skipped: no image urls resolved")
+        return
+    groups = [gid for gid in _enabled_group_ids(dispatcher)
+              if _feature_on(dispatcher, gid, "acg_images")]
+    for gid in groups:
+        try:
+            if len(urls) <= 15:
+                for i in range(0, len(urls), 5):
+                    segments = [{"type": "image", "data": {"file": u}}
+                                for u in urls[i:i + 5]]
+                    await dispatcher.client.send_group_msg(int(gid), segments)
+                    await asyncio.sleep(2)
+            else:
+                bot_qq = dispatcher.config.get("bot_qq", 0)
+                nodes = [{
+                    "type": "node",
+                    "data": {"name": "小汐", "uin": str(bot_qq),
+                             "content": [{"type": "image", "data": {"file": u}}]},
+                } for u in urls]
+                await dispatcher.client.send_group_forward_msg(int(gid), nodes)
+            log.info("ACG push: group=%s images=%d", gid, len(urls))
+        except Exception as e:
+            log.warning("ACG push failed group=%s: %s", gid, e)
+        await asyncio.sleep(2)
+
+
+async def _daily_hotboard_push(dispatcher):
+    """Push hot boards at 9/21. Fetched once per board, broadcast to all
+    enabled groups (saves credits)."""
+    cfg = dispatcher.config.get("hotboard_push", {})
+    if not cfg.get("enabled", True):
+        return
+    boards = cfg.get("types", ["bilibili"]) or ["bilibili"]
+    groups = [gid for gid in _enabled_group_ids(dispatcher)
+              if _feature_on(dispatcher, gid, "hotboard_push")]
+    if not groups:
+        return
+    from . import uapi as _uapi
+    for board in boards:
+        board = str(board)[:20]
+        if not _uapi.credits_available(dispatcher.config, "auto"):
+            log.info("hotboard push skipped: auto credit budget exhausted")
+            break
+        data = await _uapi.uapi_get(dispatcher, "/misc/hotboard",
+                                    params={"type": board}, kind="auto")
+        items = (data or {}).get("list") if isinstance(data, dict) else None
+        if not items:
+            log.info("hotboard push: board=%s no data", board)
+            continue
+        text = format_hotboard(board, items)
+        for gid in groups:
+            try:
+                await dispatcher.client.send_group_msg(
+                    int(gid), [{"type": "text", "data": {"text": text}}])
+            except Exception as e:
+                log.warning("hotboard push failed group=%s: %s", gid, e)
+            await asyncio.sleep(2)
+
+
+def _scheduled_jobs(dispatcher):
+    """Return [(job_name, seconds_until_fire), ...] for all timed jobs."""
+    jobs = [("checkin", _seconds_until_next_checkin())]
+    acg_cfg = dispatcher.config.get("acg_images", {})
+    if acg_cfg.get("enabled", True):
+        for hour in acg_cfg.get("times", [0, 6, 12, 18]):
+            jobs.append(("acg", _seconds_until_time(hour)))
+    hb_cfg = dispatcher.config.get("hotboard_push", {})
+    if hb_cfg.get("enabled", True):
+        for hour in hb_cfg.get("times", [9, 21]):
+            jobs.append(("hotboard", _seconds_until_time(hour)))
+    return jobs
+
+
 async def scheduler_loop(dispatcher):
     """Main scheduler loop. Handles daily check-in and cleanup tasks."""
     log.info("Scheduler started")
     try:
         while dispatcher.client._running:
-            # === Daily check-in at 00:00:01 ===
-            wait_seconds = _seconds_until_next_checkin()
-            # If extremely close to midnight (< 1 min away), wait exactly for it
+            jobs = _scheduled_jobs(dispatcher)
+            name, wait_seconds = min(jobs, key=lambda item: item[1])
             if wait_seconds <= 60:
                 if wait_seconds > 0:
                     await asyncio.sleep(wait_seconds)
-                await _daily_checkin(dispatcher)
-                # Sleep 65 seconds past midnight to avoid double-firing
+                if name == "checkin":
+                    await _daily_checkin(dispatcher)
+                elif name == "acg":
+                    await _daily_acg_push(dispatcher)
+                elif name == "hotboard":
+                    await _daily_hotboard_push(dispatcher)
+                # Sleep past the fire window to avoid double-firing
                 await asyncio.sleep(65)
             else:
                 # Sleep in 30-minute chunks to stay responsive to shutdown

@@ -199,19 +199,9 @@ async def check_message_urls(dispatcher, group_id, user_id, raw, message_id, sen
 
 async def handle_gray_tip(dispatcher, event):
     group_id = event.get("group_id", 0)
-    cfg = security_config(dispatcher, group_id)
-    if not cfg.get("gray_tip_protect_enabled", True):
-        return
     user_id = event.get("user_id") or event.get("sender_id") or event.get("operator_id") or 0
     message_id = event.get("message_id", 0)
     detail = str(event)[:500]
-    sender_role = "member"
-    if user_id:
-        action = await punish_security_violation(
-            dispatcher, group_id, user_id, message_id,
-            "gray_tip " + detail,
-            sender_role=sender_role,
-        )
-    else:
-        action = "logged:no_user"
-    record_security_event(dispatcher, "gray_tip", group_id, user_id, detail, action)
+    log.warning("Gray tip event logged: group=%s user=%s msg_id=%s detail=%s",
+              group_id, user_id, message_id, detail)
+    record_security_event(dispatcher, "gray_tip", group_id, user_id, detail, "logged")
