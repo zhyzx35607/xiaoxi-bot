@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.coverage
 
 venv/
 .venv/
@@ -20,3 +22,12 @@ memory/
 
 .env
 .env.*
+
+# Local review/deployment snapshots
+backups/
+*.phase*-backup
+*.before-*
+*.pre-fix
+*.final-audit-backup
+*.tool-backup
+*.audit-backup
