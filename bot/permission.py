@@ -5,10 +5,12 @@ import time
 import logging
 from .utils import atomic_write_json
 log = logging.getLogger("qqbot")
+LEVEL_SUPER = 5
 LEVEL_MASTER = 4
+LEVEL_GOWNER = 3
 LEVEL_ADMIN = 2
 LEVEL_MEMBER = 1
-LEVEL_NAMES = {4: "master", 2: "admin", 1: "member"}
+LEVEL_NAMES = {5: "super", 4: "master", 3: "gowner", 2: "admin", 1: "member"}
 def get_group_config(dispatcher, group_id):
     if not group_id:
         return {}
@@ -35,9 +37,12 @@ def is_group_enabled(dispatcher, group_id):
     groups = dispatcher.config.get("groups", {})
     return groups.get(gid, {}).get("enabled", False)
 async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
-    # Bot owner has master level everywhere
+    # Bot owner has super level everywhere
     if user_id == dispatcher.config.get("bot_owner"):
-        return LEVEL_MASTER, "master"
+        return LEVEL_SUPER, "super"
+    # The bot account itself also has super level (self-commands via message_sent)
+    if user_id == dispatcher.config.get("bot_qq"):
+        return LEVEL_SUPER, "super"
     if not group_id:
         return LEVEL_MEMBER, "member"
     gcfg = get_group_config(dispatcher, group_id)
@@ -45,7 +50,7 @@ async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
     if user_id in masters:
         return LEVEL_MASTER, "master"
     # Query real-time role from API (NOT NapCat's possibly-stale sender.role)
-    role_map = {"owner": (LEVEL_ADMIN, "admin"), "admin": (LEVEL_ADMIN, "admin"), "member": (LEVEL_MEMBER, "member")}
+    role_map = {"owner": (LEVEL_GOWNER, "gowner"), "admin": (LEVEL_ADMIN, "admin"), "member": (LEVEL_MEMBER, "member")}
     try:
         r = await dispatcher.client.get_group_member_info(group_id, user_id)
         if r.get("status") == "ok":
@@ -90,8 +95,8 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
     """Unified permission check.
     
     Hierarchy:
-      - Bot Owner (config.bot_owner): bypasses ALL checks
-      - bot_owner_only commands (/master): ONLY bot_owner
+      - Bot Owner + bot account (level 5 super): bypass ALL checks
+      - bot_owner_only commands (/master): bot_owner or bot_qq only
       - bot_owner commands (/enable /disable /list /clearai): bot_owner, bot_qq, or group masters
       - admin_only commands: must be group admin/owner OR master
       - bot_admin_required: bot must be admin/owner in this group
@@ -110,6 +115,8 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
         return True, None
     # /master command: only bot owner can use (already handled above, this is for safety)
     if cmd_info.get("bot_owner_only"):
+        if user_id == bot_qq:
+            return True, None
         return False, "只有最高主人能使用此命令"
     # Commands for bot owner + bot_qq + group masters
     if cmd_info.get("bot_owner"):
@@ -139,7 +146,7 @@ async def can_moderate_target(dispatcher, group_id, actor_id, target_id, actor_r
         return False, "这个目标受保护"
     actor_level, _ = await get_user_level(dispatcher, group_id, actor_id, actor_role)
     target_level, _ = await get_user_level(dispatcher, group_id, target_id, "member")
-    if actor_id != owner and target_level >= actor_level:
+    if actor_level < LEVEL_SUPER and target_level >= actor_level:
         return False, "不能操作同级或更高权限的成员"
     return True, None
 def add_master(dispatcher, group_id, master_qq):
@@ -170,13 +177,13 @@ def list_masters(dispatcher, group_id):
 def save_group_config(dispatcher):
     cfg = copy.deepcopy(dispatcher.config)
     # Never persist secrets to disk
-    for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key"):
+    for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "bili_sessdata"):
         cfg.pop(secret_key, None)
     if isinstance(cfg.get("vision_api"), dict):
         cfg["vision_api"].pop("api_key", None)
     for gcfg in cfg.get("groups", {}).values():
         if isinstance(gcfg, dict):
-            for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key"):
+            for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "bili_sessdata"):
                 gcfg.pop(secret_key, None)
             if isinstance(gcfg.get("vision_api"), dict):
                 gcfg["vision_api"].pop("api_key", None)

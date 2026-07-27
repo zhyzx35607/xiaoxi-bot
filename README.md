@@ -2,7 +2,7 @@
 
 一个跑在 [NapCat](https://github.com/NapNeko/NapCatQQ) 上的 QQ 机器人，OneBot v11 协议。
 
-小汐的人设是一个 20 岁的中文系大二女生，性格温柔好说话，爱刷手机爱追番打游戏。她能在群里闲聊接话、帮忙管群、收表情包、认图片里的字，私聊也能聊。默认走 Agnes 2.0 Flash（免费），DeepSeek 做后备。
+小汐的人设是一个 20 岁的中文系大二女生，性格温柔好说话，爱刷手机爱追番打游戏。她能在群里闲聊接话、帮忙管群、收表情包、认图片里的字，私聊也能聊。默认走 SigmaI（DeepSeek-V4-Flash），DeepSeek 官方 API 做后备。
 
 ## 她能干什么
 
@@ -10,7 +10,7 @@
 - 群里 @她或者叫"小汐"，她就会回你
 - 有时候她会自己判断语境插话——比如有人在问问题、聊到她懂的话题，她可能就冒出来了
 - 遇到她不确定的事实性问题，会自动去网上搜一下再回答（用的 Bing，免费）
-- 能看懂图片：你发张图她可以说说是什么，也能 OCR 提取上面的文字（优先用 Agnes 2.0 Flash 识图，后备 DashScope，再不行用 QQ 摘要）
+- 能看懂图片：你发张图她可以说说是什么，也能 OCR 提取上面的文字（优先用 Vision API（如 qwen-vl-plus）识图，失败则用 QQ 自带摘要）
 - 能看合并转发的内容
 - 能记住最近聊了什么（短期 20 条 + 长期压缩摘要）
 
@@ -29,10 +29,26 @@
 - 复读机：群友好几个人发同一句话，她概率跟风
 - 表情包：自动收集并用 AI 分析情绪标签，AI 聊天时能自主选择贴合语境的表情包发送
 - 点歌：说"来首 xxx"就能搜
+- 娱乐查询：真实天气、各平台热榜、一言、答案之书、每日新闻图、必应壁纸、Epic 免费游戏（数据来自 uapis.cn，有每日积分预算控制）
+- B站功能：群里发 B站视频链接/BV号/b23 短链，自动解析出标题、封面、播放量等信息，并尽量把视频本体发出来（免登录官方接口，超限自动降级为只发信息）
+- UP 主推送：每个群可以盯几个 B站 UP 主，新投稿约 1 分钟内推到群里（Bot 是管理会顺便 @全体）
+- 定时推送：每天 0/6/12/18 点发一波随机 ACG 图（10-20 张），9 点和 21 点发热榜；都可按群开关
+
+**AI 工具调用：**
+- AI 聊天时能自己调用只读工具查群信息、查天气热榜等（最多连调 2 轮）
+- 在被 @ 或追问的场景下，还能给消息贴表情、给群友点赞（每群每天限 30 次，插话场景不会用）
+- 管理类操作永远不让 AI 碰，权限判断全在代码里
+
+**权限体系（五档）：**
+- 总主人 > 群主人 > 群主 > 管理员 > 普通成员，机器人账号本身等同于总主人
+- 群主人只能由总主人（或机器人账号自己）添加/移除
+- Bot 是群管理时，管理员/群主/主人都能用禁言、踢人、公告、@全体 等管理命令
 
 **私聊：**
-- 好友私聊可以跟 AI 自由聊天，非好友会提示先加好友
+- 私聊 AI 默认**关闭**，主人用 `/私聊AI on` 开启（所有好友可聊），或 `/私聊AI allow QQ号` 只开放给指定的人
+- 非好友私聊完全静默，不会收到任何回复
 - Bot 主人可以在私聊里用管理命令、看日志、处理加群申请
+- 登录机器人账号自己发的消息也能触发固定指令（在群里发命令、或在主人的私聊窗口发命令都行）
 
 ## 怎么跑起来
 
@@ -51,9 +67,11 @@ pip install websockets aiohttp
 配置就靠环境变量，密钥不要写进 config.json：
 
 ```bash
-export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"    # DeepSeek 的 key，注册就有
+export SIGMAI_API_KEY="sk-xxxxxxxxxxxxxxxx"      # SigmaI 的 key，主聊天模型
+export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"    # DeepSeek 的 key，后备（没有可不留空）
 export QQBOT_WS_URL="ws://127.0.0.1:3001"        # NapCat 的 WS 地址
-export QQBOT_TOKEN=""                             # OneBot access token，没设就不填
+export QQBOT_TOKEN=""                             # OneBot access token；注意：如果 NapCat 的 WS 服务端配了 token 这里就必须填一致，否则会连上就被踢、每秒重连
+export UAPI_API_KEY="uapi-xxxxxxxxxxxxxxxx"        # uapis.cn 的 key，娱乐查询/B站推送备用通道用（没有则这些功能静默停用）
 ```
 
 如果要用图片识别和表情包分析功能，再配 Vision API（推荐开启，免费额度足够用）：
@@ -64,9 +82,10 @@ export VISION_API_BASE_URL="https://your-api.com/v1"
 export VISION_API_MODEL="qwen-vl-plus"
 ```
 
-启动：
+启动（手动跑之前记得先加载环境变量，否则 WS 会因缺 token 被 NapCat 秒踢）：
 
 ```bash
+set -a; source /etc/qqbot.env; set +a   # 如果 env 文件存在的话
 python main.py
 ```
 
@@ -86,11 +105,18 @@ config.json 里可以按群开关各种功能，调整 AI 插话的积极性、�
 
 **所有人都能用：**
 
-`/help` — 看有哪些命令
+`/help` — 看有哪些命令（按你的身份分级显示）
+`/help 命令名` — 看某个命令的详细用法
 `/fortune` — 今日运势
 `/like @xxx` — 点赞
 `/rank` — 发言排行
-`/weather 城市` — 天气
+`/天气 城市`（或 `/weather`）— 真实天气
+`/热榜 [平台]`（或 `/热搜`）— 各平台热榜（微博/知乎/B站/抖音/百度/头条/IT之家/GitHub…）
+`/一言` — 随机一言
+`/答案之书 [问题]` — 答案之书
+`/每日新闻` — 每日新闻图
+`/必应壁纸` — 每日必应壁纸
+`/epic免费` — Epic 免费游戏
 `/translate 文本` — 翻译
 `/calc 1+2*3` — 计算器
 `/ocr` — 识别图片文字（回复那张图发）
@@ -119,16 +145,30 @@ config.json 里可以按群开关各种功能，调整 AI 插话的积极性、�
 `/公告` — 群公告
 `/setgroupavatar` — 换群头像（回复图片）
 `/安全 status/log` — 安全功能状态和日志
+`/全体 内容` — @全体成员
+`/acg图 on/off` — 本群每日 ACG 图推送开关
+`/热榜推送 on/off` — 本群每日热榜推送开关
+`/b站解析 on/off` — 本群 B站自动解析开关
 
-**群主才能用的：**
+**群主人（每群的主人，由总主人设置）：**
+
+`/enable` `/disable` — 开关本群
+`/list` — 群数据概览
+`/clearai` — 清本群数据
+`/b站推送 add/del/list` — 盯 UP 主新投稿（mid 是 UP 主空间网址 space.bilibili.com/ 后面的数字，直接贴空间链接也行；详细用法发 `/help b站推送`）
+`/积分` — 看 uapis 积分额度
+
+**群主才能用的（QQ 群主身份）：**
 
 `/title @xxx 头衔` — 设专属头衔（Bot 得是群主）
-`/enable` `/disable` — 开关本群的 Bot 功能
-`/clearai` — 清掉本群的 AI 记忆和表情包
 
 **Bot 主人的私聊命令（在私聊窗口发给 Bot）：**
 
 `/status` — 看运行状态、内存、在线时间
+`/AI状态` — 看 SigmaI / DeepSeek 供应商状态
+`/私聊AI on/off/allow QQ/deny QQ` — 私聊 AI 总开关与开放名单
+`/AI聊天 on/off` — 开关本群的 AI 聊天（私聊里用 `/AI聊天 群号 on/off`）
+`/打卡状态` `/打卡测试 群号` — 群打卡
 `/list` — 所有群的概览
 `/log [N]` — 看最近 N 条日志
 `/bl list/add/remove` — 黑名单管理
@@ -140,16 +180,21 @@ config.json 里可以按群开关各种功能，调整 AI 插话的积极性、�
 `/approve flag尾号` — 同意加群
 `/reject flag尾号 原因` — 拒绝
 `/health` — 健康检查
+`/积分` — uapis 积分额度
+`/b站推送 add 群号 mid` — 盯 UP 主新投稿
+`/全体 群号 内容` — 跨群 @全体
 
 跨群管理：大部分命令可以用 `/<命令> 群号 参数` 的格式跨群操作，比如 `/kick 123456 @xxx`。
 
 **不用前缀也能触发的：**
 
+- "我要头衔 xxx" → 给自己设置专属头衔（只有 Bot 是群主的群生效，其他群静默忽略）
 - "踢了 @xxx" / "把 @xxx 踢了" → 踢人
 - "禁言 @xxx" / "把 @xxx 禁言了" → 禁言
 - "解禁 @xxx" → 解禁
 - "来看看" / "运势" → 今日运势
 - "点歌 xxx" / "来首 xxx" → 搜歌
+- 发 B站视频链接 / BV号 / b23 短链 → 自动解析并发出视频
 
 ## 代码结构
 
@@ -159,7 +204,7 @@ bot/
  ├── client.py             OneBot WS 连接、所有 API 调用
  ├── dispatcher.py         事件调度中心，AI 插话决策也在这
  ├── commands.py           所有 / 命令的处理逻辑
- ├── ai.py                 DeepSeek 调用、人设、记忆、联网搜索
+ ├── ai.py                 SigmaI/DeepSeek 调用、人设、记忆、联网搜索
  ├── natural_triggers.py   自然语言触发（不带 / 的命令）
  ├── notice_handler.py     群事件：加群退群、戳一戳、违禁词等
  ├── permission.py         权限判断
@@ -168,7 +213,9 @@ bot/
  ├── request_handler.py    好友/加群申请的存取
  ├── media.py              消息解析：图片 OCR、转发、语音、文件
  ├── memory.py             从聊天里提取用户信息
- ├── scheduler.py          定时任务（群打卡，每天 00:00）
+ ├── scheduler.py          定时任务（群打卡、ACG 图、热榜推送）
+ ├── uapi.py               uapis.cn 客户端（积分预算：每天 100，预留 30 给自动任务，每月 1 号重置）
+ ├── bilibili.py           B站解析/下载（官方免登录接口）+ UP 主推送轮询（60 秒，uapis 兜底）
  └── utils.py              原子化写 JSON 的工具
 ```
 
@@ -181,6 +228,8 @@ data/
 ├── memories/           短期记忆 + 长期摘要 + 按用户的记忆
 ├── stickers/           收集的表情包
 ├── blacklist.json      黑名单
+├── uapi_state.json     uapis 积分用量
+├── bili_push.json      UP 主推送已发记录
 ├── r18_warnings.json   R18 警告次数
 ├── security_events.json 安全事件记录
 └── runtime_state.json  运行状态

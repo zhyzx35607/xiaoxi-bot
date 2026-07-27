@@ -850,8 +850,10 @@ async def deepseek_chat(dispatcher, prompt, system_prompt=None):
 async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name,
                           image_context="", web_search_query="", chat_context="",
                           message_id=0, rate_warning="", web_search_results=None,
-                          reply_intent="", consecutive_replies=0):
+                          reply_intent="", consecutive_replies=0,
+                          interaction_allowed=False):
     config = dispatcher.config
+    context_key = f"private_{user_id}" if not group_id else str(group_id)
     bot_role = ""
     if group_id:
         try:
@@ -1014,12 +1016,15 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         clean_msg = None  # Skip combined message below
     if clean_msg is not None:
         messages.append({"role": "user", "content": f"{sender_name}: {clean_msg}"})
-    # Allow one bounded, read-only NapCat tool request before the final reply.
-    if group_id and _should_consider_napcat_tool(original_clean_msg or raw_message):
+    # Bounded tool loop (read-only + budgeted uapi; interaction tools only
+    # in explicit/follow-up scenes) before the final reply.
+    if _should_consider_napcat_tool(original_clean_msg or raw_message):
         tool_result = await _maybe_call_napcat_tool(
-            dispatcher, group_id, user_id, original_clean_msg or raw_message, chat_context)
+            dispatcher, group_id, user_id, original_clean_msg or raw_message,
+            chat_context, interaction_allowed=interaction_allowed,
+            message_id=message_id)
         if tool_result:
-            messages.append({"role": "system", "content": "【NapCat工具查询结果】\n" + tool_result})
+            messages.append({"role": "system", "content": "【工具查询结果】\n" + tool_result})
     temperature = 0.65
         # Fixed token budget: resource boundary, not behavior control
     is_question = bool(clean_msg) and ("?" in str(clean_msg) or "？" in str(clean_msg) or
@@ -1294,48 +1299,97 @@ def _should_consider_napcat_tool(text):
         "群信息", "群资料", "群人数", "成员", "谁是", "群主", "管理员",
         "聊天记录", "历史消息", "刚才说", "群文件", "文件链接", "群公告",
         "群荣誉", "龙王", "禁言列表", "qq资料", "qq信息",
+        "天气", "热榜", "热搜", "一言", "答案之书", "epic", "免费游戏",
+        "精华", "翻译", "链接安全", "@全体", "全体", "壁纸",
+        "表情回应", "贴表情", "点赞",
     )
     return any(keyword in value for keyword in keywords)
-async def _maybe_call_napcat_tool(dispatcher, group_id, user_id, text, chat_context):
-    """Ask the model for at most one whitelisted read-only tool call."""
-    prompt = (
-        "你负责选择是否调用QQ/NapCat只读工具。只输出一行JSON或NONE。\n"
-        "可用工具：\n"
-        "get_group_info 参数 group_id\n"
-        "get_member_info 参数 group_id,user_id\n"
-        "get_recent_messages 参数 group_id,count(1-20)\n"
-        "get_group_files 参数 group_id,keyword\n"
-        "get_group_notice 参数 group_id\n"
-        "get_group_honor 参数 group_id,honor_type\n"
-        "get_shut_list 参数 group_id\n"
-        "get_friend_info 参数 user_id\n"
+
+
+_READ_TOOL_SPEC = (
+    "get_group_info 参数 group_id\n"
+    "get_member_info 参数 group_id,user_id\n"
+    "get_recent_messages 参数 group_id,count(1-20)\n"
+    "get_group_files 参数 group_id,keyword\n"
+    "get_group_notice 参数 group_id\n"
+    "get_group_honor 参数 group_id,honor_type\n"
+    "get_shut_list 参数 group_id\n"
+    "get_friend_info 参数 user_id\n"
+    "get_essence_list 参数 group_id\n"
+    "get_group_info_ex 参数 group_id\n"
+    "check_url_safely 参数 url\n"
+    "translate_en2zh 参数 text\n"
+    "get_group_at_all_remain 参数 group_id\n"
+    "uapi_weather 参数 city (查真实天气)\n"
+    "uapi_hotboard 参数 type(weibo/zhihu/bilibili/douyin/baidu/toutiao/ithome/github) (查热榜)\n"
+    "uapi_saying 无参数 (随机一言)\n"
+    "uapi_answerbook 参数 question (答案之书)\n"
+    "uapi_epic_free 无参数 (Epic免费游戏)\n"
+)
+
+_INTERACTION_TOOL_SPEC = (
+    "set_msg_emoji_like 参数 message_id,emoji_id (给消息贴表情, message_id 用系统提供的当前消息id)\n"
+    "send_like 参数 user_id,times(1-10) (给群友点赞)\n"
+)
+
+
+async def _maybe_call_napcat_tool(dispatcher, group_id, user_id, text, chat_context,
+                                  interaction_allowed=False, message_id=0):
+    """Bounded tool loop: at most 2 whitelisted calls before the final reply.
+
+    Interaction tools (emoji reaction / like) are only offered in explicit
+    or follow-up scenes, never for interjections, and are daily-capped.
+    """
+    tool_spec = _READ_TOOL_SPEC
+    if interaction_allowed:
+        tool_spec += _INTERACTION_TOOL_SPEC
+    base_prompt = (
+        "你负责选择是否调用工具。只输出一行JSON或NONE。\n"
+        "可用工具：\n" + tool_spec +
         "当前群号和用户号由系统提供，不得编造。\n"
         "示例：{\"tool\":\"get_group_info\",\"arguments\":{}}\n"
-        "如果无需工具只输出NONE。"
+        "如果无需工具只输出NONE。如需第二个工具，在看到第一个结果后再输出一行JSON。"
     )
-    user_prompt = "当前群={} 当前用户={} 消息={}\n最近上下文={}".format(
-        group_id, user_id, str(text)[:160], str(chat_context or "")[-500:])
-    decision = await _call_deepseek(
-        dispatcher.config,
-        [{"role": "system", "content": prompt}, {"role": "user", "content": user_prompt}],
-        max_tokens=80, temperature=0.1, session=dispatcher.client.session)
-    if not decision or decision.strip().upper().startswith("NONE"):
-        return ""
-    try:
-        match = re.search(r'\{.*\}', decision, re.S)
-        payload = json.loads(match.group(0) if match else decision)
-        name = payload.get("tool", "")
-        args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
-        if group_id:
-            args["group_id"] = group_id
-        if name == "get_member_info" and not args.get("user_id"):
-            args["user_id"] = user_id
-        from ai_tools import execute_tool, format_tool_result
-        result = await execute_tool(dispatcher, name, args)
-        return format_tool_result(result)
-    except Exception as exc:
-        log.debug("NapCat tool decision ignored: %s", exc)
-        return ""
+    collected = []
+    extra_context = ""
+    from ai_tools import execute_tool, execute_interaction_tool, format_tool_result
+    for _round in range(2):
+        user_prompt = "当前群={} 当前用户={} 当前消息id={} 消息={}\n最近上下文={}{}".format(
+            group_id, user_id, message_id, str(text)[:160],
+            str(chat_context or "")[-500:], extra_context)
+        decision = await _call_deepseek(
+            dispatcher.config,
+            [{"role": "system", "content": base_prompt},
+             {"role": "user", "content": user_prompt}],
+            max_tokens=80, temperature=0.1, session=dispatcher.client.session)
+        if not decision or decision.strip().upper().startswith("NONE"):
+            break
+        try:
+            match = re.search(r"\{.*\}", decision, re.S)
+            payload = json.loads(match.group(0) if match else decision)
+            name = payload.get("tool", "")
+            args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
+            if group_id:
+                args["group_id"] = group_id
+            if name == "get_member_info" and not args.get("user_id"):
+                args["user_id"] = user_id
+            if name in ("set_msg_emoji_like", "send_like"):
+                if not interaction_allowed:
+                    break
+                if name == "set_msg_emoji_like" and not args.get("message_id"):
+                    args["message_id"] = message_id
+                result = await execute_interaction_tool(
+                    dispatcher, name, args, group_id=group_id or 0, user_id=user_id)
+            else:
+                result = await execute_tool(dispatcher, name, args)
+            formatted = format_tool_result(result)
+            collected.append(formatted)
+            extra_context += "\n已执行工具结果=" + formatted
+        except Exception as exc:
+            log.debug("tool loop round ignored: %s", exc)
+            break
+    return "\n".join(collected)
+
 # ========== REPLY PARSING ==========
 def _parse_reply_actions(reply, member_map):
     """Parse AI reply for @mentions and quote markers.

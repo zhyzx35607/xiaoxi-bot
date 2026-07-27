@@ -103,6 +103,316 @@ def register_all(d):
     d.register("enable", cmd_enable, "开启群聊机器人", bot_owner=True)
     d.register("disable", cmd_disable, "关闭群聊机器人", bot_owner=True)
     d.register("list", cmd_list, "查看群聊数据概览", bot_owner=True)
+    # Title self-service (any member; silently ignored when bot is not group owner)
+    d.register("mytitle", cmd_my_title, "我要头衔xxx 给自己设置专属头衔")
+    # AI switches (bot owner / bot account only)
+    d.register("私聊ai", cmd_private_ai_switch, "私聊AI开关 /私聊AI on/off/allow/deny",
+               bot_owner=True)
+    d.register("ai聊天", cmd_group_ai_switch, "本群AI聊天开关 /AI聊天 on/off",
+               bot_owner=True)
+    # uapis.cn fun commands (everyone)
+    d.register("天气", cmd_weather, "真实天气 /天气 城市")
+    d.register("热榜", cmd_hotboard, "热榜 /热榜 [平台]")
+    d.register("热搜", cmd_hotboard, "热榜(别名)")
+    d.register("一言", cmd_saying, "随机一言")
+    d.register("答案之书", cmd_answerbook, "答案之书 /答案之书 [问题]")
+    d.register("每日新闻", cmd_daily_news, "每日新闻图")
+    d.register("必应壁纸", cmd_bing_wallpaper, "每日必应壁纸")
+    d.register("epic免费", cmd_epic_free, "Epic免费游戏")
+    # admin commands
+    d.register("全体", cmd_at_all, "@全体成员 /全体 内容",
+               admin_only=True, bot_admin_required=True)
+    d.register("acg图", cmd_acg_switch, "每日ACG图推送开关 /acg图 on/off",
+               admin_only=True)
+    d.register("热榜推送", cmd_hotboard_switch, "每日热榜推送开关 /热榜推送 on/off",
+               admin_only=True)
+    d.register("b站解析", cmd_bili_parse_switch, "B站视频自动解析开关 /b站解析 on/off",
+               admin_only=True)
+    # master commands
+    d.register("b站推送", cmd_bili_push, "盯UP主新投稿 /b站推送 add/del/list",
+               bot_owner=True)
+    d.register("积分", cmd_uapi_status, "查看uapis积分额度",
+               bot_owner=True)
+# ==================== UAPIS FUN COMMANDS ====================
+async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
+    """/热榜 [平台] — real hot board via uapis.cn."""
+    from .scheduler import BOARD_NAMES, format_hotboard
+    alias = {v: k for k, v in BOARD_NAMES.items()}
+    board = (args.strip().lower() or "weibo")
+    board = alias.get(board, board)
+    from . import uapi as _uapi
+    if not _uapi.credits_available(d.config, "user"):
+        await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
+        return
+    data = await _uapi.uapi_get(d, "/misc/hotboard", params={"type": board}, kind="user")
+    items = (data or {}).get("list") if isinstance(data, dict) else None
+    if not items:
+        await d._reply(group_id, user_id,
+                       "没查到，支持的平台：" + "、".join(BOARD_NAMES.values()))
+        return
+    await d._reply(group_id, user_id, format_hotboard(board, items))
+
+
+async def cmd_saying(d, group_id, user_id, args, role, sender_card, message):
+    """/一言 — random quote via uapis.cn."""
+    from . import uapi as _uapi
+    if not _uapi.credits_available(d.config, "user"):
+        await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
+        return
+    data = await _uapi.uapi_get(d, "/saying/random", kind="user")
+    if not data:
+        await d._reply(group_id, user_id, "没取到一言，等会再试")
+        return
+    text = str(data.get("content") or "").strip()
+    author = str(data.get("author") or "").strip()
+    await d._reply(group_id, user_id,
+                   text + ("\n—— " + author if author else ""))
+
+
+async def cmd_answerbook(d, group_id, user_id, args, role, sender_card, message):
+    """/答案之书 [问题] — answer book via uapis.cn."""
+    from . import uapi as _uapi
+    if not _uapi.credits_available(d.config, "user"):
+        await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
+        return
+    question = args.strip()[:60] or "今天会发生什么"
+    data = await _uapi.uapi_get(d, "/answerbook/ask",
+                                params={"question": question}, kind="user")
+    if not data:
+        await d._reply(group_id, user_id, "答案之书今天不想说话，等会再问")
+        return
+    await d._reply(group_id, user_id,
+                   "问：{}\n答：{}".format(question, data.get("answer", "?")))
+
+
+async def _send_uapi_image(d, group_id, user_id, path, params, label):
+    """Download a uapis.cn image endpoint to tmp and send it (bounded)."""
+    from . import uapi as _uapi
+    if not _uapi.credits_available(d.config, "user"):
+        await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
+        return
+    result = await _uapi.uapi_get_binary(d, path, params=params, kind="user")
+    if not result:
+        await d._reply(group_id, user_id, label + "没取到，等会再试")
+        return
+    payload, ctype = result
+    ext = ".png" if "png" in ctype else ".jpg"
+    tmp_dir = os.path.join(_ROOT, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    tmp_path = os.path.join(tmp_dir, "uapi_{}{}".format(int(time.time() * 1000), ext))
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(payload)
+        segments = [{"type": "image", "data": {"file": "file://" + tmp_path}}]
+        if group_id:
+            await d.client.send_group_msg(group_id, segments)
+        else:
+            await d.client.send_private_msg(user_id, segments)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+async def cmd_daily_news(d, group_id, user_id, args, role, sender_card, message):
+    """/每日新闻 — daily news image via uapis.cn."""
+    await _send_uapi_image(d, group_id, user_id, "/daily/news-image", None, "每日新闻")
+
+
+async def cmd_bing_wallpaper(d, group_id, user_id, args, role, sender_card, message):
+    """/必应壁纸 — Bing daily wallpaper via uapis.cn."""
+    await _send_uapi_image(d, group_id, user_id, "/image/bing-daily", None, "必应壁纸")
+
+
+async def cmd_epic_free(d, group_id, user_id, args, role, sender_card, message):
+    """/epic免费 — Epic free games via uapis.cn."""
+    from . import uapi as _uapi
+    if not _uapi.credits_available(d.config, "user"):
+        await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
+        return
+    data = await _uapi.uapi_get(d, "/game/epic-free", kind="user")
+    games = (data or {}).get("data") if isinstance(data, dict) else None
+    if not games:
+        await d._reply(group_id, user_id, "没查到 Epic 免费游戏，等会再试")
+        return
+    lines = ["【Epic 免费游戏】"]
+    for g in games[:5]:
+        title = str(g.get("title") or "?")
+        price = str(g.get("original_price_desc") or "")
+        state = "限免中" if g.get("is_free_now") else "即将限免"
+        lines.append("· {}（{}，{}）".format(title, price, state))
+    await d._reply(group_id, user_id, "\n".join(lines))
+
+
+# ==================== AT ALL / FEATURE SWITCHES / BILI PUSH ====================
+async def cmd_at_all(d, group_id, user_id, args, role, sender_card, message):
+    """/全体 内容 — @everyone (admin+, bot must be admin/owner)."""
+    if not group_id:
+        await d._reply(None, user_id, "这个只能在群里用")
+        return
+    content = args.strip()
+    if not content:
+        await d._reply(group_id, user_id, "这样用：/全体 要说的内容")
+        return
+    remain = await d.client.get_group_at_all_remain(group_id)
+    rdata = remain.get("data") or {}
+    if remain.get("status") == "ok" and isinstance(rdata, dict) \
+            and rdata and not rdata.get("can_at_all", True):
+        await d._reply(group_id, user_id, "今天@全体的次数用完了，明天再来")
+        return
+    await d.client.send_group_msg(group_id, [
+        {"type": "at", "data": {"qq": "all"}},
+        {"type": "text", "data": {"text": " " + content[:200]}},
+    ])
+    log.info("AT_ALL group=%s user=%s text=%s", group_id, user_id, content[:40])
+
+
+async def _toggle_group_feature(d, group_id, user_id, args, feature, label, cmd_name):
+    """Shared on/off toggle for per-group feature flags."""
+    if not group_id:
+        await d._reply(None, user_id,
+                       "这个要在群里用，私聊就带上群号：/{} 群号 on".format(cmd_name))
+        return
+    arg = args.strip().lower()
+    cfg = _load()
+    groups = cfg.setdefault("groups", {})
+    group_cfg = groups.setdefault(str(group_id), {"enabled": True, "masters": [],
+                                                  "welcome_msg": {}, "bad_words": {},
+                                                  "features": {}})
+    feats = group_cfg.setdefault("features", {})
+    current = feats.get(feature, True)
+    if arg not in ("on", "off"):
+        await d._reply(group_id, user_id,
+                       "本群{}：{}\n用法：/{} on 或 /{} off".format(
+                           label, "开启" if current else "关闭", cmd_name, cmd_name))
+        return
+    feats[feature] = (arg == "on")
+    _save(cfg)
+    d.config = cfg
+    await d._reply(group_id, user_id,
+                   "本群{}已{}".format(label, "开启" if feats[feature] else "关闭"))
+
+
+async def cmd_acg_switch(d, group_id, user_id, args, role, sender_card, message):
+    """/acg图 on|off — toggle scheduled ACG image push for this group."""
+    await _toggle_group_feature(d, group_id, user_id, args,
+                                "acg_images", "每日ACG图推送", "acg图")
+
+
+async def cmd_hotboard_switch(d, group_id, user_id, args, role, sender_card, message):
+    """/热榜推送 on|off — toggle scheduled hot-board push for this group."""
+    await _toggle_group_feature(d, group_id, user_id, args,
+                                "hotboard_push", "每日热榜推送", "热榜推送")
+
+
+async def cmd_bili_parse_switch(d, group_id, user_id, args, role, sender_card, message):
+    """/b站解析 on|off — toggle auto B站 video parse for this group."""
+    await _toggle_group_feature(d, group_id, user_id, args,
+                                "bili_parse", "B站视频自动解析", "b站解析")
+
+
+def _parse_mid(text):
+    """Accept a bare mid or a space.bilibili.com URL; return int mid or 0."""
+    import re as _re_mid
+    m = _re_mid.search(r"space\.bilibili\.com/(\d+)", text or "")
+    if m:
+        return int(m.group(1))
+    m = _re_mid.search(r"\b(\d{3,12})\b", text or "")
+    return int(m.group(1)) if m else 0
+
+
+async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
+    """/b站推送 add|del|list — manage watched UP主 for this group (master+)."""
+    usage = ("用法：\n"
+             "/b站推送 add <mid或空间链接> — 盯一个UP主\n"
+             "/b站推送 del <mid> — 不盯了\n"
+             "/b站推送 list — 看本群在盯谁\n"
+             "mid 就是UP主空间网址 space.bilibili.com/ 后面的数字")
+    parts = args.strip().split()
+    action = parts[0].lower() if parts else "list"
+    target_group = group_id
+    index = 1
+    if not group_id:
+        if len(parts) >= 2 and parts[1].isdigit():
+            target_group = int(parts[1])
+            index = 2
+        else:
+            await d._reply(None, user_id,
+                           "私聊跨群这样用：/b站推送 add <群号> <mid或空间链接>\n" + usage)
+            return
+    if not target_group:
+        await d._reply(group_id, user_id, "要带上群号，不然我不知道改哪个群")
+        return
+    cfg = _load()
+    groups = cfg.setdefault("groups", {})
+    group_cfg = groups.setdefault(str(target_group), {"enabled": True, "masters": [],
+                                                      "welcome_msg": {}, "bad_words": {},
+                                                      "features": {}})
+    push_cfg = group_cfg.setdefault("bili_push", {"mids": []})
+    mids = push_cfg.setdefault("mids", [])
+    mid = _parse_mid(parts[index]) if len(parts) > index else 0
+    if action == "add":
+        if not mid:
+            await d._reply(group_id, user_id, usage)
+            return
+        if mid in mids:
+            await d._reply(group_id, user_id, "这个UP主已经在盯了")
+            return
+        mids.append(mid)
+        _save(cfg)
+        d.config = cfg
+        # Prime seen-list + watermark so historical uploads never flood
+        from .bilibili import prime_push_state
+        nickname = ""
+        try:
+            videos = await prime_push_state(d, target_group, mid)
+            if videos:
+                nickname = videos[0].get("author", "")
+        except Exception as e:
+            log.warning("bili push prime failed mid=%s: %s", mid, e)
+        who = "UP主 {}（mid={}）".format(nickname, mid) if nickname else "mid={}".format(mid)
+        await d._reply(group_id, user_id,
+                       "好，开始盯 {} 的新投稿和动态，已有的不会重复推\n"
+                       "小提示：动态推送用的是提供cookie的那个B站账号的关注列表，"
+                       "记得让它也关注这个UP主，不然只有视频投稿推送".format(who))
+    elif action == "del":
+        if not mid:
+            await d._reply(group_id, user_id, usage)
+            return
+        if mid in mids:
+            mids.remove(mid)
+            _save(cfg)
+            d.config = cfg
+            await d._reply(group_id, user_id, "不盯 mid={} 了".format(mid))
+        else:
+            await d._reply(group_id, user_id, "这个UP主本来就没在盯")
+    elif action == "list":
+        if mids:
+            await d._reply(group_id, user_id,
+                           "本群正在盯的UP主 mid：" + ", ".join(str(m) for m in mids)
+                           + "\n（mid 就是 space.bilibili.com/ 后面的数字）")
+        else:
+            await d._reply(group_id, user_id,
+                           "本群还没盯任何UP主\n" + usage)
+    else:
+        await d._reply(group_id, user_id, usage)
+
+
+async def cmd_uapi_status(d, group_id, user_id, args, role, sender_card, message):
+    """/积分 — show uapis.cn credit budget usage."""
+    from . import uapi as _uapi
+    info = _uapi.credits_remaining(d.config)
+    lines = [
+        "【uapis 积分额度】",
+        "今日命令：剩 {}/{}".format(info["user_left"], info["user_cap"]),
+        "今日预留（自动任务）：剩 {}/{}".format(info["auto_left"], info["auto_cap"]),
+        "本月累计：已用 {}，上限 {}".format(
+            info["month_cap"] - info["month_left"], info["month_cap"]),
+    ]
+    await d._reply(group_id, user_id, "\n".join(lines))
+
+
 # ==================== HELP ====================
 async def cmd_api_status(d, group_id, user_id, args, role, sender_card, message):
     """Show the registered API catalog without probing every endpoint."""
@@ -300,74 +610,135 @@ async def cmd_delete_group_notice(d, group_id, user_id, args, role, sender_card,
                 user_id, group_id, notice_id, result.get("status"))
     await d._reply(group_id, user_id, "公告已删除" if result.get("status") == "ok" else
                    "删除失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
+COMMAND_DETAILS = {
+    "天气": "/天气 <城市>\n查真实天气（数据来自高德）。\n例：/天气 杭州",
+    "热榜": "/热榜 [平台]（别名 /热搜）\n看指定平台的实时热榜前 10。\n平台可写：微博、知乎、B站、抖音、百度、头条、IT之家、V2EX、GitHub、36氪、豆瓣电影\n例：/热榜 微博（不写平台默认微博）",
+    "一言": "/一言\n随机来一句语录。",
+    "答案之书": "/答案之书 [问题]\n心里想着问题，翻翻答案之书。\n例：/答案之书 今天适合摸鱼吗",
+    "每日新闻": "/每日新闻\n发一张今日新闻速览图。",
+    "必应壁纸": "/必应壁纸\n发今天的必应壁纸。",
+    "epic免费": "/epic免费\n看 Epic 现在在送什么游戏。",
+    "全体": "/全体 <内容>\n@全体成员发一条消息（每天次数有限，QQ 限制）。\n例：/全体 今晚八点开黑\n需要：你是本群管理/群主/主人，且 Bot 是管理或群主。",
+    "acg图": "/acg图 on 或 /acg图 off\n开关本群的每日 ACG 图推送（每天 0/6/12/18 点发 10-20 张随机二次元图）。\n不写参数可查看当前状态。管理员及以上可用。",
+    "热榜推送": "/热榜推送 on 或 /热榜推送 off\n开关本群的每日热榜推送（每天 9 点和 21 点自动发）。\n不写参数可查看当前状态。管理员及以上可用。",
+    "b站解析": "/b站解析 on 或 /b站解析 off\n开关本群的 B站视频自动解析：有人发 BV号/av号/b23 链接时，自动回复视频信息并尽量发出视频本体。\n不写参数可查看当前状态。管理员及以上可用。",
+    "b站推送": "/b站推送 add <UP主的mid> — 盯一个 UP 主，新投稿和新动态约 1 分钟内推到本群\n/b站推送 del <mid> — 不盯了\n/b站推送 list — 看本群在盯谁\n\nmid 是什么：UP 主空间网址 space.bilibili.com/ 后面的那串数字，直接贴空间链接也行。\n例：/b站推送 add 946974 或 /b站推送 add space.bilibili.com/946974\n视频投稿推送直接生效；动态推送需要提供cookie的B站账号也关注了这个UP主。\n只有群主人和总主人能用。",
+    "积分": "/积分\n看 uapis 接口的积分额度用量（每天 100：命令 70 + 自动任务预留 30，每月 1 号重置）。",
+    "master": "/master add <QQ号> — 添加本群主人\n/master del <QQ号> — 移除\n/master list — 看本群主人名单\n私聊里用：/master add <群号> <QQ号>\n群主人拥有本群全部管理权限。只有总主人和机器人账号能用。",
+    "私聊ai": "/私聊AI on — 所有好友都能私聊 AI\n/私聊AI off — 全部关闭\n/私聊AI allow <QQ号> — 只给这个人开\n/私聊AI deny <QQ号> — 把这个人移出名单\n主人永远可用，不受开关影响。",
+    "ai聊天": "/AI聊天 on 或 /AI聊天 off\n开关本群的 AI 聊天（@小汐 说话她回不回答）。\n私聊里跨群用：/AI聊天 <群号> on",
+    "kick": "/kick @某人 — 踢出群\n也可以直接说：踢了 @某人\n需要管理权限，且不能踢同级及以上的人。",
+    "ban": "/ban @某人 [分钟] — 禁言（默认 30 分钟）\n/unban @某人 — 解除禁言\n也可以说：禁言 @某人 10分钟",
+    "title": "/title @某人 <头衔> — 设置专属头衔\nQQ 规定只有群主能设头衔，所以 Bot 必须是群主；Bot 不是群主的群此功能静默无效。\n任何人也可以发：我要头衔xxx（只给自己设，Bot 是群主才生效）。",
+    "公告": "/公告 <内容> — 发布群公告\n/公告 — 查看现有公告\n/删公告 <notice_id> — 删除",
+}
+
 async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
+    # /help <命令名> — detailed usage for one command
+    query = args.strip().lstrip("/").lower()
+    if query:
+        matched = None
+        for name in d.commands:
+            if name.lower() == query:
+                matched = name
+                break
+        if not matched:
+            for name in d.commands:
+                if query in name.lower():
+                    matched = name
+                    break
+        if not matched:
+            await d._reply(group_id, user_id,
+                           "没有这个命令，发 /help 看全部命令")
+            return
+        info = d.commands.get(matched, {})
+        lines = ["【/{}】".format(matched)]
+        detail = COMMAND_DETAILS.get(matched) or COMMAND_DETAILS.get(query)
+        if detail:
+            lines.append(detail)
+        elif info.get("help"):
+            lines.append(info["help"])
+        else:
+            lines.append("暂无详细说明")
+        await d._reply(group_id, user_id, "\n".join(lines))
+        return
+
     caller_level, caller_name = await get_user_level(d, group_id, user_id, role)
     bot_owner = d.config.get("bot_owner")
-    is_owner = (user_id == bot_owner)
+    is_super = (user_id == bot_owner) or (user_id == d.config.get("bot_qq"))
     bot_role_str = "member"
     if group_id:
         bot_role_str, _ = await get_bot_role(d, group_id)
     lines = []
     lines.append("* ====== 小汐的使用指南 ====== *")
-    # ---- Basic commands (everyone) ----
+    # ---- everyone ----
     lines.append("")
-    lines.append("【基础功能】")
-    lines.append("  点歌+歌名                   搜索并分享音乐")
-    lines.append("  /fortune        /今日运势   每日运势")
-    lines.append("  /rank           /水群排行   本周发言排行")
-    lines.append("  /like           /赞我       点赞(每日1次)")
-    lines.append("  /weather <城市>             查询天气")
-    lines.append("  /translate <文本>           翻译成中文")
-    lines.append("  /calc <算式>                计算器")
-    lines.append("  /生图 <提示词>              AI 生成图片")
-    lines.append("  /ocr                       识别图片文字")
-    lines.append("  /转发摘要                  摘要合并转发")
-    lines.append("  /群文件 [关键词]            查看群文件")
-    lines.append("  /health                    查看运行状态")
-    lines.append("  /精华列表 /群荣誉           查看群内容")
-    # ---- AI Chat ----
+    lines.append("【聊天】")
+    lines.append("  @小汐 + 想说的话      跟我聊天")
+    lines.append("  点歌+歌名             搜歌分享")
+    lines.append("  发B站链接/BV号        自动解析并发视频")
+    lines.append("  我要头衔xxx           给自己设专属头衔(Bot是群主才生效)")
     lines.append("")
-    lines.append("【AI 聊天】")
-    lines.append("  @小汐 + 任意文字             跟我聊天吧~")
+    lines.append("【娱乐查询】")
+    lines.append("  /天气 <城市>    /热榜 [平台]    /一言")
+    lines.append("  /答案之书 [问题]      /epic免费")
+    lines.append("  /每日新闻       /必应壁纸")
+    lines.append("  /fortune 今日运势     /rank 发言排行")
+    lines.append("  /like 赞我            /calc 计算器")
+    lines.append("  /translate 翻译       /生图 AI画图")
     lines.append("")
-    lines.append("【信息查询】")
-    lines.append("  /info [@用户或QQ号]          查看成员信息")
-    lines.append("  /history [数量]              查看最近消息")
-    lines.append("  /禁言列表                    查看被禁言的人")
-    lines.append("  /点赞信息                    查看机器人点赞统计")
-    lines.append("  /转发 (回复消息)             转发某条消息")
-    # ---- Admin commands ----
+    lines.append("【查询工具】")
+    lines.append("  /info [@人]           成员资料")
+    lines.append("  /history [条数]       最近消息")
+    lines.append("  /ocr                  识别图片文字")
+    lines.append("  /转发摘要             总结合并转发")
+    lines.append("  /群文件 [关键词]      搜群文件")
+    lines.append("  /精华列表 /群荣誉     群内容")
+    lines.append("  /禁言列表 /点赞信息   其他查询")
+    lines.append("  /health               运行状态")
+    # ---- admin tier (QQ admin/group owner/master/super) ----
     if caller_level >= LEVEL_ADMIN and bot_role_str in ("admin", "owner"):
         lines.append("")
-        lines.append("【管理命令 - 管理员/群主可用】")
-        lines.append("  /kick @某人    踢@某人      踢出群")
-        lines.append("  /ban @某人 [分钟] 禁@某人   禁言(默认30分钟)")
-        lines.append("  /unban @某人   解@某人      解除禁言")
-        lines.append("  /allban on/off              全员禁言开关")
-        lines.append("  /welcome on/off/内容         入群欢迎语")
-        lines.append("  /badword add/del/list        违禁词管理")
-        lines.append("  /精华          回复消息设为精华")
-        lines.append("  /公告 内容     发布群公告")
-        lines.append("  /title @某人 头衔            专属头衔(机器人必须是群主)")
-        lines.append("  /安全 status/log/url/gray    安全功能")
-    # ---- Master commands ----
-    if caller_level >= LEVEL_MASTER and (is_owner or caller_level == LEVEL_MASTER):
-        # Only show if user is actually a master (not just admin)
-        if is_owner or caller_level >= LEVEL_MASTER:
-            lines.append("")
-            lines.append("【群主人命令】")
-            lines.append("  /enable         开启本群")
-            lines.append("  /disable        关闭本群")
-            lines.append("  /list           查看群数据")
-            lines.append("  /clearai        清除本群数据")
-    # ---- Bot owner only ----
-    if is_owner:
+        lines.append("【管理命令】(你是管理，可用)")
+        lines.append("  /kick @人             踢出群")
+        lines.append("  /ban @人 [分钟]       禁言(默认30)")
+        lines.append("  /unban @人            解除禁言")
+        lines.append("  /allban on/off        全员禁言")
+        lines.append("  /全体 <内容>          @全体成员")
+        lines.append("  /公告 <内容>          发群公告")
+        lines.append("  /精华                 回复消息设精华")
+        lines.append("  /welcome on/off/内容  入群欢迎")
+        lines.append("  /badword add/del/list 违禁词")
+        lines.append("  /acg图 on/off         每日ACG图开关")
+        lines.append("  /热榜推送 on/off      每日热榜开关")
+        lines.append("  /b站解析 on/off       B站解析开关")
+        lines.append("  /安全 status/log      安全功能")
+        if bot_role_str == "owner":
+            lines.append("  /title @人 头衔       设专属头衔")
+    elif caller_level >= LEVEL_ADMIN:
+        lines.append("")
+        lines.append("（你有管理身份，但我现在不是本群管理，管理命令暂时都用不了）")
+    # ---- master tier ----
+    if caller_level >= LEVEL_MASTER:
+        lines.append("")
+        lines.append("【群主人命令】(你是本群主人，可用)")
+        lines.append("  /enable /disable      开/关本群功能")
+        lines.append("  /list                 群数据概览")
+        lines.append("  /clearai              清本群AI数据")
+        lines.append("  /b站推送 add/del/list 盯UP主新投稿")
+        lines.append("  /积分                 uapis额度用量")
+    # ---- super tier ----
+    if is_super:
         lines.append("")
         lines.append("【最高主人命令】")
-        lines.append("  /master add/del/list        管理群主人")
-        lines.append("  /approve flag /reject flag  处理入群/好友请求")
-        lines.append("  私聊跨群：多数管理命令可写 群号 + 参数")
+        lines.append("  /master add/del/list  设置群主人")
+        lines.append("  /私聊AI on/off/allow/deny 私聊AI开关")
+        lines.append("  /AI聊天 on/off        本群AI聊天开关")
+        lines.append("  /approve /reject      处理加群/好友申请")
+        lines.append("  私聊跨群：/命令 群号 参数")
     lines.append("")
+    lines.append("发 /help <命令名> 看某个命令的详细用法")
+    lines.append("比如 /help b站推送")
     lines.append("* ============================ *")
     await d._reply(group_id, user_id, "\n".join(lines))
 # ==================== LIKE ====================
@@ -419,10 +790,25 @@ async def cmd_rank(d, group_id, user_id, args, role, sender_card, message):
 async def cmd_weather(d, group_id, user_id, args, role, sender_card, message):
     city = args.strip()
     if not city:
-        await d._reply(group_id, user_id, "这样用：/weather 城市名，比如 /weather 杭州")
+        await d._reply(group_id, user_id, "这样用：/天气 城市名，比如 /天气 杭州")
         return
-    from .ai import deepseek_chat
-    reply = await deepseek_chat(d, "查询" + city + "今天天气，给出温度、天气状况、穿衣建议。简短一句话。")
+    from . import uapi as _uapi
+    data = None
+    if _uapi.credits_available(d.config, "user"):
+        data = await _uapi.uapi_get(d, "/misc/weather",
+                                    params={"city": city[:20]}, kind="user")
+    if data:
+        reply = "【{}】{}，{}℃，{}，湿度{}%（{}）".format(
+            data.get("city") or city,
+            data.get("weather", "?"),
+            data.get("temperature", "?"),
+            "{} {}".format(data.get("wind_direction", ""), data.get("wind_power", "")).strip() or "微风",
+            data.get("humidity", "?"),
+            data.get("report_time", ""),
+        )
+    else:
+        from .ai import deepseek_chat
+        reply = await deepseek_chat(d, "查询" + city + "今天天气，给出温度、天气状况、穿衣建议。简短一句话。")
     await d._reply(group_id, user_id, reply)
 # ==================== TRANSLATE ====================
 async def cmd_translate(d, group_id, user_id, args, role, sender_card, message):
@@ -982,6 +1368,94 @@ async def cmd_special_title(d, group_id, user_id, args, role, sender_card, messa
         await d._reply(group_id, user_id, "头衔设好了" if title else "头衔清掉了")
     else:
         await d._reply(group_id, user_id, "没设成：" + str(result.get("msg") or result.get("wording") or result)[:200])
+# ==================== MY TITLE (self-service) ====================
+async def cmd_my_title(d, group_id, user_id, args, role, sender_card, message):
+    """我要头衔xxx — set the sender's special title. Only works when the bot is
+    the group owner; otherwise the feature is ignored completely (silent)."""
+    if not group_id:
+        return
+    bot_role_str, _ = await get_bot_role(d, group_id)
+    if bot_role_str != "owner":
+        return
+    title = re.sub(r"\[CQ:[^\]]+\]", "", args or "").strip()
+    if not title:
+        return
+    if len(title) > 18:
+        await d._reply(group_id, user_id, "头衔太长了，18个字以内")
+        return
+    from event_policy import allow_event
+    if not allow_event("mytitle", f"{group_id}_{user_id}", 60):
+        await d._reply(group_id, user_id, "换太勤了，歇会再来")
+        return
+    result = await d.client.set_group_special_title(group_id, user_id, title)
+    log.info("mytitle: g=%s u=%s title=%s result=%s",
+             group_id, user_id, title[:20], str(result)[:200])
+    if result.get("status") == "ok":
+        await d._reply(group_id, user_id, "搞定，你的头衔现在是「" + title + "」了")
+    else:
+        err = str(result.get("msg") or result.get("wording") or "未知原因")[:120]
+        await d._reply(group_id, user_id, "没设成：" + err)
+# ==================== AI SWITCHES ====================
+async def cmd_group_ai_switch(d, group_id, user_id, args, role, sender_card, message):
+    """/AI聊天 on|off — toggle AI chat for this group (owner/bot account only)."""
+    if not group_id:
+        await d._reply(None, user_id, "这个要在群里用，私聊就带上群号：/AI聊天 群号 on")
+        return
+    arg = args.strip().lower()
+    cfg = _load()
+    gid = str(group_id)
+    groups = cfg.setdefault("groups", {})
+    group_cfg = groups.setdefault(gid, {"enabled": True, "masters": [],
+                                        "welcome_msg": {}, "bad_words": {}, "features": {}})
+    feats = group_cfg.setdefault("features", {})
+    current = feats.get("ai_chat", True)
+    if arg not in ("on", "off"):
+        await d._reply(group_id, user_id,
+                       "本群AI聊天：" + ("开启" if current else "关闭") + "\n用法：/AI聊天 on 或 /AI聊天 off")
+        return
+    feats["ai_chat"] = (arg == "on")
+    _save(cfg)
+    d.config = cfg
+    await d._reply(group_id, user_id, "本群AI聊天已" + ("开启" if feats["ai_chat"] else "关闭"))
+async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, message):
+    """/私聊AI on|off|allow QQ|deny QQ — global private-chat AI switch + allowlist."""
+    parts = args.strip().split()
+    action = parts[0].lower() if parts else "status"
+    cfg = _load()
+    pc = cfg.setdefault("private_chat", {"enabled": False, "allowed_users": []})
+    pc.setdefault("enabled", False)
+    allowed = pc.setdefault("allowed_users", [])
+    if action == "on":
+        pc["enabled"] = True
+        _save(cfg)
+        d.config = cfg
+        await d._reply(group_id, user_id, "私聊AI已开启，所有好友都能聊了")
+    elif action == "off":
+        pc["enabled"] = False
+        _save(cfg)
+        d.config = cfg
+        await d._reply(group_id, user_id, "私聊AI已关闭，只有开放名单里的人能聊")
+    elif action == "allow" and len(parts) >= 2 and parts[1].isdigit():
+        qq = int(parts[1])
+        allowed = [int(u) for u in allowed if str(u).isdigit()]
+        if qq not in allowed:
+            allowed.append(qq)
+        pc["allowed_users"] = allowed[-50:]
+        _save(cfg)
+        d.config = cfg
+        await d._reply(group_id, user_id, "已开放私聊AI：" + str(qq))
+    elif action == "deny" and len(parts) >= 2 and parts[1].isdigit():
+        qq = int(parts[1])
+        pc["allowed_users"] = [int(u) for u in allowed if str(u).isdigit() and int(u) != qq]
+        _save(cfg)
+        d.config = cfg
+        await d._reply(group_id, user_id, "已移出开放名单：" + str(qq))
+    else:
+        status_text = "开启" if pc.get("enabled") else "关闭"
+        users = ", ".join(str(u) for u in pc.get("allowed_users", [])) or "无"
+        await d._reply(group_id, user_id,
+                       "私聊AI：" + status_text + "\n开放名单：" + users +
+                       "\n用法：/私聊AI on|off|allow QQ|deny QQ")
 # ==================== MASTER ====================
 async def cmd_master(d, group_id, user_id, args, role, sender_card, message):
     parts = args.strip().split()

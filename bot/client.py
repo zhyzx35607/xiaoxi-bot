@@ -31,6 +31,8 @@ class OneBotClient:
         self._stop_event = asyncio.Event()
         self._capabilities = {}
         self._last_queue_warning = 0.0
+        self._queue_bytes = 0
+        self._queue_byte_budget = 8 * 1024 * 1024
 
     def set_dispatcher(self, dispatcher):
         self._dispatcher = dispatcher
@@ -106,17 +108,19 @@ class OneBotClient:
                 try:
                     async with websockets.connect(
                         url,
-                        max_size=2 * 1024 * 1024,
+                        max_size=1 * 1024 * 1024,
                         open_timeout=self._connect_timeout,
                         ping_interval=30,
                         ping_timeout=20,
-                        max_queue=32,
+                        max_queue=16,
                     ) as ws:
                         self._ws = ws
                         retry_delay = 1
                         log.info("Connected to OneBot WS")
+                        connected_at = time.monotonic()
 
                         msg_queue = asyncio.Queue(maxsize=self._queue_size)
+                        self._queue_bytes = 0
 
                         async def ws_reader():
                             try:
@@ -138,8 +142,19 @@ class OneBotClient:
                                     if data.get("post_type") == "meta_event":
                                         continue
 
+                                    raw_len = len(raw)
+                                    if raw_len > 256 * 1024:
+                                        log.warning("Large WS frame: %.0fKB post_type=%s",
+                                                    raw_len / 1024, data.get("post_type"))
+                                    if self._queue_bytes + raw_len > self._queue_byte_budget:
+                                        now = time.monotonic()
+                                        if now - self._last_queue_warning >= 10:
+                                            log.warning("Dropping event: WS queue byte budget exceeded")
+                                            self._last_queue_warning = now
+                                        continue
                                     try:
-                                        msg_queue.put_nowait(data)
+                                        msg_queue.put_nowait((data, raw_len))
+                                        self._queue_bytes += raw_len
                                     except asyncio.QueueFull:
                                         now = time.monotonic()
                                         if now - self._last_queue_warning >= 10:
@@ -163,9 +178,11 @@ class OneBotClient:
                         reader_task = asyncio.create_task(ws_reader())
 
                         while self._running:
-                            data = await msg_queue.get()
-                            if data is None:
+                            item = await msg_queue.get()
+                            if item is None:
                                 break
+                            data, raw_len = item
+                            self._queue_bytes -= raw_len
                             try:
                                 # Bound dispatch task objects while the reader continues
                                 # processing API replies independently.
@@ -183,13 +200,23 @@ class OneBotClient:
                             await reader_task
                         except asyncio.CancelledError:
                             pass
+                        if self._running:
+                            session_secs = time.monotonic() - connected_at
+                            if session_secs < 5:
+                                log.warning(
+                                    "WS closed %.1fs after connect (check token/NapCat config); reconnecting",
+                                    session_secs)
+                            else:
+                                log.info("WS connection ended after %.0fs; reconnecting",
+                                         session_secs)
 
                 except websockets.ConnectionClosed as e:
                     log.info("Connection closed: %s", e)
                 except Exception as e:
-                    # Only escalate to WARNING after several failed retries (> 8s delay)
-                    if retry_delay <= 8:
-                        log.debug("Connect error: %s (retry in %ds)", e, retry_delay)
+                    # Surface connection failures early; silent retries hid a token
+                    # mismatch for minutes in the past.
+                    if retry_delay <= 2:
+                        log.info("Connect error: %s (retry in %ds)", e, retry_delay)
                     else:
                         log.warning("Connect error after repeated retries: %s (retry in %ds)", e, retry_delay)
                 finally:

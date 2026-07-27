@@ -92,6 +92,8 @@ class Dispatcher:
         self._last_state_save = 0
         self._message_stat_updates = 0
         self._scheduler_task = None
+        self._bili_push_task = None
+        self._rss_guard_task = None
         self._group_reply_timestamps = {}  # rate limit: group_id -> deque of timestamps
         # Chat limits tracking
         self._group_consecutive_replies = {}  # group_id -> int
@@ -327,6 +329,92 @@ class Dispatcher:
                 log.warning("Timed out waiting for scheduler to stop")
         self._scheduler_task = None
 
+    def start_bili_push(self):
+        """Start the UP主 new-video polling loop (idles when nothing watched)."""
+        if self._bili_push_task is None:
+            from .bilibili import push_loop
+            self._bili_push_task = asyncio.create_task(push_loop(self))
+
+    async def stop_bili_push(self):
+        if self._bili_push_task and not self._bili_push_task.done():
+            self._bili_push_task.cancel()
+            try:
+                await asyncio.wait_for(self._bili_push_task, timeout=2)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                log.warning("Timed out waiting for bili push loop to stop")
+        self._bili_push_task = None
+
+    def start_rss_guard(self):
+        """Periodic RSS watchdog: logs growth, gracefully restarts before OOM."""
+        if self._rss_guard_task is None:
+            self._rss_guard_task = asyncio.create_task(self._rss_guard_loop())
+
+    async def stop_rss_guard(self):
+        if self._rss_guard_task and not self._rss_guard_task.done():
+            self._rss_guard_task.cancel()
+            try:
+                await asyncio.wait_for(self._rss_guard_task, timeout=2)
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                pass
+        self._rss_guard_task = None
+
+    @staticmethod
+    def _read_rss_kb():
+        try:
+            with open("/proc/self/status", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1])
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _gc_type_histogram(limit=15):
+        """Top object types by count — cheap snapshot to identify memory hogs."""
+        import gc
+        from collections import Counter
+        counts = Counter(type(obj).__name__ for obj in gc.get_objects())
+        return ", ".join("{}={}".format(name, cnt)
+                         for name, cnt in counts.most_common(limit))
+
+    async def _rss_guard_loop(self):
+        runtime = self.config.get("runtime", {})
+        restart_mb = int(runtime.get("rss_restart_mb", 260) or 0)
+        log_mb = int(runtime.get("rss_log_mb", 150) or 150)
+        last_diag = 0.0
+        try:
+            while True:
+                await asyncio.sleep(60)
+                rss_kb = self._read_rss_kb()
+                if rss_kb is None:
+                    continue
+                mb = rss_kb / 1024.0
+                if restart_mb > 0 and mb >= restart_mb:
+                    log.warning("RSS %.0fMB >= %dMB limit, graceful restart",
+                                mb, restart_mb)
+                    try:
+                        log.warning("GC histogram at restart: %s",
+                                    self._gc_type_histogram())
+                        self.save_runtime_state(force=True)
+                    except Exception:
+                        pass
+                    os.kill(os.getpid(), 15)  # SIGTERM -> clean shutdown, systemd restarts
+                    return
+                if mb >= log_mb and time.time() - last_diag > 600:
+                    last_diag = time.time()
+                    try:
+                        log.warning("RSS guard: %.0fMB | GC histogram: %s",
+                                    mb, self._gc_type_histogram())
+                    except Exception:
+                        log.info("RSS guard: %.0fMB", mb)
+        except asyncio.CancelledError:
+            pass
+
     def create_background_task(self, coro, name="background"):
         if len(self._background_tasks) >= self._max_background_tasks:
             log.warning("Dropping %s task: background backlog is full", name)
@@ -409,22 +497,64 @@ class Dispatcher:
                 user_id=self.config.get("bot_qq", 0), sender_name=sender_card,
             )
             bot_qq = self.config.get("bot_qq", 0)
-            # Store in buffer so _build_chat_context sees it
-            self._group_msg_buffer[group_id].append(
-                (bot_qq, raw, time.time(), sender_card)
-            )
+            # Store in buffer so _build_chat_context sees it. Skip if ai.py just
+            # appended the same reply (avoid duplicates from message_sent echo).
+            now = time.time()
+            buf = self._group_msg_buffer[group_id]
+            if not (buf and buf[-1][0] == bot_qq and buf[-1][1][:60] == raw[:60]
+                    and now - buf[-1][2] < 10):
+                buf.append((bot_qq, raw, now, sender_card))
             # Dedup self-messages
             message_id = event.get("message_id", 0)
             if message_id:
                 self._seen_msg_ids[message_id] = time.time()
             log.debug("[SELF] group=%s said: %s", group_id, raw[:60])
+            # Fixed commands and title requests sent from the bot account itself
+            await self._handle_self_group_command(group_id, raw, message, sender_card)
 
         elif msg_type == "private" and raw:
+            peer_id = event.get("target_id") or user_id
             _log_chat_message(
                 self, "PRIVATE_OUT", raw,
-                user_id=event.get("target_id") or user_id, sender_name=sender_card,
+                user_id=peer_id, sender_name=sender_card,
             )
             log.debug("[SELF] private said: %s", raw[:60])
+            # Commands typed from the bot account in the owner's chat window run
+            # as owner commands; replies land in the same window.
+            if peer_id == self.config.get("bot_owner"):
+                prefix = self.config.get("command_prefix", "/")
+                clean = re.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
+                if clean.startswith(prefix):
+                    parts = clean[len(prefix):].split(maxsplit=1)
+                    await self._handle_owner_command(
+                        parts[0].lower(), parts[1] if len(parts) > 1 else "",
+                        peer_id, {"nickname": sender_card}, message, raw,
+                    )
+
+    async def _handle_self_group_command(self, group_id, raw, message, sender_card):
+        """Run fixed commands / title requests sent from the bot account itself.
+
+        The bot account has master level (see permission.get_user_level), so
+        permission checks stay centralized in _run_command.
+        """
+        prefix = self.config.get("command_prefix", "/")
+        bot_qq = self.config.get("bot_qq", 0)
+        clean = re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
+        if clean.startswith(prefix):
+            parts = clean[len(prefix):].split(maxsplit=1)
+            cmd = parts[0].lower()
+            if cmd in self.commands:
+                log.info("[SELF] running command %s in group %s", cmd, group_id)
+                await self._run_command(
+                    cmd, parts[1] if len(parts) > 1 else "",
+                    group_id, bot_qq, "owner", sender_card, message,
+                )
+            return
+        from .natural_triggers import extract_title_request
+        title = extract_title_request(clean)
+        if title:
+            await self._run_command("mytitle", title, group_id, bot_qq, "owner",
+                                    sender_card, message)
 
     async def _handle_message(self, event):
         msg_type = event.get("message_type", "")
@@ -615,6 +745,21 @@ class Dispatcher:
                                     group_id, user_id, sender_role, sender_card, message)
             return
 
+        # B站 video share: auto parse + download (feature-gated, 30s cooldown)
+        bili_cfg = self.config.get("bilibili", {})
+        if (bili_cfg.get("parse_enabled", True)
+                and feats.get("bili_parse", True)
+                and ("BV1" in raw or "b23.tv" in raw
+                     or "bilibili.com/video" in raw)):
+            from event_policy import allow_event
+            if allow_event("bili_parse", group_id, 30):
+                from .bilibili import handle_share
+                try:
+                    if await handle_share(self, group_id, raw):
+                        return
+                except Exception as e:
+                    log.warning("bili share handle failed: %s", e)
+
         # Music search
         if feats.get("music", True):
             # Also check natural music triggers
@@ -647,6 +792,9 @@ class Dispatcher:
             elif cmd_name == "unban":
                 for target in trig_args.get("targets", []):
                     await self._run_command("unban", str(target), group_id, user_id, sender_role, sender_card, message)
+            elif cmd_name == "mytitle":
+                await self._run_command("mytitle", trig_args.get("title", ""),
+                                        group_id, user_id, sender_role, sender_card, message)
             elif cmd_name in ("like", "fortune", "rank", "精华"):
                 await self._run_command(cmd_name, "", group_id, user_id, sender_role, sender_card, message)
             return
@@ -816,9 +964,17 @@ class Dispatcher:
 /approve flag尾号 - 同意申请
 /reject flag尾号 原因 - 拒绝申请
 /health - 查看运行状态
+/私聊AI on/off/allow/deny - 私聊AI开关与开放名单
+/AI聊天 群号 on/off - 开关指定群的AI聊天
 /安全 status/log - 查看安全功能和日志
 /info <QQ号> - 查看任意人资料
 /点赞信息 - 查看点赞统计
+/积分 - 查看uapis积分额度
+/b站推送 add 群号 mid - 盯UP主新投稿（mid=UP主空间网址 space.bilibili.com/ 后的数字，也可贴链接）
+/全体 群号 内容 - @全体成员
+/acg图 群号 on/off - 每日ACG图推送开关
+/热榜推送 群号 on/off - 每日热榜推送开关
+/b站解析 群号 on/off - B站自动解析开关
 """
             await self._reply(None, user_id, help_text)
 
@@ -841,6 +997,12 @@ class Dispatcher:
             from .scheduler import run_manual_checkin
             _ok, result_text = await run_manual_checkin(self, gid)
             await self._reply(None, user_id, result_text)
+
+        elif cmd in ("私聊ai", "privateai"):
+            await self._run_command("私聊ai", args, None, user_id, "member", sender_name, message)
+
+        elif cmd in ("积分", "uapi"):
+            await self._run_command("积分", args, None, user_id, "member", sender_name, message)
 
         elif cmd in self._private_group_command_names():
             target_group, rest_args = self._parse_private_group_args(args)
@@ -1125,6 +1287,19 @@ class Dispatcher:
             log.debug("Private chat blocked (blacklisted): %s(%s)", sender_name, user_id)
             return
 
+        # === Private AI gate: master switch + allowlist ===
+        # Default OFF. Replies only when globally enabled, or the user is in
+        # private_chat.allowed_users, or the user is the bot owner.
+        pc_cfg = self.config.get("private_chat", {})
+        pc_allowed_users = {int(u) for u in pc_cfg.get("allowed_users", [])
+                            if str(u).isdigit()}
+        is_allowed_user = user_id in pc_allowed_users
+        if (user_id != self.config.get("bot_owner")
+                and not pc_cfg.get("enabled", False)
+                and not is_allowed_user):
+            log.debug("Private AI disabled, ignoring: %s(%s)", sender_name, user_id)
+            return
+
         # === Dedup: prevent concurrent AI calls for same user ===
         now = time.time()
         if user_id in self._private_processing:
@@ -1133,19 +1308,11 @@ class Dispatcher:
         self._private_processing[user_id] = now
 
         try:
-            # === Friend-only gate ===
+            # === Friend-only gate (silent): non-friends get no response at all ===
             if not await self._is_friend(user_id):
-                if not hasattr(self, '_non_friend_notified'):
-                    self._non_friend_notified = {}
-                if user_id not in self._non_friend_notified:
-                    try:
-                        await self.client.send_private_msg(user_id,
-                            "你好！我是小汐，目前只有好友才能跟我聊天哦～先加个好友吧")
-                    except Exception:
-                        pass
-                    self._non_friend_notified[user_id] = now
-                log.debug("Private chat skipped (not friend): %s(%s)", sender_name, user_id)
-                return
+                if not is_allowed_user:
+                    log.debug("Private chat skipped (not friend): %s(%s)", sender_name, user_id)
+                    return
 
             # === Strip CQ codes for clean text ===
             clean_raw = _re_priv.sub(r"\[CQ:[^\]]+\]", "", raw).strip()
@@ -1179,6 +1346,7 @@ class Dispatcher:
                 web_search_results=web_ctx,
                 reply_intent="直接回应",
                 consecutive_replies=consecutive,
+                interaction_allowed=True,
             )
             if result is True:
                 log.info("Private AI replied to %s(%s)", sender_name, user_id)
@@ -1209,7 +1377,7 @@ class Dispatcher:
             "kick", "ban", "unban", "allban", "welcome", "badword",
             "admin", "title", "头衔", "精华列表", "群荣誉",
             "群文件", "文件链接", "公告", "ocr", "转发摘要",
-            "已读", "history", "禁言列表", "转发", "setgroupavatar",
+            "已读", "history", "禁言列表", "转发", "setgroupavatar", "全体", "acg图", "热榜推送", "b站解析", "b站推送", "ai聊天",
         }
 
 
@@ -1632,6 +1800,7 @@ class Dispatcher:
             message_id=message_id, web_search_results=web_ctx,
             reply_intent=reply_intent, rate_warning=rate_warning,
             consecutive_replies=self._group_consecutive_replies.get(group_id, 0),
+            interaction_allowed=True,
         )
         if result:
             self._record_bot_reply(group_id, user_id)

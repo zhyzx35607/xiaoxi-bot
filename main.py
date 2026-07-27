@@ -60,6 +60,10 @@ def apply_env_overrides(config):
         "QQBOT_SIGMAI_MODEL": "sigmai_model",
         "AGNES_API_KEY": "agnes_api_key",
         "QQBOT_AGNES_API_KEY": "agnes_api_key",
+        "UAPI_API_KEY": "uapi_api_key",
+        "QQBOT_UAPI_API_KEY": "uapi_api_key",
+        "BILI_SESSDATA": "bili_sessdata",
+        "QQBOT_BILI_SESSDATA": "bili_sessdata",
     }
     for env_name, cfg_key in env_map.items():
         value = os.getenv(env_name)
@@ -135,11 +139,19 @@ def migrate_config(config):
         "non_explicit_judge_cooldown": 180,
         "enable_long_memory_compress": False,
         "enable_scheduler": False,
+        "rss_restart_mb": 260,
+        "rss_log_mb": 150,
     }
     runtime = config.setdefault("runtime", {})
     for key, value in runtime_defaults.items():
         if key not in runtime:
             runtime[key] = value
+            migrated = True
+
+    private_chat = config.setdefault("private_chat", {})
+    for key, value in {"enabled": False, "allowed_users": []}.items():
+        if key not in private_chat:
+            private_chat[key] = value
             migrated = True
 
     sticker_mode = config.setdefault("sticker_mode", {})
@@ -173,6 +185,64 @@ def migrate_config(config):
     if "agnes_fallback_delay_seconds" in runtime and "sigmai_fallback_delay_seconds" not in runtime:
         runtime["sigmai_fallback_delay_seconds"] = runtime.pop("agnes_fallback_delay_seconds")
         migrated = True
+
+    uapi_defaults = {
+        "daily_limit": 100,
+        "reserve": 30,
+        "month_limit": 3400,
+    }
+    uapi = config.setdefault("uapi", {})
+    for key, value in uapi_defaults.items():
+        if key not in uapi:
+            uapi[key] = value
+            migrated = True
+
+    acg_defaults = {
+        "enabled": True,
+        "times": [0, 6, 12, 18],
+        "min": 10,
+        "max": 20,
+    }
+    acg = config.setdefault("acg_images", {})
+    for key, value in acg_defaults.items():
+        if key not in acg:
+            acg[key] = value
+            migrated = True
+
+    hotboard_defaults = {
+        "enabled": True,
+        "times": [9, 21],
+        "types": ["bilibili"],
+    }
+    hotboard = config.setdefault("hotboard_push", {})
+    for key, value in hotboard_defaults.items():
+        if key not in hotboard:
+            hotboard[key] = value
+            migrated = True
+
+    bilibili_defaults = {
+        "parse_enabled": True,
+        "download_max_mb": 80,
+        "poll_interval": 60,
+        "uapi_fallback": True,
+    }
+    bilibili = config.setdefault("bilibili", {})
+    for key, value in bilibili_defaults.items():
+        if key not in bilibili:
+            bilibili[key] = value
+            migrated = True
+
+    # Merge new per-group feature defaults into existing group_defaults
+    feature_defaults = {
+        "bili_parse": True,
+        "acg_images": True,
+        "hotboard_push": True,
+    }
+    feats = config.setdefault("group_defaults", {}).setdefault("features", {})
+    for key, value in feature_defaults.items():
+        if key not in feats:
+            feats[key] = value
+            migrated = True
 
     security_defaults = {
         "url_check_enabled": True,
@@ -235,6 +305,8 @@ async def amain():
         return
     dispatcher.start_delayed_worker()
     dispatcher.start_scheduler()
+    dispatcher.start_bili_push()
+    dispatcher.start_rss_guard()
 
     stop_task = asyncio.create_task(stop_event.wait())
     done, pending = await asyncio.wait(
@@ -249,6 +321,8 @@ async def amain():
     dispatcher.save_runtime_state(force=True)
     await dispatcher.stop_delayed_worker()
     await dispatcher.stop_scheduler()
+    await dispatcher.stop_bili_push()
+    await dispatcher.stop_rss_guard()
     await client.stop()
     await dispatcher.stop_background_tasks()
     try:
