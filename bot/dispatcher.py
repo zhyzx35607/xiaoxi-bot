@@ -29,6 +29,15 @@ def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, send
     return True
 
 
+def _cq_unescape(text):
+    """Undo CQ-code entity escaping (&#91; &#93; &#44; &amp;).
+
+    NapCat puts share cards inline into raw_message as [CQ:json,data=...],
+    where the JSON payload is entity-escaped and URLs use \\/ sequences."""
+    return (text.replace("&#91;", "[").replace("&#93;", "]")
+            .replace("&#44;", ",").replace("&amp;", "&"))
+
+
 def _share_card_text(message):
     """Pull searchable text out of QQ share-card (json) segments.
 
@@ -272,10 +281,9 @@ class Dispatcher:
             for k in stale_keys:
                 del dct[k]
 
-        # _private_processing: evict stale entries (> 60s)
-        stale_users = [u for u, ts in self._private_processing.items() if now - ts > 60]
-        for u in stale_users:
-            del self._private_processing[u]
+        # _private_processing entries are removed in _handle_private_ai_chat's
+        # finally block when processing finishes — no time-based eviction here,
+        # so a slow AI call can never look "expired" mid-flight.
 
         # _private_last_reply_ts: evict entries older than 2 hours
         stale_priv = [u for u, ts in self._private_last_reply_ts.items() if now - ts > 7200]
@@ -648,6 +656,10 @@ class Dispatcher:
             if ("b23.tv" in card_text or "bilibili.com/video" in card_text
                     or "BV1" in card_text):
                 raw = card_text
+        # NapCat may instead deliver cards inline as [CQ:json,data=...] in
+        # raw_message; unescape so URL/BV detection sees the real links.
+        if msg_type == "group" and "[CQ:json,data=" in raw:
+            raw = _cq_unescape(raw).replace("\\/", "/")
         if msg_type == "group" and raw:
             group_enabled = is_group_enabled(self, group_id)
             if group_enabled:
@@ -1007,7 +1019,7 @@ class Dispatcher:
 群组: {groups_list}
 
 /status - 查看状态
-/AI状态 - 查看 Agnes 和 DeepSeek 运行状态
+/AI状态 - 查看 SigmaI 和 DeepSeek 运行状态
 /打卡状态 - 查看定时群打卡状态
 /打卡测试 <群号> - 手动测试原生群打卡
 /list - 查看所有群组数据概览
@@ -1187,7 +1199,7 @@ class Dispatcher:
                 await self._reply(None, user_id, f"群 {parts2[1]} 的记忆清掉了")
             else:
                 from .ai import _load_memory
-                mem = _load_memory(parts2[0])
+                mem = _load_memory(parts2[0], self.config)
                 if not mem:
                     await self._reply(None, user_id, f"群 {parts2[0]} 无记忆")
                 else:
@@ -1369,6 +1381,7 @@ class Dispatcher:
             log.debug("Private dedup: user %s(%s) already processing, skipping", sender_name, user_id)
             return
         self._private_processing[user_id] = now
+        typing_started = False
 
         try:
             # === Friend-only gate (silent): non-friends get no response at all ===
@@ -1385,6 +1398,16 @@ class Dispatcher:
             if not clean_raw and not has_image:
                 log.debug("Private chat skipped (empty): %s(%s)", sender_name, user_id)
                 return
+
+            # Show "typing..." while preparing (friend check / vision / search
+            # can take seconds); handle_ai_chat keeps it on during generation.
+            try:
+                _tr = await self.client.call("set_input_status", {
+                    "user_id": user_id, "event_type": 1,
+                })
+                typing_started = isinstance(_tr, dict) and _tr.get("status") == "ok"
+            except Exception:
+                pass
 
             # Build image context (only for non-sticker images)
             from .media import extract_message_context
@@ -1425,6 +1448,13 @@ class Dispatcher:
                 # Reset after 10 min gap (handled by _cleanup_stale_state)
         finally:
             self._private_processing.pop(user_id, None)
+            if typing_started:
+                try:
+                    await self.client.call("set_input_status", {
+                        "user_id": user_id, "event_type": 0,
+                    })
+                except Exception:
+                    pass
 
 
     def _parse_private_group_args(self, args):
@@ -1524,7 +1554,7 @@ class Dispatcher:
 
 
     def _check_rate_limit(self, group_id):
-        """Check if group has exceeded 100 replies per 30min. Returns (allowed, remaining)."""
+        """Check if group has exceeded the 30-min reply cap (default 50). Returns (allowed, remaining)."""
         from collections import deque
         cfg = self.config.get("chat_limits", {})
         if not cfg.get("rate_limit_enabled", True):

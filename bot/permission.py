@@ -110,6 +110,12 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
         bot_role_str, _ = await get_bot_role(dispatcher, group_id)
         if bot_role_str != "owner":
             return False, "这个只有群主号能做，我现在不是群主"
+    # Bot must be admin/owner in the group; checked before all caller bypasses
+    # so masters/supers get a clear error instead of an API failure downstream.
+    if cmd_info.get("bot_admin_required"):
+        bot_role_str, _ = await get_bot_role(dispatcher, group_id)
+        if bot_role_str not in ("admin", "owner"):
+            return False, "我现在不是管理员，做不了这个"
     # Bot owner (446697984) bypasses ALL checks
     if user_id == owner:
         return True, None
@@ -132,11 +138,6 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
     if cmd_info.get("admin_only"):
         if caller_level < LEVEL_ADMIN:
             return False, "需要管理员权限"
-    # Bot must be admin/owner in the group
-    if cmd_info.get("bot_admin_required"):
-        bot_role_str, _ = await get_bot_role(dispatcher, group_id)
-        if bot_role_str not in ("admin", "owner"):
-            return False, "我现在不是管理员，做不了这个"
     return True, None
 async def can_moderate_target(dispatcher, group_id, actor_id, target_id, actor_role="member"):
     """Enforce role hierarchy for kick/ban style operations."""
@@ -146,6 +147,9 @@ async def can_moderate_target(dispatcher, group_id, actor_id, target_id, actor_r
         return False, "这个目标受保护"
     actor_level, _ = await get_user_level(dispatcher, group_id, actor_id, actor_role)
     target_level, _ = await get_user_level(dispatcher, group_id, target_id, "member")
+    # QQ never allows operating on the group owner, regardless of internal levels.
+    if target_level == LEVEL_GOWNER:
+        return False, "不能操作群主"
     if actor_level < LEVEL_SUPER and target_level >= actor_level:
         return False, "不能操作同级或更高权限的成员"
     return True, None

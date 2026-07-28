@@ -1,4 +1,4 @@
-﻿"""bot/uapi.py - uapis.cn API client with daily/monthly credit budget.
+"""bot/uapi.py - uapis.cn API client with daily/monthly credit budget.
 
 Budget policy (config "uapi" section, state in data/uapi_state.json):
   - daily_limit (default 100) split into user bucket (daily_limit - reserve)
@@ -35,6 +35,8 @@ ENDPOINT_COSTS = {
     "/random/image": 0,
     "/social/bilibili/videoinfo": 4,
     "/social/bilibili/archives": 4,
+    "/search/aggregate": 2,
+    "/translate/text": 1,
 }
 
 # Endpoints whose responses may be cached for CACHE_TTL seconds.
@@ -212,6 +214,33 @@ async def uapi_get(dispatcher, path, params=None, kind="user", timeout=8):
         log.warning("uapi %s failed: %s", path, e)
         return None
     _cache_put(path, params, data)
+    return data
+
+
+async def uapi_post(dispatcher, path, json_body=None, kind="user", timeout=8):
+    """POST a JSON endpoint. Returns parsed data or None.
+
+    Budgeted through the same credit channel as uapi_get; silent on failure.
+    """
+    key = _api_key(dispatcher.config)
+    if not key:
+        log.warning("uapi: no api key configured, skip %s", path)
+        return None
+    if not _charge(dispatcher.config, path, kind):
+        log.info("uapi: budget blocked %s kind=%s", path, kind)
+        return None
+    try:
+        session = dispatcher.client.session
+        headers = {"Authorization": "Bearer " + key}
+        async with session.post(BASE_URL + path, json=json_body or {}, headers=headers,
+                                timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status != 200:
+                log.warning("uapi %s -> HTTP %s", path, resp.status)
+                return None
+            data = await resp.json(content_type=None)
+    except Exception as e:
+        log.warning("uapi %s failed: %s", path, e)
+        return None
     return data
 
 

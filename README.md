@@ -196,6 +196,33 @@ config.json 里可以按群开关各种功能，调整 AI 插话的积极性、�
 - "点歌 xxx" / "来首 xxx" → 搜歌
 - 发 B站视频链接 / BV号 / b23 短链 → 自动解析并发出视频
 
+## 命令权限标记
+
+`bot/commands.py` 的 `register_all` 给每个命令打的权限标记，由 `bot/permission.py` 的 `check_permission` 统一校验。标记含义：
+
+| 标记 | 含义 |
+| --- | --- |
+| `admin_only` | 调用者需要 QQ 群管理员/群主，或群内主人（master） |
+| `bot_admin_required` | 机器人本人在该群必须是管理员或群主 |
+| `bot_owner_required` | 机器人本人必须是 QQ 群主（头衔类操作，权限再高也绕不过 QQ 限制） |
+| `bot_owner` | bot 主人、机器人账号本身，或群内主人（master）可用 |
+| `bot_owner_only` | 仅 bot 主人 / 机器人账号本身可用 |
+
+补充规则：bot 主人（`bot_owner` 配置的 QQ）和机器人账号（`bot_qq`）是 5 级 super，跳过一切校验；群内主人（master，4 级）跳过 `admin_only` 及之后的校验。
+
+按标记分组（同一命令多个别名只列一次）：
+
+| 标记组合 | 命令 |
+| --- | --- |
+| `bot_owner_only` | 好友列表、master、approve、reject |
+| `bot_owner` | sysmsg、clearai、enable、disable、list、私聊ai、ai聊天、b站推送、积分 |
+| `admin_only` | 安全、acg图、热榜推送、b站解析 |
+| `admin_only` + `bot_admin_required` | 删除文件、新建文件夹、删除文件夹、移动文件、重命名文件、删公告、setgroupavatar、kick、ban、unban、allban、welcome、badword、精华、删精华、公告、admin、全体 |
+| `admin_only` + `bot_owner_required` | title（头衔） |
+| 无标记（所有群成员） | api、群信息、成员、成员列表、文件状态、图片描述、表情回应、戳、陌生人信息、help、like、rank、weather（天气）、translate、calc、fortune、ocr、转发摘要、群文件、文件链接、精华列表、群荣誉、已读、history、禁言列表、info、转发、点赞信息、health、生图、mytitle、热榜（热搜）、一言、答案之书、每日新闻、必应壁纸、epic免费 |
+
+另外踢人/禁言类命令在执行时还会过 `can_moderate_target`：目标不能是 bot 主人或机器人账号（受保护），且操作者等级必须严格高于目标等级（super 除外）。
+
 ## 代码结构
 
 ```
@@ -234,6 +261,22 @@ data/
 ├── security_events.json 安全事件记录
 └── runtime_state.json  运行状态
 ```
+
+## 已知问题 / 配置说明
+
+以下配置键当前未生效（写在 config.json 里也不会被读取，暂时保留只是为了兼容旧配置）：
+
+- `chat_limits.user_cooldown_seconds`
+- `chat_limits.max_user_replies_per_10min`
+- `runtime.ai_judge_min_gap_seconds`
+- `group_defaults.features.interject`（插话目前由 AI 自行判断，不受此开关控制）
+- `group_defaults.features.voice_reply`
+- `sticker_mode.send_probability`（表情包发送由 AI 自主决定，不走概率）
+
+另外：
+
+- `memory_expire_hours`（顶层，可选，默认 72）：群聊工作记忆条目的过期小时数，已实际生效。
+- `sticker_mode.max_stickers`（默认 50）：每个聊天上下文收集的表情包上限，已实际生效。
 
 ## 服务器要求
 

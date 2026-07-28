@@ -60,7 +60,7 @@ async def handle_notice(dispatcher, event):
 
 
 async def _generate_welcome_text(dispatcher, nickname, sex=""):
-    """Generate a short, friendly welcome message using AI (Agnes > DeepSeek)."""
+    """Generate a short, friendly welcome message using AI (DeepSeek)."""
     sex_part = "（" + sex + "）" if sex else ""
     prompt = f"新生「{nickname}」{sex_part}加入了群聊，请用一句简短（15字以内）有趣友好的话欢迎ta。自然口语化，不用emoji。直接回复内容，不用任何前缀。"
     try:
