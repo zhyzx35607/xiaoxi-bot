@@ -29,6 +29,22 @@ def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, send
     return True
 
 
+def _share_card_text(message):
+    """Pull searchable text out of QQ share-card (json) segments.
+
+    NapCat leaves raw_message empty for pure card messages; without this the
+    dispatcher never sees Bilibili links shared as cards."""
+    texts = []
+    for seg in message or []:
+        if not isinstance(seg, dict) or seg.get("type") != "json":
+            continue
+        data = seg.get("data") or {}
+        payload = data.get("data")
+        if isinstance(payload, str):
+            texts.append(payload.replace("\\/", "/"))
+    return "\n".join(texts)
+
+
 def _read_tail_text(path, line_count=30, max_bytes=65536, max_chars=4000):
     """Read a small tail window without loading the whole rotating log."""
     line_count = max(1, min(int(line_count), 200))
@@ -350,6 +366,47 @@ class Dispatcher:
         """Periodic RSS watchdog: logs growth, gracefully restarts before OOM."""
         if self._rss_guard_task is None:
             self._rss_guard_task = asyncio.create_task(self._rss_guard_loop())
+        self._start_rss_thread_watch()
+
+    def _start_rss_thread_watch(self):
+        """Daemon-thread RSS sampler: survives a blocked event loop and dumps
+        all thread stacks + asyncio task list the moment memory spikes."""
+        import threading, faulthandler
+        try:
+            self._rss_watch_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._rss_watch_loop = None
+        def _watch():
+            last = 0.0
+            while True:
+                time.sleep(1)
+                try:
+                    kb = self._read_rss_kb()
+                    if not kb:
+                        continue
+                    mb = kb / 1024.0
+                    if mb >= 150 and time.time() - last > 20:
+                        last = time.time()
+                        log.warning("RSS thread-watch: %.0fMB | GC: %s",
+                                    mb, self._gc_type_histogram())
+                        with open("/tmp/stack_dump.txt", "a") as f:
+                            f.write("\n=== RSS %.0fMB at %s ===\n" % (
+                                mb, time.strftime("%F %T")))
+                            faulthandler.dump_traceback(file=f)
+                            loop = self._rss_watch_loop
+                            if loop is not None:
+                                try:
+                                    for task in asyncio.all_tasks(loop):
+                                        coro = task.get_coro()
+                                        f.write("TASK %s %s\n" % (
+                                            getattr(coro, "__qualname__", coro),
+                                            task.get_name()))
+                                except Exception as e:
+                                    f.write("task enum failed: %s\n" % e)
+                except Exception:
+                    pass
+        t = threading.Thread(target=_watch, daemon=True, name="rss-watch")
+        t.start()
 
     async def stop_rss_guard(self):
         if self._rss_guard_task and not self._rss_guard_task.done():
@@ -389,7 +446,7 @@ class Dispatcher:
         last_diag = 0.0
         try:
             while True:
-                await asyncio.sleep(60)
+                await asyncio.sleep(5)
                 rss_kb = self._read_rss_kb()
                 if rss_kb is None:
                     continue
@@ -405,7 +462,7 @@ class Dispatcher:
                         pass
                     os.kill(os.getpid(), 15)  # SIGTERM -> clean shutdown, systemd restarts
                     return
-                if mb >= log_mb and time.time() - last_diag > 600:
+                if mb >= log_mb and time.time() - last_diag > 30:
                     last_diag = time.time()
                     try:
                         log.warning("RSS guard: %.0fMB | GC histogram: %s",
@@ -584,7 +641,13 @@ class Dispatcher:
         sender_role = sender.get("role", "member")
         sender_card = sender.get("card") or sender.get("nickname", str(user_id))
 
-        # Group message handling
+        # Group message handling. QQ share cards arrive with an empty
+        # raw_message, so recover searchable text from json segments.
+        if msg_type == "group" and not raw:
+            card_text = _share_card_text(message)
+            if ("b23.tv" in card_text or "bilibili.com/video" in card_text
+                    or "BV1" in card_text):
+                raw = card_text
         if msg_type == "group" and raw:
             group_enabled = is_group_enabled(self, group_id)
             if group_enabled:
@@ -1689,6 +1752,11 @@ class Dispatcher:
                     await self._delayed_queue_event.wait()
                 else:
                     wait = max(0.0, self._delayed_queue[0][0] - time.time())
+                    # Clear BEFORE waiting: the event stays set after an
+                    # enqueue, and waiting on a set event returns instantly,
+                    # which previously spun this loop at full speed and leaked
+                    # hundreds of thousands of TimerHandles within seconds.
+                    self._delayed_queue_event.clear()
                     try:
                         await asyncio.wait_for(self._delayed_queue_event.wait(), timeout=wait)
                     except asyncio.TimeoutError:

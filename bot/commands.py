@@ -136,7 +136,7 @@ def register_all(d):
 # ==================== UAPIS FUN COMMANDS ====================
 async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
     """/热榜 [平台] — real hot board via uapis.cn."""
-    from .scheduler import BOARD_NAMES, format_hotboard
+    from .scheduler import BOARD_NAMES, format_hotboard, ai_hotboard_summary
     alias = {v: k for k, v in BOARD_NAMES.items()}
     board = (args.strip().lower() or "weibo")
     board = alias.get(board, board)
@@ -150,7 +150,8 @@ async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id,
                        "没查到，支持的平台：" + "、".join(BOARD_NAMES.values()))
         return
-    await d._reply(group_id, user_id, format_hotboard(board, items))
+    summary = await ai_hotboard_summary(d, board, items)
+    await d._reply(group_id, user_id, format_hotboard(board, items, summary=summary))
 
 
 async def cmd_saying(d, group_id, user_id, args, role, sender_card, message):
@@ -612,14 +613,14 @@ async def cmd_delete_group_notice(d, group_id, user_id, args, role, sender_card,
                    "删除失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
 COMMAND_DETAILS = {
     "天气": "/天气 <城市>\n查真实天气（数据来自高德）。\n例：/天气 杭州",
-    "热榜": "/热榜 [平台]（别名 /热搜）\n看指定平台的实时热榜前 10。\n平台可写：微博、知乎、B站、抖音、百度、头条、IT之家、V2EX、GitHub、36氪、豆瓣电影\n例：/热榜 微博（不写平台默认微博）",
+    "热榜": "/热榜 [平台]（别名 /热搜）\n看指定平台的实时热榜前 10：AI 先用一两句话概括热点趋势，每条带可点击的详情链接。\n平台可写：微博、知乎、B站、抖音、百度、头条、IT之家、V2EX、GitHub、36氪、豆瓣电影\n例：/热榜 微博（不写平台默认微博）",
     "一言": "/一言\n随机来一句语录。",
     "答案之书": "/答案之书 [问题]\n心里想着问题，翻翻答案之书。\n例：/答案之书 今天适合摸鱼吗",
     "每日新闻": "/每日新闻\n发一张今日新闻速览图。",
     "必应壁纸": "/必应壁纸\n发今天的必应壁纸。",
     "epic免费": "/epic免费\n看 Epic 现在在送什么游戏。",
     "全体": "/全体 <内容>\n@全体成员发一条消息（每天次数有限，QQ 限制）。\n例：/全体 今晚八点开黑\n需要：你是本群管理/群主/主人，且 Bot 是管理或群主。",
-    "acg图": "/acg图 on 或 /acg图 off\n开关本群的每日 ACG 图推送（每天 0/6/12/18 点发 10-20 张随机二次元图）。\n不写参数可查看当前状态。管理员及以上可用。",
+    "acg图": "/acg图 on 或 /acg图 off\n开关本群的每日 ACG 图推送（每天 0/6/12/18 点，以合并转发形式发 50 张随机二次元图，自动记住发过的图尽量不重复）。\n不写参数可查看当前状态。管理员及以上可用。",
     "热榜推送": "/热榜推送 on 或 /热榜推送 off\n开关本群的每日热榜推送（每天 9 点和 21 点自动发）。\n不写参数可查看当前状态。管理员及以上可用。",
     "b站解析": "/b站解析 on 或 /b站解析 off\n开关本群的 B站视频自动解析：有人发 BV号/av号/b23 链接时，自动回复视频信息并尽量发出视频本体。\n不写参数可查看当前状态。管理员及以上可用。",
     "b站推送": "/b站推送 add <UP主的mid> — 盯一个 UP 主，新投稿和新动态约 1 分钟内推到本群\n/b站推送 del <mid> — 不盯了\n/b站推送 list — 看本群在盯谁\n\nmid 是什么：UP 主空间网址 space.bilibili.com/ 后面的那串数字，直接贴空间链接也行。\n例：/b站推送 add 946974 或 /b站推送 add space.bilibili.com/946974\n视频投稿推送直接生效；动态推送需要提供cookie的B站账号也关注了这个UP主。\n只有群主人和总主人能用。",
@@ -631,6 +632,31 @@ COMMAND_DETAILS = {
     "ban": "/ban @某人 [分钟] — 禁言（默认 30 分钟）\n/unban @某人 — 解除禁言\n也可以说：禁言 @某人 10分钟",
     "title": "/title @某人 <头衔> — 设置专属头衔\nQQ 规定只有群主能设头衔，所以 Bot 必须是群主；Bot 不是群主的群此功能静默无效。\n任何人也可以发：我要头衔xxx（只给自己设，Bot 是群主才生效）。",
     "公告": "/公告 <内容> — 发布群公告\n/公告 — 查看现有公告\n/删公告 <notice_id> — 删除",
+    "fortune": "/fortune\n今日运势，每人每天结果固定。",
+    "rank": "/rank\n近期发言排行前 10。",
+    "like": "/like [@人]\n给 TA 点 10 个赞，每天每人一次。",
+    "calc": "/calc <算式>\n计算器。例：/calc 3*(4+5)",
+    "translate": "/translate <文本>\n英译中。例：/translate hello world",
+    "生图": "/生图 <描述>\nAI 画一张图。例：/生图 夕阳下的猫",
+    "info": "/info [@人]\n看群成员资料，不写人名看自己。",
+    "history": "/history [条数]\n看本群最近消息记录，默认 10 条。",
+    "ocr": "/ocr\n回复一张图片，识别图上的文字。",
+    "转发摘要": "/转发摘要\n回复一条合并转发消息，AI 帮你总结内容。",
+    "群文件": "/群文件 [关键词]\n搜索或列出群文件。",
+    "精华列表": "/精华列表\n看本群精华消息。",
+    "群荣誉": "/群荣誉\n看本群群荣誉（龙王、话痨等）。",
+    "禁言列表": "/禁言列表\n看本群正在被禁言的人，需要 Bot 是管理。",
+    "点赞信息": "/点赞信息 [@人]\n看 TA 资料卡的点赞情况。",
+    "health": "/health\n看 Bot 运行状态：内存、连接、AI 供应商健康度。",
+    "allban": "/allban on 或 /allban off\n全员禁言开关。需要管理权限，且 Bot 是管理或群主。",
+    "精华": "回复某条消息发 /精华\n把那条消息设为精华，再设一次取消。需要管理权限。",
+    "welcome": "/welcome on 或 /welcome off — 开关入群欢迎\n/welcome 内容 — 自定义欢迎语，{nickname} 代表新人\n需要管理权限。",
+    "badword": "/badword add <词> — 加违禁词\n/badword del <词> — 移除\n/badword list — 看列表\n有人发违禁词会自动撤回并提醒。需要管理权限。",
+    "安全": "/安全 status — 安全功能状态\n/安全 log — 最近拦截记录\n群里的链接会自动检测安全性。需要管理权限。",
+    "enable": "/enable — 在本群启用 Bot\n/disable — 关停本群\n群主人及以上可用。",
+    "list": "/list\n本群数据概览（发言、AI、开关状态）。群主人及以上可用。",
+    "clearai": "/clearai\n清空本群的 AI 记忆数据。群主人及以上可用。",
+    "approve": "/approve — 通过待处理的加群/好友申请\n/reject — 拒绝\n总主人私聊使用。",
 }
 
 async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
