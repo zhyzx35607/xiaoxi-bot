@@ -29,6 +29,22 @@ def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, send
     return True
 
 
+def _share_card_text(message):
+    """Pull searchable text out of QQ share-card (json) segments.
+
+    NapCat leaves raw_message empty for pure card messages; without this the
+    dispatcher never sees Bilibili links shared as cards."""
+    texts = []
+    for seg in message or []:
+        if not isinstance(seg, dict) or seg.get("type") != "json":
+            continue
+        data = seg.get("data") or {}
+        payload = data.get("data")
+        if isinstance(payload, str):
+            texts.append(payload.replace("\\/", "/"))
+    return "\n".join(texts)
+
+
 def _read_tail_text(path, line_count=30, max_bytes=65536, max_chars=4000):
     """Read a small tail window without loading the whole rotating log."""
     line_count = max(1, min(int(line_count), 200))
@@ -584,7 +600,13 @@ class Dispatcher:
         sender_role = sender.get("role", "member")
         sender_card = sender.get("card") or sender.get("nickname", str(user_id))
 
-        # Group message handling
+        # Group message handling. QQ share cards arrive with an empty
+        # raw_message, so recover searchable text from json segments.
+        if msg_type == "group" and not raw:
+            card_text = _share_card_text(message)
+            if ("b23.tv" in card_text or "bilibili.com/video" in card_text
+                    or "BV1" in card_text):
+                raw = card_text
         if msg_type == "group" and raw:
             group_enabled = is_group_enabled(self, group_id)
             if group_enabled:

@@ -1117,3 +1117,82 @@ class BiliFeedAvTests(unittest.IsolatedAsyncioTestCase):
                     announced = await bilibili.poll_dynamics_once(Stub())
                 self.assertEqual(announced, 0)
                 bilibili.reset_state_for_test()
+
+
+class ShareCardTests(unittest.TestCase):
+    def test_share_card_text_extracts_json_payload(self):
+        from bot.dispatcher import _share_card_text
+        message = [
+            {"type": "json", "data": {"data":
+                "{\"app\":\"com.tencent.structmsg\",\"meta\":{\"detail_1\":{\"qqdocurl\":\"https:\\/\\/b23.tv\\/abc123\"}}}"}},
+        ]
+        text = _share_card_text(message)
+        self.assertIn("https://b23.tv/abc123", text)
+
+    def test_share_card_text_ignores_other_segments(self):
+        from bot.dispatcher import _share_card_text
+        self.assertEqual(_share_card_text([{"type": "text", "data": {"text": "hi"}}]), "")
+        self.assertEqual(_share_card_text(None), "")
+        self.assertEqual(_share_card_text([{"type": "json", "data": {}}]), "")
+
+
+class HotboardFormatTests(unittest.TestCase):
+    def test_format_includes_links_and_summary(self):
+        from bot.scheduler import format_hotboard
+        items = [{"title": "大新闻", "url": "https://example.com/1",
+                  "hot_value": "123"},
+                 {"title": "没链接的", "url": ""}]
+        text = format_hotboard("weibo", items, summary="今天都在聊大新闻")
+        lines = text.split("\n")
+        self.assertEqual(lines[0], "【微博热榜】")
+        self.assertEqual(lines[1], "今天都在聊大新闻")
+        self.assertIn("https://example.com/1", text)
+        self.assertIn("2. 没链接的", text)
+
+    def test_format_without_summary(self):
+        from bot.scheduler import format_hotboard
+        text = format_hotboard("zhihu", [{"title": "题", "url": "u"}])
+        self.assertTrue(text.startswith("【知乎热榜】\n1. 题"))
+
+
+class AcgPushTests(unittest.IsolatedAsyncioTestCase):
+    async def test_history_roundtrip_and_forward_dedup(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
+                scheduler._save_acg_history(["u1", "u2"])
+                self.assertEqual(scheduler._load_acg_history(), ["u1", "u2"])
+
+                sent = []
+
+                class Client:
+                    _running = True
+
+                    async def send_group_forward_msg(self, group_id, nodes):
+                        sent.append((group_id, nodes))
+                        return {"status": "ok", "retcode": 0}
+
+                class Stub:
+                    config = {
+                        "bot_qq": 222,
+                        "acg_images": {"enabled": True, "count": 3},
+                        "groups": {"100": {"enabled": True, "features": {}}},
+                    }
+                    client = Client()
+
+                async def fake_resolve(dispatcher, path, params=None):
+                    fake_resolve.n += 1
+                    # u1 already in history: must be skipped
+                    return ["u1", "u3", "u4", "u5"][fake_resolve.n % 4]
+                fake_resolve.n = -1
+
+                with patch("bot.uapi.uapi_resolve_image_url", fake_resolve):
+                    await scheduler._daily_acg_push(Stub())
+                self.assertEqual(len(sent), 1)
+                gid, nodes = sent[0]
+                self.assertEqual(gid, 100)
+                urls = [n["data"]["content"][0]["data"]["file"] for n in nodes]
+                self.assertNotIn("u1", urls)
+                self.assertEqual(len(nodes), 3)
+                self.assertIn("u3", scheduler._load_acg_history())

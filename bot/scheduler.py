@@ -179,18 +179,50 @@ BOARD_NAMES = {
 }
 
 
-def format_hotboard(board, items, limit=10):
-    """Format hot-board items into a compact group message."""
+def format_hotboard(board, items, limit=10, summary=None):
+    """Format hot-board items into a group message with clickable links."""
     name = BOARD_NAMES.get(board, board)
     lines = ["【{}热榜】".format(name)]
+    if summary:
+        lines.append(summary)
     for index, item in enumerate(items[:limit], 1):
         title = str(item.get("title") or "").strip()[:40]
-        hot = str(item.get("hot_value") or "").strip()
         line = "{}. {}".format(index, title)
+        hot = str(item.get("hot_value") or "").strip()
         if hot:
             line += "（{}）".format(hot)
         lines.append(line)
+        url = str(item.get("url") or "").strip()
+        if url:
+            lines.append(url)
     return "\n".join(lines)
+
+
+async def ai_hotboard_summary(dispatcher, board, items):
+    """One-line AI overview of a hot board. None on any failure."""
+    try:
+        titles = [str(i.get("title") or "").strip()
+                  for i in items[:15] if i.get("title")]
+        if not titles:
+            return None
+        from .ai import _call_deepseek
+        name = BOARD_NAMES.get(board, board)
+        messages = [
+            {"role": "system",
+             "content": "你是新闻摘要助手。根据热榜标题，用一两句口语化中文概括当前热点趋势，60字以内，不逐条复述，不加表情。"},
+            {"role": "user",
+             "content": name + "热榜：\n" + "\n".join(titles)},
+        ]
+        client = getattr(dispatcher, "client", None)
+        session = getattr(client, "session", None)
+        text = await _call_deepseek(dispatcher.config, messages,
+                                    max_tokens=80, temperature=0.3,
+                                    session=session)
+        text = str(text or "").strip().replace("\n", " ")
+        return text[:120] or None
+    except Exception as e:
+        log.info("hotboard AI summary failed: %s", e)
+        return None
 
 
 def _feature_on(dispatcher, gid, name):
@@ -199,44 +231,69 @@ def _feature_on(dispatcher, gid, name):
     return gcfg.get("features", {}).get(name, True)
 
 
+_ACG_HISTORY_PATH = os.path.join(_ROOT, "data", "acg_history.json")
+
+
+def _load_acg_history():
+    try:
+        with open(_ACG_HISTORY_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+        urls = data.get("urls") if isinstance(data, dict) else None
+        if isinstance(urls, list):
+            return [str(u) for u in urls if isinstance(u, str)][-3000:]
+    except Exception:
+        pass
+    return []
+
+
+def _save_acg_history(urls):
+    try:
+        atomic_write_json(_ACG_HISTORY_PATH, {"urls": urls[-3000:]})
+    except Exception as e:
+        log.warning("ACG history save failed: %s", e)
+
+
 async def _daily_acg_push(dispatcher):
-    """Push random ACG images at 0/6/12/18. URLs are resolved once and
-    reused for every group; NapCat fetches them directly (no bot memory)."""
+    """Push random ACG images at 0/6/12/18 as one merged-forward message.
+
+    The upstream API has no date filter, so freshness is approximated by
+    remembering every URL ever sent and skipping repeats. URLs are resolved
+    once and reused for every group; NapCat fetches them directly."""
     cfg = dispatcher.config.get("acg_images", {})
     if not cfg.get("enabled", True):
         return
-    lo, hi = int(cfg.get("min", 10) or 10), int(cfg.get("max", 20) or 20)
-    count = random.randint(min(lo, hi), max(lo, hi))
+    count = max(1, min(100, int(cfg.get("count", 50) or 50)))
     from .uapi import uapi_resolve_image_url
+    history = _load_acg_history()
+    seen = set(history)
     urls = []
-    for _ in range(count):
+    attempts = 0
+    while len(urls) < count and attempts < count * 2:
+        attempts += 1
         url = await uapi_resolve_image_url(
             dispatcher, "/random/image", params={"category": "acg", "type": "pc"})
-        if url:
+        if url and url not in seen:
+            seen.add(url)
             urls.append(url)
         await asyncio.sleep(0.3)
     if not urls:
         log.info("ACG push skipped: no image urls resolved")
         return
+    history.extend(urls)
+    _save_acg_history(history)
     groups = [gid for gid in _enabled_group_ids(dispatcher)
               if _feature_on(dispatcher, gid, "acg_images")]
+    bot_qq = dispatcher.config.get("bot_qq", 0)
+    nodes = [{
+        "type": "node",
+        "data": {"name": "小汐", "uin": str(bot_qq),
+                 "content": [{"type": "image", "data": {"file": u}}]},
+    } for u in urls]
     for gid in groups:
         try:
-            if len(urls) <= 15:
-                for i in range(0, len(urls), 5):
-                    segments = [{"type": "image", "data": {"file": u}}
-                                for u in urls[i:i + 5]]
-                    await dispatcher.client.send_group_msg(int(gid), segments)
-                    await asyncio.sleep(2)
-            else:
-                bot_qq = dispatcher.config.get("bot_qq", 0)
-                nodes = [{
-                    "type": "node",
-                    "data": {"name": "小汐", "uin": str(bot_qq),
-                             "content": [{"type": "image", "data": {"file": u}}]},
-                } for u in urls]
-                await dispatcher.client.send_group_forward_msg(int(gid), nodes)
-            log.info("ACG push: group=%s images=%d", gid, len(urls))
+            result = await dispatcher.client.send_group_forward_msg(int(gid), nodes)
+            status = (result or {}).get("status") if isinstance(result, dict) else result
+            log.info("ACG push: group=%s images=%d status=%s", gid, len(urls), status)
         except Exception as e:
             log.warning("ACG push failed group=%s: %s", gid, e)
         await asyncio.sleep(2)
@@ -248,7 +305,7 @@ async def _daily_hotboard_push(dispatcher):
     cfg = dispatcher.config.get("hotboard_push", {})
     if not cfg.get("enabled", True):
         return
-    boards = cfg.get("types", ["bilibili"]) or ["bilibili"]
+    boards = cfg.get("types", ["weibo"]) or ["weibo"]
     groups = [gid for gid in _enabled_group_ids(dispatcher)
               if _feature_on(dispatcher, gid, "hotboard_push")]
     if not groups:
@@ -265,7 +322,8 @@ async def _daily_hotboard_push(dispatcher):
         if not items:
             log.info("hotboard push: board=%s no data", board)
             continue
-        text = format_hotboard(board, items)
+        summary = await ai_hotboard_summary(dispatcher, board, items)
+        text = format_hotboard(board, items, summary=summary)
         for gid in groups:
             try:
                 await dispatcher.client.send_group_msg(
