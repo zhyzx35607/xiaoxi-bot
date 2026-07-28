@@ -366,6 +366,47 @@ class Dispatcher:
         """Periodic RSS watchdog: logs growth, gracefully restarts before OOM."""
         if self._rss_guard_task is None:
             self._rss_guard_task = asyncio.create_task(self._rss_guard_loop())
+        self._start_rss_thread_watch()
+
+    def _start_rss_thread_watch(self):
+        """Daemon-thread RSS sampler: survives a blocked event loop and dumps
+        all thread stacks + asyncio task list the moment memory spikes."""
+        import threading, faulthandler
+        try:
+            self._rss_watch_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._rss_watch_loop = None
+        def _watch():
+            last = 0.0
+            while True:
+                time.sleep(1)
+                try:
+                    kb = self._read_rss_kb()
+                    if not kb:
+                        continue
+                    mb = kb / 1024.0
+                    if mb >= 150 and time.time() - last > 20:
+                        last = time.time()
+                        log.warning("RSS thread-watch: %.0fMB | GC: %s",
+                                    mb, self._gc_type_histogram())
+                        with open("/tmp/stack_dump.txt", "a") as f:
+                            f.write("\n=== RSS %.0fMB at %s ===\n" % (
+                                mb, time.strftime("%F %T")))
+                            faulthandler.dump_traceback(file=f)
+                            loop = self._rss_watch_loop
+                            if loop is not None:
+                                try:
+                                    for task in asyncio.all_tasks(loop):
+                                        coro = task.get_coro()
+                                        f.write("TASK %s %s\n" % (
+                                            getattr(coro, "__qualname__", coro),
+                                            task.get_name()))
+                                except Exception as e:
+                                    f.write("task enum failed: %s\n" % e)
+                except Exception:
+                    pass
+        t = threading.Thread(target=_watch, daemon=True, name="rss-watch")
+        t.start()
 
     async def stop_rss_guard(self):
         if self._rss_guard_task and not self._rss_guard_task.done():
@@ -405,7 +446,7 @@ class Dispatcher:
         last_diag = 0.0
         try:
             while True:
-                await asyncio.sleep(60)
+                await asyncio.sleep(5)
                 rss_kb = self._read_rss_kb()
                 if rss_kb is None:
                     continue
@@ -421,7 +462,7 @@ class Dispatcher:
                         pass
                     os.kill(os.getpid(), 15)  # SIGTERM -> clean shutdown, systemd restarts
                     return
-                if mb >= log_mb and time.time() - last_diag > 600:
+                if mb >= log_mb and time.time() - last_diag > 30:
                     last_diag = time.time()
                     try:
                         log.warning("RSS guard: %.0fMB | GC histogram: %s",
@@ -1711,6 +1752,11 @@ class Dispatcher:
                     await self._delayed_queue_event.wait()
                 else:
                     wait = max(0.0, self._delayed_queue[0][0] - time.time())
+                    # Clear BEFORE waiting: the event stays set after an
+                    # enqueue, and waiting on a set event returns instantly,
+                    # which previously spun this loop at full speed and leaked
+                    # hundreds of thousands of TimerHandles within seconds.
+                    self._delayed_queue_event.clear()
                     try:
                         await asyncio.wait_for(self._delayed_queue_event.wait(), timeout=wait)
                     except asyncio.TimeoutError:

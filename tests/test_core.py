@@ -1196,3 +1196,57 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("u1", urls)
                 self.assertEqual(len(nodes), 3)
                 self.assertIn("u3", scheduler._load_acg_history())
+
+
+class DelayedQueueWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_does_not_spin_when_event_left_set(self):
+        # Regression: enqueue left _delayed_queue_event set; the worker's
+        # non-empty branch waited on the set event, which returns instantly,
+        # spinning the loop and leaking ~65K TimerHandles/s until OOM.
+        import heapq, time as _time
+        from bot.dispatcher import Dispatcher
+        d = Dispatcher.__new__(Dispatcher)
+        entry = [_time.time() + 300, 1, 2, 0, [], "hi", "n"]
+        d._delayed_queue = [entry]
+        d._delayed_queue_index = {(1, 2): entry}
+        d._delayed_queue_event = asyncio.Event()
+        d._delayed_queue_event.set()  # stale set state that caused the spin
+
+        calls = 0
+        real_wait_for = asyncio.wait_for
+
+        async def counting_wait_for(aw, timeout=None):
+            nonlocal calls
+            calls += 1
+            return await real_wait_for(aw, timeout=timeout)
+
+        with patch("bot.dispatcher.asyncio.wait_for", counting_wait_for):
+            task = asyncio.create_task(d._delayed_queue_worker())
+            await asyncio.sleep(0.3)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self.assertLessEqual(calls, 3)
+
+    async def test_worker_fires_mature_entry(self):
+        import time as _time
+        from bot.dispatcher import Dispatcher
+        d = Dispatcher.__new__(Dispatcher)
+        entry = [_time.time() - 1, 1, 2, 0, [], "hi", "n"]
+        d._delayed_queue = [entry]
+        d._delayed_queue_index = {(1, 2): entry}
+        d._delayed_queue_event = asyncio.Event()
+        fired = []
+        d.create_background_task = lambda coro, name="": (fired.append(coro), coro.close())[0]
+        d._delayed_worker_task = None
+        task = asyncio.create_task(d._delayed_queue_worker())
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(d._delayed_queue_index, {})
