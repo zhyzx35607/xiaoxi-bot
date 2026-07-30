@@ -1,0 +1,11 @@
+[Unit]
+Description=Clean NapCat temporary cache daily
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=15m
+Unit=napcat-cache-cleanup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,5 +1,9 @@
 # bot/client.py - OneBot v11 WebSocket Client
-import asyncio, fcntl, json, logging, os, uuid
+import asyncio, json, logging, os, uuid
+try:
+    import fcntl
+except ImportError:  # Windows local development/tests
+    fcntl = None
 import websockets
 import aiohttp, time
 from api_registry import REGISTRY
@@ -15,6 +19,7 @@ class OneBotClient:
         self.token = config["token"]
         self.bot_qq = config["bot_qq"]
         self._ws = None
+        self._connected_event = asyncio.Event()
         self._pending = {}
         self._dispatcher = None
         self._running = False
@@ -37,11 +42,29 @@ class OneBotClient:
     def set_dispatcher(self, dispatcher):
         self._dispatcher = dispatcher
 
+    @property
+    def is_connected(self):
+        return self._ws is not None
+
+    async def wait_until_connected(self, timeout=None):
+        if self.is_connected:
+            return True
+        try:
+            if timeout is None:
+                await self._connected_event.wait()
+            else:
+                await asyncio.wait_for(
+                    self._connected_event.wait(), timeout=max(0.1, float(timeout)))
+            return self.is_connected
+        except asyncio.TimeoutError:
+            return False
+
     def _acquire_pid(self):
         pid = os.getpid()
         fd = os.open(PID_FILE, os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             try:
                 with os.fdopen(os.dup(fd), "r", encoding="utf-8") as f:
@@ -60,7 +83,8 @@ class OneBotClient:
         if self._pid_fd is None:
             return
         try:
-            fcntl.flock(self._pid_fd, fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(self._pid_fd, fcntl.LOCK_UN)
             os.close(self._pid_fd)
             if os.path.exists(PID_FILE):
                 os.remove(PID_FILE)
@@ -72,6 +96,7 @@ class OneBotClient:
     async def stop(self):
         self._running = False
         self._stop_event.set()
+        self._connected_event.clear()
         if self._ws:
             try:
                 await self._ws.close()
@@ -115,6 +140,7 @@ class OneBotClient:
                         max_queue=16,
                     ) as ws:
                         self._ws = ws
+                        self._connected_event.set()
                         retry_delay = 1
                         log.info("Connected to OneBot WS")
                         connected_at = time.monotonic()
@@ -220,6 +246,7 @@ class OneBotClient:
                     else:
                         log.warning("Connect error after repeated retries: %s (retry in %ds)", e, retry_delay)
                 finally:
+                    self._connected_event.clear()
                     self._ws = None
                     for echo, fut in list(self._pending.items()):
                         if not fut.done():
@@ -254,8 +281,8 @@ class OneBotClient:
             except Exception as e:
                 log.error("Dispatch error: %s", e, exc_info=True)
 
-    async def call(self, action, params=None):
-        if self._ws is None:
+    async def call(self, action, params=None, timeout=None):
+        if not self.is_connected:
             return {"status": "failed", "msg": "not connected"}
         echo = str(uuid.uuid4())[:8]
         req = {"action": action, "params": params or {}, "echo": echo}
@@ -264,7 +291,8 @@ class OneBotClient:
         self._pending[echo] = fut
         try:
             await self._ws.send(json.dumps(req, ensure_ascii=False))
-            result = await asyncio.wait_for(fut, timeout=self._api_timeout)
+            timeout_seconds = self._api_timeout if timeout is None else max(1, float(timeout))
+            result = await asyncio.wait_for(fut, timeout=timeout_seconds)
             normalized = self._normalize_result(action, result)
             self._record_capability(action, normalized)
             return normalized
@@ -487,13 +515,13 @@ class OneBotClient:
         return await self.call("send_group_forward_msg", {
             "group_id": group_id,
             "messages": messages,
-        })
+        }, timeout=max(self._api_timeout, 60))
 
     async def send_private_forward_msg(self, user_id, messages):
         return await self.call("send_private_forward_msg", {
             "user_id": user_id,
             "messages": messages,
-        })
+        }, timeout=max(self._api_timeout, 60))
 
     async def forward_friend_single_msg(self, user_id, message_id):
         return await self.call("forward_friend_single_msg", {"user_id": user_id, "message_id": message_id})

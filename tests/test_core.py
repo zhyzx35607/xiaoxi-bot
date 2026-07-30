@@ -3,7 +3,7 @@ import asyncio
 import os
 import tempfile
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from api_registry import REGISTRY
 from bot.ai import (
@@ -20,9 +20,11 @@ from bot import scheduler
 
 
 class CoreBehaviorTests(unittest.TestCase):
-    def test_chat_log_excludes_disabled_groups_but_keeps_private(self):
+    def test_chat_log_excludes_disabled_groups_and_disabled_private(self):
         class DispatcherStub:
             config = {
+                "bot_owner": 9,
+                "private_chat": {"enabled": False, "allowed_users": [5]},
                 "groups": {
                     "10001": {"enabled": True},
                     "10002": {"enabled": False},
@@ -37,9 +39,13 @@ class CoreBehaviorTests(unittest.TestCase):
                 dispatcher, "GROUP_IN", "disabled", group_id=10002, user_id=2))
             self.assertFalse(_log_chat_message(
                 dispatcher, "GROUP_IN", "unknown", group_id=10003, user_id=3))
-            self.assertTrue(_log_chat_message(
+            self.assertFalse(_log_chat_message(
                 dispatcher, "PRIVATE_IN", "private", user_id=4))
-        self.assertEqual(info.call_count, 2)
+            self.assertTrue(_log_chat_message(
+                dispatcher, "PRIVATE_IN", "allowed", user_id=5))
+            self.assertTrue(_log_chat_message(
+                dispatcher, "PRIVATE_IN", "owner", user_id=9))
+        self.assertEqual(info.call_count, 3)
 
     def test_tail_reader_is_bounded_to_requested_lines(self):
         fd, path = tempfile.mkstemp()
@@ -449,6 +455,22 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(saved, "[SKIP] must not write memory")
         self.assertIn("424243", ai_module._last_reply_ts)
 
+    async def test_forward_messages_use_extended_timeout(self):
+        from unittest.mock import AsyncMock
+
+        client = OneBotClient({
+            "ws_url": "ws://127.0.0.1:3001", "token": "",
+            "bot_qq": 222, "runtime": {"api_timeout_seconds": 8},
+        })
+        with patch.object(client, "call", new=AsyncMock(
+                return_value={"status": "ok"})) as call_mock:
+            await client.send_group_forward_msg(100, [{"type": "node"}])
+        call_mock.assert_awaited_once_with(
+            "send_group_forward_msg",
+            {"group_id": 100, "messages": [{"type": "node"}]},
+            timeout=60,
+        )
+
     async def test_bot_qq_has_master_level(self):
         from bot.permission import get_user_level, LEVEL_SUPER
 
@@ -484,6 +506,66 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 333, [], "在吗", {"nickname": "路人"}, 0)
         ai_mock.assert_not_called()
         self.assertEqual(client.sent, [], "non-friend / disabled gate must stay silent")
+
+    async def test_disabled_private_is_dropped_before_logging_or_routing(self):
+        from unittest.mock import AsyncMock
+
+        dispatcher = Dispatcher({
+            "runtime": {}, "bot_owner": 111, "bot_qq": 222,
+            "private_chat": {"enabled": False, "allowed_users": []},
+            "groups": {},
+        }, object())
+        event = {
+            "post_type": "message", "message_type": "private",
+            "user_id": 333, "message_id": 1,
+            "raw_message": "????????????",
+            "message": [{"type": "text", "data": {"text": "??"}}],
+            "sender": {"nickname": "???"},
+        }
+        with patch("bot.dispatcher._log_chat_message") as log_mock, \
+                patch.object(dispatcher, "_handle_private_ai_chat",
+                             new=AsyncMock()) as private_mock:
+            await dispatcher._handle_message(event)
+        log_mock.assert_not_called()
+        private_mock.assert_not_called()
+        self.assertNotIn(1, dispatcher._seen_msg_ids)
+
+    async def test_delayed_reply_is_cancelled_after_group_disable(self):
+        from unittest.mock import AsyncMock
+        from bot import ai as ai_module
+
+        dispatcher = Dispatcher({
+            "runtime": {}, "bot_owner": 111, "bot_qq": 222,
+            "groups": {"9001": {"enabled": False}},
+        }, object())
+        with patch.object(ai_module, "handle_ai_chat",
+                          new=AsyncMock()) as ai_mock:
+            await dispatcher._trigger_delayed_reply(
+                9001, 333, 3, [], "????", "???")
+        ai_mock.assert_not_called()
+
+    async def test_disabled_group_is_dropped_before_content_pipeline(self):
+        from unittest.mock import AsyncMock
+
+        dispatcher = Dispatcher({
+            "runtime": {}, "bot_owner": 111, "bot_qq": 222,
+            "command_prefix": "/", "private_chat": {"enabled": False},
+            "groups": {"9001": {"enabled": False}},
+        }, object())
+        event = {
+            "post_type": "message", "message_type": "group",
+            "group_id": 9001, "user_id": 333, "message_id": 2,
+            "raw_message": "@?? ?????????",
+            "message": [{"type": "text", "data": {"text": "??"}}],
+            "sender": {"nickname": "???", "role": "member"},
+        }
+        with patch("bot.dispatcher._log_chat_message") as log_mock, \
+                patch.object(dispatcher, "_handle_group_message",
+                             new=AsyncMock()) as group_mock:
+            await dispatcher._handle_message(event)
+        log_mock.assert_not_called()
+        group_mock.assert_not_called()
+        self.assertNotIn(2, dispatcher._seen_msg_ids)
 
     async def test_private_ai_gate_allowlist_bypasses_switch(self):
         from unittest.mock import AsyncMock
@@ -944,8 +1026,10 @@ class BiliPushWatermarkTests(unittest.IsolatedAsyncioTestCase):
         self.bilibili = bilibili
 
     def tearDown(self):
-        self._patcher.stop()
-        self.bilibili.reset_state_for_test()
+        if hasattr(self, "_patcher"):
+            self._patcher.stop()
+        if hasattr(self, "bilibili"):
+            self.bilibili.reset_state_for_test()
 
     async def test_watermark_blocks_stale_fallback_videos(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1025,6 +1109,74 @@ class BiliPushWatermarkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bilibili.pushed_bvids(100, 42),
                              ["BV1", "BV2", "BV3"])
             self.assertEqual(bilibili.push_watermark(100, 42), 99)
+
+    async def test_timeout_confirmed_by_history_counts_as_success(self):
+        from bot import bilibili
+
+        class Client:
+            def __init__(self):
+                self.history_calls = 0
+
+            async def get_group_msg_history(self, group_id, count=30):
+                self.history_calls += 1
+                messages = []
+                if self.history_calls >= 2:
+                    messages = [{
+                        "user_id": 222,
+                        "raw_message": "https://www.bilibili.com/video/BV_confirmed",
+                    }]
+                return {"status": "ok", "data": {"messages": messages}}
+
+            async def send_group_msg(self, group_id, message):
+                return {"status": "timeout", "error_kind": "timeout"}
+
+        class Stub:
+            config = {"bot_qq": 222}
+            client = Client()
+
+        with patch("bot.bilibili.asyncio.sleep", new=AsyncMock()):
+            result = await bilibili._send_group_confirmed(
+                Stub(), 100, [], "BV_confirmed", "bili video")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["confirmed_by"], "history_after_timeout")
+
+    async def test_unconfirmed_timeout_does_not_advance_watermark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._setup(tmp)
+            bilibili = self.bilibili
+
+            class Client:
+                _running = True
+
+                async def get_group_msg_history(self, group_id, count=30):
+                    return {"status": "ok", "data": {"messages": []}}
+
+                async def send_group_msg(self, group_id, message):
+                    return {"status": "timeout", "error_kind": "timeout"}
+
+                async def get_group_member_info(self, group_id, user_id,
+                                                no_cache=False):
+                    return {"status": "ok", "data": {"role": "member"}}
+
+            class Stub:
+                config = {
+                    "bot_qq": 222,
+                    "groups": {"100": {"enabled": True,
+                                          "bili_push": {"mids": [42]}}},
+                }
+                client = Client()
+
+            bilibili.mark_pushed(100, 42, [], watermark=1000)
+
+            async def fake_archives(dispatcher, mid, count=5):
+                return [{"bvid": "BV_failed", "title": "新", "created": 2000}]
+
+            with patch.object(bilibili, "get_archives", fake_archives), \
+                    patch("bot.bilibili.asyncio.sleep", new=AsyncMock()):
+                announced = await bilibili.poll_once(Stub())
+            self.assertEqual(announced, 0)
+            self.assertEqual(bilibili.push_watermark(100, 42), 1000)
+            self.assertNotIn("BV_failed", bilibili.pushed_bvids(100, 42))
 
 
 class BiliDynamicsTests(unittest.TestCase):
@@ -1288,6 +1440,73 @@ class HotboardFormatTests(unittest.TestCase):
         text = format_hotboard("zhihu", [{"title": "题", "url": "u"}])
         self.assertTrue(text.startswith("【知乎热榜】\n1. 题"))
 
+    def test_forward_nodes_split_header_and_items(self):
+        from bot.scheduler import build_hotboard_forward_nodes
+        nodes = build_hotboard_forward_nodes(
+            "weibo",
+            [
+                {"title": "大新闻", "url": "https://example.com/1",
+                 "hot_value": "123"},
+                {"title": "第二条", "url": "", "hot_value": ""},
+            ],
+            bot_qq=3127014580,
+            summary="今天都在聊大新闻",
+        )
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual(nodes[0]["data"]["content"],
+                         "【微博热榜】\n今天都在聊大新闻")
+        self.assertEqual(nodes[0]["data"]["uin"], "3127014580")
+        self.assertIn("1. 大新闻（123）", nodes[1]["data"]["content"])
+        self.assertIn("https://example.com/1", nodes[1]["data"]["content"])
+        self.assertEqual(nodes[2]["data"]["content"], "2. 第二条")
+
+
+class HotboardPushTests(unittest.IsolatedAsyncioTestCase):
+    async def test_daily_push_uses_merged_forward(self):
+        from unittest.mock import AsyncMock
+        from bot import scheduler
+        sent = []
+
+        class Client:
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append((group_id, nodes))
+                return {"status": "ok", "retcode": 0}
+
+            async def send_group_msg(self, group_id, message):
+                raise AssertionError("hotboard push must use merged forward")
+
+        class Stub:
+            config = {
+                "bot_qq": 3127014580,
+                "uapi_api_key": "test",
+                "hotboard_push": {"enabled": True, "types": ["weibo"]},
+                "groups": {"100": {"enabled": True, "features": {}}},
+            }
+            client = Client()
+
+        async def fake_uapi_get(dispatcher, path, params=None, kind="auto"):
+            return {"list": [
+                {"title": "热点一", "url": "https://example.com/1",
+                 "hot_value": "999"},
+                {"title": "热点二", "url": "https://example.com/2"},
+            ]}
+
+        async def fake_summary(dispatcher, board, items):
+            return "热点概况"
+
+        with patch("bot.uapi.credits_available", return_value=True), \
+                patch("bot.uapi.uapi_get", fake_uapi_get), \
+                patch.object(scheduler, "ai_hotboard_summary", fake_summary), \
+                patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+            await scheduler._daily_hotboard_push(Stub())
+
+        self.assertEqual(len(sent), 1)
+        group_id, nodes = sent[0]
+        self.assertEqual(group_id, 100)
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual(nodes[0]["data"]["content"], "【微博热榜】\n热点概况")
+        self.assertIn("热点一（999）", nodes[1]["data"]["content"])
+
 
 class AcgPushTests(unittest.IsolatedAsyncioTestCase):
     async def test_history_roundtrip_and_forward_dedup(self):
@@ -1310,6 +1529,7 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
                 class Stub:
                     config = {
                         "bot_qq": 222,
+                        "uapi_api_key": "test",
                         "acg_images": {"enabled": True, "count": 3},
                         "groups": {"100": {"enabled": True, "features": {}}},
                     }
@@ -1330,6 +1550,91 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("u1", urls)
                 self.assertEqual(len(nodes), 3)
                 self.assertIn("u3", scheduler._load_acg_history())
+
+    async def test_large_push_is_split_into_batches(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+            batches = []
+
+            class Client:
+                async def send_group_forward_msg(self, group_id, nodes):
+                    batches.append(len(nodes))
+                    return {"status": "ok", "retcode": 0}
+
+            class Stub:
+                config = {
+                    "bot_qq": 222,
+                    "uapi_api_key": "test",
+                    "acg_images": {"enabled": True, "count": 12,
+                                   "batch_size": 5},
+                    "groups": {"100": {"enabled": True, "features": {}}},
+                }
+                client = Client()
+
+            async def fake_resolve(dispatcher, path, params=None):
+                fake_resolve.value += 1
+                return "u{}".format(fake_resolve.value)
+            fake_resolve.value = 0
+
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch("bot.uapi.uapi_resolve_image_url", fake_resolve), \
+                    patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+                await scheduler._daily_acg_push(Stub())
+            self.assertEqual(batches, [5, 5, 2])
+
+    async def test_failed_batch_is_retried_next_run(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+
+            class Client:
+                def __init__(self):
+                    self.calls = 0
+                    self.sent_urls = []
+
+                async def send_group_forward_msg(self, group_id, nodes):
+                    self.calls += 1
+                    urls = [node["data"]["content"][0]["data"]["file"]
+                            for node in nodes]
+                    self.sent_urls.append(urls)
+                    if self.calls == 2:
+                        return {"status": "timeout", "error_kind": "timeout"}
+                    return {"status": "ok", "retcode": 0}
+
+            client = Client()
+
+            class Stub:
+                config = {
+                    "bot_qq": 222,
+                    "uapi_api_key": "test",
+                    "acg_images": {"enabled": True, "count": 6,
+                                   "batch_size": 3},
+                    "groups": {"100": {"enabled": True, "features": {}}},
+                }
+
+            stub = Stub()
+            stub.client = client
+
+            async def first_resolve(dispatcher, path, params=None):
+                first_resolve.value += 1
+                return "u{}".format(first_resolve.value)
+            first_resolve.value = 0
+
+            async def no_new_urls(dispatcher, path, params=None):
+                return None
+
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch("bot.uapi.uapi_resolve_image_url", first_resolve), \
+                    patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+                await scheduler._daily_acg_push(stub)
+                state = scheduler._load_acg_state()
+                self.assertEqual(state["pending"]["100"], ["u4", "u5", "u6"])
+                with patch("bot.uapi.uapi_resolve_image_url", no_new_urls):
+                    await scheduler._daily_acg_push(stub)
+                state = scheduler._load_acg_state()
+            self.assertNotIn("100", state["pending"])
+            self.assertEqual(client.sent_urls[-1], ["u4", "u5", "u6"])
 
 
 class DelayedQueueWorkerTests(unittest.IsolatedAsyncioTestCase):

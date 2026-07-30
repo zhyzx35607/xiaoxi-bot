@@ -15,9 +15,46 @@ log = logging.getLogger("qqbot")
 chat_log = logging.getLogger("qqbot.chat")
 
 
-def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, sender_name=""):
-    """Write bounded chat history, excluding groups not explicitly enabled."""
+def _private_chat_allowed(dispatcher, user_id):
+    """Return whether a private-message sender may enter any bot pipeline."""
+    pc_cfg = dispatcher.config.get("private_chat", {})
+    if user_id == dispatcher.config.get("bot_owner"):
+        return True
+    allowed_users = {
+        int(value) for value in pc_cfg.get("allowed_users", [])
+        if str(value).isdigit()
+    }
+    return bool(pc_cfg.get("enabled", False) or user_id in allowed_users)
+
+
+def _disabled_group_activation_allowed(dispatcher, event):
+    """Allow only the owner/bot account to recover a disabled group in place."""
+    if event.get("post_type") != "message" or event.get("message_type") != "group":
+        return False
+    if event.get("user_id") not in {
+        dispatcher.config.get("bot_owner"), dispatcher.config.get("bot_qq")
+    }:
+        return False
+    prefix = dispatcher.config.get("command_prefix", "/")
+    return str(event.get("raw_message") or "").strip().lower() == prefix + "enable"
+
+
+def _event_scope_allowed(dispatcher, event):
+    """Hard scope gate applied before parsing, logging, caching, or AI work."""
+    group_id = event.get("group_id")
     if group_id and not is_group_enabled(dispatcher, group_id):
+        return _disabled_group_activation_allowed(dispatcher, event)
+    if (event.get("post_type") in ("message", "message_sent")
+            and event.get("message_type") == "private"):
+        return _private_chat_allowed(dispatcher, event.get("user_id", 0))
+    return True
+
+
+def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, sender_name=""):
+    """Write bounded chat history only for explicitly permitted scopes."""
+    if group_id and not is_group_enabled(dispatcher, group_id):
+        return False
+    if not group_id and not _private_chat_allowed(dispatcher, user_id):
         return False
     text = str(raw or "").replace("\r", "\\r").replace("\n", "\\n")[:500]
     if group_id:
@@ -524,6 +561,8 @@ class Dispatcher:
 
     async def dispatch(self, event):
         try:
+            if not _event_scope_allowed(self, event):
+                return
             pt = event.get("post_type", "")
             if pt == "message":
                 await self._handle_message(event)
@@ -625,6 +664,11 @@ class Dispatcher:
         msg_type = event.get("message_type", "")
         group_id = event.get("group_id", None)
         user_id = event.get("user_id", 0)
+
+        # Defense in depth: keep direct callers from bypassing dispatch().
+        if not _event_scope_allowed(self, event):
+            return
+
         message = event.get("message", [])
         raw = event.get("raw_message", "") or ""
         sender = event.get("sender", {})
@@ -1819,6 +1863,8 @@ class Dispatcher:
 
     async def _trigger_delayed_reply(self, group_id, user_id, message_id, message, raw, sender_card):
         """Re-evaluate a delayed candidate with fresh context and let the AI decide."""
+        if not is_group_enabled(self, group_id):
+            return
         from .ai import handle_ai_chat, search_web, _schedule_state
         from .guard import is_blacklisted
 

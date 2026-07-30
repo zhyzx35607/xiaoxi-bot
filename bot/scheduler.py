@@ -10,17 +10,44 @@ import logging
 import os
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
+_TZ_WARNING_NAMES = set()
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _CHECKIN_STATUS_PATH = os.path.join(_ROOT, "data", "checkin_status.json")
 
 
-def _seconds_until_next_checkin():
-    """Calculate seconds until the next 00:00:01 local check-in."""
-    now = datetime.now()
+def _timezone(name="Asia/Shanghai"):
+    try:
+        return ZoneInfo(str(name or "Asia/Shanghai"))
+    except ZoneInfoNotFoundError:
+        key = str(name or "Asia/Shanghai")
+        if key not in _TZ_WARNING_NAMES:
+            _TZ_WARNING_NAMES.add(key)
+            log.info("Timezone database unavailable for %s; using fixed UTC+8", name)
+        return timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+
+def _scheduler_timezone(dispatcher):
+    runtime = dispatcher.config.get("runtime", {})
+    return str(runtime.get("scheduler_timezone") or "Asia/Shanghai")
+
+
+def _client_connected(dispatcher):
+    client = getattr(dispatcher, "client", None)
+    connected = getattr(client, "is_connected", None)
+    return True if connected is None else bool(connected)
+
+
+def _seconds_until_next_checkin(timezone_name="Asia/Shanghai"):
+    """Calculate seconds until the next 00:00:01 in the configured timezone."""
+    try:
+        now = datetime.now(_timezone(timezone_name))
+    except TypeError:
+        now = datetime.now()
     target = now.replace(hour=0, minute=0, second=1, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
@@ -61,7 +88,8 @@ def _load_checkin_status():
 def get_checkin_status(dispatcher):
     state = _load_checkin_status()
     state["enabled_groups"] = _enabled_group_ids(dispatcher)
-    state["next_run"] = time.time() + _seconds_until_next_checkin()
+    state["next_run"] = time.time() + _seconds_until_next_checkin(
+        _scheduler_timezone(dispatcher))
     return state
 
 
@@ -110,6 +138,9 @@ async def run_manual_checkin(dispatcher, group_id):
 
 
 async def _run_group_checkin(dispatcher, group_list, trigger):
+    if not _client_connected(dispatcher):
+        log.info("Group check-in skipped: OneBot is offline")
+        return {}
     lock = getattr(dispatcher, "_checkin_lock", None)
     if lock is None:
         lock = asyncio.Lock()
@@ -162,9 +193,12 @@ def _api_succeeded(result):
             and result.get("retcode", 0) == 0)
 
 
-def _seconds_until_time(hour, minute=0):
-    """Seconds until the next local HH:MM:05 occurrence."""
-    now = datetime.now()
+def _seconds_until_time(hour, minute=0, timezone_name="Asia/Shanghai"):
+    """Seconds until the next HH:MM:05 in the configured timezone."""
+    try:
+        now = datetime.now(_timezone(timezone_name))
+    except TypeError:
+        now = datetime.now()
     target = now.replace(hour=int(hour) % 24, minute=int(minute) % 60,
                          second=5, microsecond=0)
     if target <= now:
@@ -196,6 +230,34 @@ def format_hotboard(board, items, limit=10, summary=None):
         if url:
             lines.append(url)
     return "\n".join(lines)
+
+
+def build_hotboard_forward_nodes(board, items, bot_qq, limit=10, summary=None):
+    """Build a compact merged-forward message for one hot board."""
+    name = BOARD_NAMES.get(board, board)
+    header = "【{}热榜】".format(name)
+    if summary:
+        header += "\n" + str(summary).strip()
+    node_name = "小汐"
+    node_uin = str(bot_qq)
+    nodes = [{
+        "type": "node",
+        "data": {"name": node_name, "uin": node_uin, "content": header},
+    }]
+    for index, item in enumerate(items[:limit], 1):
+        title = str(item.get("title") or "").strip()[:80] or "（无标题）"
+        text = "{}. {}".format(index, title)
+        hot = str(item.get("hot_value") or "").strip()
+        if hot:
+            text += "（{}）".format(hot)
+        url = str(item.get("url") or "").strip()
+        if url:
+            text += "\n" + url
+        nodes.append({
+            "type": "node",
+            "data": {"name": node_name, "uin": node_uin, "content": text},
+        })
+    return nodes
 
 
 async def ai_hotboard_summary(dispatcher, board, items):
@@ -234,21 +296,39 @@ def _feature_on(dispatcher, gid, name):
 _ACG_HISTORY_PATH = os.path.join(_ROOT, "data", "acg_history.json")
 
 
-def _load_acg_history():
+def _load_acg_state():
     try:
         with open(_ACG_HISTORY_PATH, encoding="utf-8") as handle:
             data = json.load(handle)
         urls = data.get("urls") if isinstance(data, dict) else None
-        if isinstance(urls, list):
-            return [str(u) for u in urls if isinstance(u, str)][-3000:]
+        pending = data.get("pending") if isinstance(data, dict) else None
+        clean_urls = ([str(u) for u in urls if isinstance(u, str)][-3000:]
+                      if isinstance(urls, list) else [])
+        clean_pending = {}
+        if isinstance(pending, dict):
+            for gid, values in pending.items():
+                if isinstance(values, list):
+                    clean_pending[str(gid)] = [
+                        str(value) for value in values if isinstance(value, str)
+                    ][-200:]
+        return {"urls": clean_urls, "pending": clean_pending}
     except Exception:
         pass
-    return []
+    return {"urls": [], "pending": {}}
 
 
-def _save_acg_history(urls):
+def _load_acg_history():
+    return _load_acg_state()["urls"]
+
+
+def _save_acg_history(urls, pending=None):
     try:
-        atomic_write_json(_ACG_HISTORY_PATH, {"urls": urls[-3000:]})
+        if pending is None:
+            pending = _load_acg_state()["pending"]
+        atomic_write_json(_ACG_HISTORY_PATH, {
+            "urls": urls[-3000:],
+            "pending": pending,
+        })
     except Exception as e:
         log.warning("ACG history save failed: %s", e)
 
@@ -263,45 +343,87 @@ async def _daily_acg_push(dispatcher):
     if not cfg.get("enabled", True):
         return
     count = max(1, min(100, int(cfg.get("count", 50) or 50)))
-    from .uapi import uapi_resolve_image_url
-    history = _load_acg_history()
-    seen = set(history)
-    urls = []
-    attempts = 0
-    while len(urls) < count and attempts < count * 2:
-        attempts += 1
-        url = await uapi_resolve_image_url(
-            dispatcher, "/random/image", params={"category": "acg", "type": "pc"})
-        if url and url not in seen:
-            seen.add(url)
-            urls.append(url)
-        await asyncio.sleep(0.3)
-    if not urls:
-        log.info("ACG push skipped: no image urls resolved")
-        return
-    history.extend(urls)
-    _save_acg_history(history)
+    batch_size = max(1, min(20, int(cfg.get("batch_size", 10) or 10)))
     groups = [gid for gid in _enabled_group_ids(dispatcher)
               if _feature_on(dispatcher, gid, "acg_images")]
+    if not groups:
+        return
+    if not _client_connected(dispatcher):
+        log.info("ACG push skipped: OneBot is offline")
+        return
+    from .uapi import uapi_resolve_image_url
+    state = _load_acg_state()
+    history = state["urls"]
+    pending = state["pending"]
+    seen = set(history)
+    for values in pending.values():
+        seen.update(values)
+    urls = []
+    attempts = 0
+    has_uapi_key = bool(str(dispatcher.config.get("uapi_api_key") or "").strip())
+    if has_uapi_key:
+        while len(urls) < count and attempts < count * 2:
+            attempts += 1
+            url = await uapi_resolve_image_url(
+                dispatcher, "/random/image", params={"category": "acg", "type": "pc"})
+            if url and url not in seen:
+                seen.add(url)
+                urls.append(url)
+            await asyncio.sleep(0.3)
+    elif not any(pending.get(str(gid)) for gid in groups):
+        log.info("ACG push skipped: uapi api key is not configured")
+        return
+    if not urls and not any(pending.get(str(gid)) for gid in groups):
+        log.info("ACG push skipped: no image urls resolved")
+        return
     bot_qq = dispatcher.config.get("bot_qq", 0)
-    nodes = [{
-        "type": "node",
-        "data": {"name": "小汐", "uin": str(bot_qq),
-                 "content": [{"type": "image", "data": {"file": u}}]},
-    } for u in urls]
     for gid in groups:
-        try:
-            result = await dispatcher.client.send_group_forward_msg(int(gid), nodes)
-            status = (result or {}).get("status") if isinstance(result, dict) else result
-            log.info("ACG push: group=%s images=%d status=%s", gid, len(urls), status)
-        except Exception as e:
-            log.warning("ACG push failed group=%s: %s", gid, e)
+        gid_key = str(gid)
+        group_urls = list(dict.fromkeys((pending.get(gid_key) or []) + urls))
+        unsent = []
+        for start in range(0, len(group_urls), batch_size):
+            batch = group_urls[start:start + batch_size]
+            nodes = [{
+                "type": "node",
+                "data": {"name": "小汐", "uin": str(bot_qq),
+                         "content": [{"type": "image", "data": {"file": url}}]},
+            } for url in batch]
+            try:
+                result = await dispatcher.client.send_group_forward_msg(int(gid), nodes)
+                status = ((result or {}).get("status")
+                          if isinstance(result, dict) else result)
+                if status != "ok":
+                    unsent.extend(group_urls[start:])
+                    log.warning(
+                        "ACG batch unconfirmed group=%s batch=%d images=%d status=%s",
+                        gid, start // batch_size + 1, len(batch), status)
+                    break
+                log.info("ACG batch sent group=%s batch=%d images=%d",
+                         gid, start // batch_size + 1, len(batch))
+            except Exception as e:
+                unsent.extend(group_urls[start:])
+                log.warning("ACG batch failed group=%s batch=%d: %s",
+                            gid, start // batch_size + 1, e)
+                break
+            await asyncio.sleep(2)
+        if unsent:
+            pending[gid_key] = list(dict.fromkeys(unsent))[-200:]
+        else:
+            pending.pop(gid_key, None)
         await asyncio.sleep(2)
+    history.extend(urls)
+    _save_acg_history(history, pending)
 
 
 async def _daily_hotboard_push(dispatcher):
     """Push hot boards at 9/21. Fetched once per board, broadcast to all
     enabled groups (saves credits)."""
+    if not _client_connected(dispatcher):
+        log.info("Hotboard push skipped: OneBot is offline")
+        return
+    if not str(dispatcher.config.get("uapi_api_key") or "").strip():
+        log.info("Hotboard push skipped: uapi api key is not configured")
+        return
     cfg = dispatcher.config.get("hotboard_push", {})
     if not cfg.get("enabled", True):
         return
@@ -323,27 +445,39 @@ async def _daily_hotboard_push(dispatcher):
             log.info("hotboard push: board=%s no data", board)
             continue
         summary = await ai_hotboard_summary(dispatcher, board, items)
-        text = format_hotboard(board, items, summary=summary)
+        nodes = build_hotboard_forward_nodes(
+            board, items, dispatcher.config.get("bot_qq", 0), summary=summary)
         for gid in groups:
             try:
-                await dispatcher.client.send_group_msg(
-                    int(gid), [{"type": "text", "data": {"text": text}}])
+                result = await dispatcher.client.send_group_forward_msg(int(gid), nodes)
+                status = ((result or {}).get("status")
+                          if isinstance(result, dict) else result)
+                if status != "ok":
+                    log.warning("hotboard push failed group=%s board=%s status=%s",
+                                gid, board, status)
+                else:
+                    log.info("hotboard push: group=%s board=%s items=%d status=ok",
+                             gid, board, len(nodes) - 1)
             except Exception as e:
-                log.warning("hotboard push failed group=%s: %s", gid, e)
+                log.warning("hotboard push failed group=%s board=%s: %s",
+                            gid, board, e)
             await asyncio.sleep(2)
 
 
 def _scheduled_jobs(dispatcher):
     """Return [(job_name, seconds_until_fire), ...] for all timed jobs."""
-    jobs = [("checkin", _seconds_until_next_checkin())]
+    timezone_name = _scheduler_timezone(dispatcher)
+    jobs = [("checkin", _seconds_until_next_checkin(timezone_name))]
     acg_cfg = dispatcher.config.get("acg_images", {})
     if acg_cfg.get("enabled", True):
         for hour in acg_cfg.get("times", [0, 6, 12, 18]):
-            jobs.append(("acg", _seconds_until_time(hour)))
+            jobs.append(("acg", _seconds_until_time(
+                hour, timezone_name=timezone_name)))
     hb_cfg = dispatcher.config.get("hotboard_push", {})
     if hb_cfg.get("enabled", True):
         for hour in hb_cfg.get("times", [9, 21]):
-            jobs.append(("hotboard", _seconds_until_time(hour)))
+            jobs.append(("hotboard", _seconds_until_time(
+                hour, timezone_name=timezone_name)))
     return jobs
 
 
@@ -357,7 +491,9 @@ async def scheduler_loop(dispatcher):
             if wait_seconds <= 60:
                 if wait_seconds > 0:
                     await asyncio.sleep(wait_seconds)
-                if name == "checkin":
+                if not _client_connected(dispatcher):
+                    log.info("Scheduled job %s skipped: OneBot is offline", name)
+                elif name == "checkin":
                     await _daily_checkin(dispatcher)
                 elif name == "acg":
                     await _daily_acg_push(dispatcher)

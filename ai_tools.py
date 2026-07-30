@@ -559,8 +559,18 @@ def reset_playful_ban_for_test():
 # ---------- registry ----------
 
 def _wrap_read(fn):
+    # Only pass kwargs the underlying function actually accepts; the executor
+    # injects context args (e.g. group_id) that plain uapi tools don't take.
+    import inspect as _inspect
+    _params = _inspect.signature(fn).parameters
+    _accepts_kwargs = any(p.kind == _inspect.Parameter.VAR_KEYWORD
+                          for p in _params.values())
+
     async def _run(dispatcher, args, ctx):
-        return await fn(dispatcher, **args)
+        if _accepts_kwargs:
+            return await fn(dispatcher, **args)
+        filtered = {k: v for k, v in args.items() if k in _params}
+        return await fn(dispatcher, **filtered)
     return _run
 
 

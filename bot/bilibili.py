@@ -44,6 +44,7 @@ _state = {
     "buvid3": "", "buvid4": "",
     "img_key": "", "sub_key": "", "wbi_ts": 0.0,
     "fail_count": 0, "fallback_until": 0.0, "last_uapi_poll": 0.0,
+    "risk_until": 0.0, "last_risk_log": 0.0,
 }
 _push_state = None
 
@@ -185,6 +186,80 @@ def reset_state_for_test():
     _state["fail_count"] = 0
     _state["fallback_until"] = 0.0
     _state["last_uapi_poll"] = 0.0
+    _state["risk_until"] = 0.0
+    _state["last_risk_log"] = 0.0
+
+
+def _history_messages(result):
+    """Return message records from common NapCat history response shapes."""
+    if not isinstance(result, dict) or result.get("status") != "ok":
+        return []
+    data = result.get("data")
+    if isinstance(data, list):
+        return data
+    if not isinstance(data, dict):
+        return []
+    for key in ("messages", "message_list", "list"):
+        messages = data.get(key)
+        if isinstance(messages, list):
+            return messages
+    return []
+
+
+def _history_record_text(record):
+    if not isinstance(record, dict):
+        return ""
+    parts = [record.get("raw_message"), record.get("message")]
+    try:
+        parts.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+    except Exception:
+        pass
+    return "\n".join(str(part) for part in parts if part is not None)
+
+
+async def _recent_bot_message_contains(dispatcher, group_id, marker):
+    """Best-effort confirmation for sends whose API response was uncertain."""
+    if not marker:
+        return False
+    try:
+        result = await dispatcher.client.get_group_msg_history(int(group_id), count=30)
+    except Exception as e:
+        log.info("bili delivery history check failed g=%s marker=%s: %s",
+                 group_id, marker, e)
+        return False
+    bot_qq = int(dispatcher.config.get("bot_qq", 0) or 0)
+    for record in _history_messages(result):
+        sender = record.get("sender") if isinstance(record, dict) else None
+        sender_id = 0
+        if isinstance(sender, dict):
+            sender_id = int(sender.get("user_id", 0) or 0)
+        if not sender_id and isinstance(record, dict):
+            sender_id = int(record.get("user_id", 0) or 0)
+        if bot_qq and sender_id and sender_id != bot_qq:
+            continue
+        if marker in _history_record_text(record):
+            return True
+    return False
+
+
+async def _send_group_confirmed(dispatcher, group_id, segments, marker, kind):
+    """Send once and verify ambiguous timeouts through recent group history."""
+    if await _recent_bot_message_contains(dispatcher, group_id, marker):
+        log.info("%s already present in group history: g=%s marker=%s",
+                 kind, group_id, marker)
+        return {"status": "ok", "confirmed_by": "history"}
+    result = await dispatcher.client.send_group_msg(int(group_id), segments)
+    if isinstance(result, dict) and result.get("status") == "ok":
+        return result
+    status = result.get("status") if isinstance(result, dict) else result
+    error_kind = result.get("error_kind") if isinstance(result, dict) else ""
+    if status == "timeout" or error_kind == "timeout":
+        await asyncio.sleep(2)
+        if await _recent_bot_message_contains(dispatcher, group_id, marker):
+            log.info("%s timeout confirmed through history: g=%s marker=%s",
+                     kind, group_id, marker)
+            return {"status": "ok", "confirmed_by": "history_after_timeout"}
+    raise RuntimeError("{} send not confirmed: {}".format(kind, str(result)[:240]))
 
 
 # ---------- B站 anonymous session (buvid cookie + wbi keys) ----------
@@ -417,10 +492,13 @@ async def get_archives(dispatcher, mid, count=5):
 
     Returns a list of {"bvid","title","cover","created","duration","mid","author"}.
     """
-    if await _ensure_session(dispatcher):
-        # Datacenter IPs get intermittent risk-control responses, so
-        # retry with backoff before giving the round to the fallback.
-        for attempt in range(4):
+    now = time.time()
+    bili_cfg = dispatcher.config.get("bilibili", {})
+    risk_until = float(_state.get("risk_until", 0.0) or 0.0)
+    risk_code = None
+    if now >= risk_until and await _ensure_session(dispatcher):
+        retries = max(1, min(4, int(bili_cfg.get("official_retries", 2) or 2)))
+        for attempt in range(retries):
             try:
                 params = wbi_sign({
                     "mid": mid, "pn": 1, "ps": count, "order": "pubdate",
@@ -432,8 +510,10 @@ async def get_archives(dispatcher, mid, count=5):
                     params=params,
                     referer="https://space.bilibili.com/{}/video".format(mid))
                 vlist = (((data.get("data") or {}).get("list") or {}).get("vlist") or [])
-                if data.get("code") == 0 and isinstance(vlist, list):
+                code = data.get("code")
+                if code == 0 and isinstance(vlist, list):
                     _official_ok()
+                    _state["risk_until"] = 0.0
                     return [{
                         "bvid": v.get("bvid", ""),
                         "title": v.get("title", ""),
@@ -443,17 +523,28 @@ async def get_archives(dispatcher, mid, count=5):
                         "mid": mid,
                         "author": v.get("author", ""),
                     } for v in vlist]
-                log.info("bili arc/search attempt %d failed: code=%s",
-                         attempt + 1, data.get("code"))
+                if code in (-352, -412):
+                    risk_code = code
+                    break
+                log.info("bili arc/search attempt %d failed: code=%s", attempt + 1, code)
             except Exception as e:
                 log.info("bili arc/search attempt %d error: %s", attempt + 1, e)
-            if attempt < 3:
+            if attempt + 1 < retries:
                 await asyncio.sleep(2 + attempt)
-        log.warning("bili arc/search failed after retries")
-    _official_failed()
+        if risk_code is not None:
+            cooldown = max(300, int(bili_cfg.get("risk_cooldown_seconds", 1800) or 1800))
+            _state["risk_until"] = now + cooldown
+            if now - float(_state.get("last_risk_log", 0.0) or 0.0) >= 300:
+                _state["last_risk_log"] = now
+                log.warning("bili arc/search risk-controlled code=%s; paused for %ss",
+                            risk_code, cooldown)
+        else:
+            log.warning("bili arc/search failed after retries")
+        _official_failed()
     # uapis.cn fallback: optional, max one call per 5min, auto credit bucket
-    bili_cfg = dispatcher.config.get("bilibili", {})
     if not bili_cfg.get("uapi_fallback", True):
+        return []
+    if not str(dispatcher.config.get("uapi_api_key") or "").strip():
         return []
     now = time.time()
     if now - _state["last_uapi_poll"] < 300:
@@ -603,9 +694,11 @@ async def _announce_dynamic(dispatcher, group_id, dyn):
         if url.startswith("//"):
             url = "https:" + url
         segments.append({"type": "image", "data": {"file": url}})
-    result = await dispatcher.client.send_group_msg(int(group_id), segments)
+    result = await _send_group_confirmed(
+        dispatcher, group_id, segments, dyn["id"], "bili dynamic")
     log.info("bili dynamic push: group=%s id=%s status=%s",
              group_id, dyn["id"], result.get("status"))
+    return result
 
 
 async def poll_dynamics_once(dispatcher):
@@ -626,6 +719,7 @@ async def poll_dynamics_once(dispatcher):
         log.warning("bili dynamics poll failed: %s", e)
         return 0
     announced = 0
+    state_changed = False
     now = int(time.time())
     dyn_candidates = {}
     av_candidates = {}
@@ -649,6 +743,7 @@ async def poll_dynamics_once(dispatcher):
             dyn_candidates.setdefault(mid, []).append(dyn)
     # --- regular dynamics (text / picture / forward) ---
     for mid, dyns in dyn_candidates.items():
+        dyns.sort(key=lambda item: int(item.get("ts", 0) or 0), reverse=True)
         max_ts = max([d["ts"] for d in dyns] or [0])
         for gid in watch[mid]:
             entry = _dyn_entry(gid, mid)
@@ -664,19 +759,27 @@ async def poll_dynamics_once(dispatcher):
             if virgin:
                 fresh = [d for d in fresh
                          if d["ts"] and d["ts"] >= now - 1800][:1]
+            confirmed_max = 0
             for d in reversed(fresh):
                 try:
                     await _announce_dynamic(dispatcher, gid, d)
                     announced += 1
                     entry["dyn_seen"].append(d["id"])
+                    confirmed_max = max(confirmed_max, int(d["ts"] or 0))
+                    state_changed = True
                     await asyncio.sleep(1)
                 except Exception as e:
                     log.warning("bili dynamic announce failed g=%s: %s", gid, e)
+                    break
             del entry["dyn_seen"][:-50]
-            if max_ts:
-                entry["dyn_watermark"] = max(watermark, max_ts)
+            if confirmed_max:
+                entry["dyn_watermark"] = max(watermark, confirmed_max)
+            elif virgin and not fresh and max_ts:
+                entry["dyn_watermark"] = max_ts
+                state_changed = True
     # --- video uploads carried by the feed ---
     for mid, videos in av_candidates.items():
+        videos.sort(key=lambda item: int(item.get("created", 0) or 0), reverse=True)
         max_ts = max([v["created"] for v in videos] or [0])
         for gid in watch[mid]:
             seen = pushed_bvids(gid, mid)
@@ -703,12 +806,13 @@ async def poll_dynamics_once(dispatcher):
                     await asyncio.sleep(1)
                 except Exception as e:
                     log.warning("bili announce failed g=%s: %s", gid, e)
+                    break
             if announced_bvids:
                 mark_pushed(gid, mid, announced_bvids,
                             watermark=announced_max or None)
-            elif virgin and max_ts:
+            elif virgin and not new_videos and max_ts:
                 mark_pushed(gid, mid, [], watermark=max_ts)
-    if announced:
+    if announced or state_changed:
         _save_push_state()
     return announced
 
@@ -752,9 +856,11 @@ async def _announce_video(dispatcher, group_id, video):
         if cover.startswith("//"):
             cover = "https:" + cover
         segments.append({"type": "image", "data": {"file": cover}})
-    result = await dispatcher.client.send_group_msg(int(group_id), segments)
+    result = await _send_group_confirmed(
+        dispatcher, group_id, segments, bvid, "bili video")
     log.info("bili push: group=%s bvid=%s status=%s",
              group_id, bvid, result.get("status"))
+    return result
 
 
 async def poll_once(dispatcher):
@@ -786,8 +892,9 @@ async def poll_once(dispatcher):
                 new_videos.append(v)
             announced_bvids = []
             announced_max = 0
-            # Oldest first so timeline reads naturally
-            for video in reversed(new_videos):
+            # Oldest first so timeline reads naturally and failures stop watermarks.
+            new_videos.sort(key=lambda item: int(item.get("created", 0) or 0))
+            for video in new_videos:
                 try:
                     await _announce_video(dispatcher, gid, video)
                     announced += 1
@@ -797,6 +904,7 @@ async def poll_once(dispatcher):
                     await asyncio.sleep(1)
                 except Exception as e:
                     log.warning("bili announce failed g=%s: %s", gid, e)
+                    break
             if announced_bvids:
                 mark_pushed(gid, mid, announced_bvids,
                             watermark=announced_max or None)
@@ -811,6 +919,9 @@ async def push_loop(dispatcher):
         while dispatcher.client._running:
             cfg = dispatcher.config.get("bilibili", {})
             interval = max(30, int(cfg.get("poll_interval", 60) or 60))
+            if not getattr(dispatcher.client, "is_connected", True):
+                await asyncio.sleep(min(5, interval))
+                continue
             try:
                 if _watched_mids(dispatcher):
                     if _sessdata(dispatcher):
