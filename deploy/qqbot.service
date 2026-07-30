@@ -1,0 +1,31 @@
+[Unit]
+Description=QQ Bot - Xiao Xi
+After=network-online.target napcat.service
+Wants=network-online.target napcat.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/qqbot
+Environment=PYTHONUNBUFFERED=1
+Environment=QQBOT_CONSOLE_LOG=1
+Environment=TZ=Asia/Shanghai
+EnvironmentFile=-/etc/qqbot.env
+ExecStart=/opt/qqbot/venv/bin/python /opt/qqbot/main.py
+Restart=always
+RestartSec=15
+TimeoutStopSec=20
+KillSignal=SIGTERM
+KillMode=control-group
+UMask=0077
+MemoryMax=1G
+MemorySwapMax=1G
+CPUQuota=150%
+Nice=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

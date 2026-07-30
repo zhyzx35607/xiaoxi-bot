@@ -1390,7 +1390,17 @@ async def cmd_special_title(d, group_id, user_id, args, role, sender_card, messa
     target = mentions[0]
     result = await d.client.set_group_special_title(group_id, target, title)
     log.info("set_group_special_title response: %s", str(result)[:300])
+    if result.get("status") != "ok" and title:
+        # A timeout may still have applied server-side; verify before failing.
+        try:
+            info = await d.client.get_group_member_info(group_id, target)
+            if (info.get("data") or {}).get("title", "") == title:
+                result = {"status": "ok"}
+        except Exception:
+            pass
     if result.get("status") == "ok":
+        from .notice_handler import mark_title_set_by_bot
+        mark_title_set_by_bot(group_id, target, title)
         await d._reply(group_id, user_id, "头衔设好了" if title else "头衔清掉了")
     else:
         await d._reply(group_id, user_id, "没设成：" + str(result.get("msg") or result.get("wording") or result)[:200])
@@ -1416,7 +1426,17 @@ async def cmd_my_title(d, group_id, user_id, args, role, sender_card, message):
     result = await d.client.set_group_special_title(group_id, user_id, title)
     log.info("mytitle: g=%s u=%s title=%s result=%s",
              group_id, user_id, title[:20], str(result)[:200])
+    if result.get("status") != "ok":
+        # A timeout may still have applied server-side; verify before failing.
+        try:
+            info = await d.client.get_group_member_info(group_id, user_id)
+            if (info.get("data") or {}).get("title", "") == title:
+                result = {"status": "ok"}
+        except Exception:
+            pass
     if result.get("status") == "ok":
+        from .notice_handler import mark_title_set_by_bot
+        mark_title_set_by_bot(group_id, user_id, title)
         await d._reply(group_id, user_id, "搞定，你的头衔现在是「" + title + "」了")
     else:
         err = str(result.get("msg") or result.get("wording") or "未知原因")[:120]
@@ -1800,6 +1820,9 @@ async def cmd_disable(d, group_id, user_id, args, role, sender_card, message):
     if disabled_list:
         _save(cfg)
         d.config = cfg
+        cleanup = getattr(d, "_cleanup_stale_state", None)
+        if cleanup:
+            cleanup()
         msg = f"已关闭 {len(disabled_list)} 个群"
         if len(disabled_list) <= 5:
             msg += f": {', '.join(disabled_list)}"

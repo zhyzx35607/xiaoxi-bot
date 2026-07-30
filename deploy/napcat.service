@@ -1,0 +1,32 @@
+[Unit]
+Description=NapCat QQ Client
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+Environment=TZ=Asia/Shanghai
+ExecStart=/usr/bin/xvfb-run -a /root/Napcat/opt/QQ/qq --no-sandbox -q 3127014580
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=120
+TimeoutStopSec=45
+KillSignal=SIGTERM
+KillMode=control-group
+SendSIGKILL=yes
+SuccessExitStatus=0 143
+UMask=0077
+Nice=19
+MemoryHigh=2G
+MemoryMax=3G
+CPUQuota=200%
+OOMPolicy=stop
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

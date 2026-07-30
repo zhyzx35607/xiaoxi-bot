@@ -3,7 +3,7 @@ import asyncio
 import os
 import tempfile
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from api_registry import REGISTRY
 from bot.ai import (
@@ -20,9 +20,11 @@ from bot import scheduler
 
 
 class CoreBehaviorTests(unittest.TestCase):
-    def test_chat_log_excludes_disabled_groups_but_keeps_private(self):
+    def test_chat_log_excludes_disabled_groups_and_disabled_private(self):
         class DispatcherStub:
             config = {
+                "bot_owner": 9,
+                "private_chat": {"enabled": False, "allowed_users": [5]},
                 "groups": {
                     "10001": {"enabled": True},
                     "10002": {"enabled": False},
@@ -37,9 +39,13 @@ class CoreBehaviorTests(unittest.TestCase):
                 dispatcher, "GROUP_IN", "disabled", group_id=10002, user_id=2))
             self.assertFalse(_log_chat_message(
                 dispatcher, "GROUP_IN", "unknown", group_id=10003, user_id=3))
-            self.assertTrue(_log_chat_message(
+            self.assertFalse(_log_chat_message(
                 dispatcher, "PRIVATE_IN", "private", user_id=4))
-        self.assertEqual(info.call_count, 2)
+            self.assertTrue(_log_chat_message(
+                dispatcher, "PRIVATE_IN", "allowed", user_id=5))
+            self.assertTrue(_log_chat_message(
+                dispatcher, "PRIVATE_IN", "owner", user_id=9))
+        self.assertEqual(info.call_count, 3)
 
     def test_tail_reader_is_bounded_to_requested_lines(self):
         fd, path = tempfile.mkstemp()
@@ -387,6 +393,8 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
              patch.object(ai_module, "_save_user_memory", lambda *a, **k: None), \
              patch.object(ai_module, "_typing_delay_secs", lambda text: 0), \
              patch.object(ai_module.random, "uniform", lambda a, b: 0.0), \
+             patch.object(ai_module, "_chat_with_tools",
+                          new=AsyncMock(return_value=None)), \
              patch.object(ai_module, "_call_deepseek",
                           new=AsyncMock(return_value="哈哈 确实不错")):
             result = await ai_module.handle_ai_chat(
@@ -434,6 +442,8 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
              patch.object(ai_module, "_save_memory", lambda *a, **k: saved.append(a)), \
              patch.object(ai_module, "_load_user_memory", return_value=[]), \
              patch.object(ai_module, "_save_user_memory", lambda *a, **k: None), \
+             patch.object(ai_module, "_chat_with_tools",
+                          new=AsyncMock(return_value=None)), \
              patch.object(ai_module, "_call_deepseek",
                           new=AsyncMock(return_value="[SKIP] 不想接话")):
             result = await ai_module.handle_ai_chat(
@@ -444,6 +454,22 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(sent, "[SKIP] must not send anything")
         self.assertFalse(saved, "[SKIP] must not write memory")
         self.assertIn("424243", ai_module._last_reply_ts)
+
+    async def test_forward_messages_use_extended_timeout(self):
+        from unittest.mock import AsyncMock
+
+        client = OneBotClient({
+            "ws_url": "ws://127.0.0.1:3001", "token": "",
+            "bot_qq": 222, "runtime": {"api_timeout_seconds": 8},
+        })
+        with patch.object(client, "call", new=AsyncMock(
+                return_value={"status": "ok"})) as call_mock:
+            await client.send_group_forward_msg(100, [{"type": "node"}])
+        call_mock.assert_awaited_once_with(
+            "send_group_forward_msg",
+            {"group_id": 100, "messages": [{"type": "node"}]},
+            timeout=60,
+        )
 
     async def test_bot_qq_has_master_level(self):
         from bot.permission import get_user_level, LEVEL_SUPER
@@ -480,6 +506,66 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
                 333, [], "在吗", {"nickname": "路人"}, 0)
         ai_mock.assert_not_called()
         self.assertEqual(client.sent, [], "non-friend / disabled gate must stay silent")
+
+    async def test_disabled_private_is_dropped_before_logging_or_routing(self):
+        from unittest.mock import AsyncMock
+
+        dispatcher = Dispatcher({
+            "runtime": {}, "bot_owner": 111, "bot_qq": 222,
+            "private_chat": {"enabled": False, "allowed_users": []},
+            "groups": {},
+        }, object())
+        event = {
+            "post_type": "message", "message_type": "private",
+            "user_id": 333, "message_id": 1,
+            "raw_message": "????????????",
+            "message": [{"type": "text", "data": {"text": "??"}}],
+            "sender": {"nickname": "???"},
+        }
+        with patch("bot.dispatcher._log_chat_message") as log_mock, \
+                patch.object(dispatcher, "_handle_private_ai_chat",
+                             new=AsyncMock()) as private_mock:
+            await dispatcher._handle_message(event)
+        log_mock.assert_not_called()
+        private_mock.assert_not_called()
+        self.assertNotIn(1, dispatcher._seen_msg_ids)
+
+    async def test_delayed_reply_is_cancelled_after_group_disable(self):
+        from unittest.mock import AsyncMock
+        from bot import ai as ai_module
+
+        dispatcher = Dispatcher({
+            "runtime": {}, "bot_owner": 111, "bot_qq": 222,
+            "groups": {"9001": {"enabled": False}},
+        }, object())
+        with patch.object(ai_module, "handle_ai_chat",
+                          new=AsyncMock()) as ai_mock:
+            await dispatcher._trigger_delayed_reply(
+                9001, 333, 3, [], "????", "???")
+        ai_mock.assert_not_called()
+
+    async def test_disabled_group_is_dropped_before_content_pipeline(self):
+        from unittest.mock import AsyncMock
+
+        dispatcher = Dispatcher({
+            "runtime": {}, "bot_owner": 111, "bot_qq": 222,
+            "command_prefix": "/", "private_chat": {"enabled": False},
+            "groups": {"9001": {"enabled": False}},
+        }, object())
+        event = {
+            "post_type": "message", "message_type": "group",
+            "group_id": 9001, "user_id": 333, "message_id": 2,
+            "raw_message": "@?? ?????????",
+            "message": [{"type": "text", "data": {"text": "??"}}],
+            "sender": {"nickname": "???", "role": "member"},
+        }
+        with patch("bot.dispatcher._log_chat_message") as log_mock, \
+                patch.object(dispatcher, "_handle_group_message",
+                             new=AsyncMock()) as group_mock:
+            await dispatcher._handle_message(event)
+        log_mock.assert_not_called()
+        group_mock.assert_not_called()
+        self.assertNotIn(2, dispatcher._seen_msg_ids)
 
     async def test_private_ai_gate_allowlist_bypasses_switch(self):
         from unittest.mock import AsyncMock
@@ -625,6 +711,136 @@ class PermissionTierTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(allowed)
         # member cannot moderate group master
         allowed, _ = await permission.can_moderate_target(stub, 100, 666, 333)
+        self.assertFalse(allowed)
+
+
+class ModerationMatrixTests(unittest.IsolatedAsyncioTestCase):
+    """Permission matrix: a group master whose QQ role is plain member must be
+    able to use ban/kick on QQ admins when the bot itself is admin/owner."""
+
+    OWNER = 111
+    BOT = 222
+    MASTER = 333   # QQ role member, listed in group masters
+    GOWNER = 444   # QQ group owner
+    ADMIN = 555    # QQ admin
+    MEMBER = 666   # plain member
+    GROUP = 100
+    BAN_CMD = {"admin_only": True, "bot_admin_required": True}
+
+    def _dispatcher(self, roles=None, bot_role="owner", masters=None):
+        """roles: {user_id: qq_role}; bot_role: bot's QQ role in the group."""
+        from bot import permission
+        permission._bot_role_cache.clear()
+        roles = roles or {}
+        bot_qq = self.BOT
+        masters = [self.MASTER] if masters is None else masters
+
+        class Client:
+            async def get_group_member_info(self, group_id, user_id, no_cache=False):
+                if user_id == bot_qq:
+                    return {"status": "ok", "data": {"role": bot_role}}
+                return {"status": "ok", "data": {"role": roles.get(user_id, "member")}}
+
+        class Stub:
+            config = {
+                "bot_owner": 111,
+                "bot_qq": 222,
+                "group_defaults": {},
+                "groups": {"100": {"enabled": True, "masters": masters}},
+            }
+            client = Client()
+
+        return Stub(), permission
+
+    # ---- can_moderate_target matrix ----
+
+    async def test_master_can_moderate_qq_admin(self):
+        stub, permission = self._dispatcher(roles={self.ADMIN: "admin"})
+        allowed, err = await permission.can_moderate_target(
+            stub, self.GROUP, self.MASTER, self.ADMIN, "member")
+        self.assertTrue(allowed, err)
+
+    async def test_gowner_can_moderate_qq_admin(self):
+        stub, permission = self._dispatcher(
+            roles={self.GOWNER: "owner", self.ADMIN: "admin"})
+        allowed, err = await permission.can_moderate_target(
+            stub, self.GROUP, self.GOWNER, self.ADMIN, "owner")
+        self.assertTrue(allowed, err)
+
+    async def test_admin_cannot_moderate_peer_or_master(self):
+        other_admin = 556
+        stub, permission = self._dispatcher(
+            roles={self.ADMIN: "admin", other_admin: "admin"})
+        allowed, _ = await permission.can_moderate_target(
+            stub, self.GROUP, self.ADMIN, other_admin, "admin")
+        self.assertFalse(allowed)  # same level
+        allowed, _ = await permission.can_moderate_target(
+            stub, self.GROUP, self.ADMIN, self.MASTER, "admin")
+        self.assertFalse(allowed)  # master ranks above admin
+
+    async def test_member_cannot_moderate_anyone(self):
+        other_member = 667
+        stub, permission = self._dispatcher(
+            roles={self.GOWNER: "owner", self.ADMIN: "admin"})
+        for target in (other_member, self.ADMIN, self.GOWNER, self.MASTER):
+            allowed, _ = await permission.can_moderate_target(
+                stub, self.GROUP, self.MEMBER, target, "member")
+            self.assertFalse(allowed, "member must not moderate %s" % target)
+
+    async def test_bot_owner_can_moderate_anyone(self):
+        stub, permission = self._dispatcher(
+            roles={self.GOWNER: "owner", self.ADMIN: "admin"})
+        # bot_owner can moderate everyone except the QQ group owner
+        # (QQ itself forbids operating on the group owner).
+        for target in (self.MASTER, self.ADMIN, self.MEMBER):
+            allowed, err = await permission.can_moderate_target(
+                stub, self.GROUP, self.OWNER, target)
+            self.assertTrue(allowed, "bot owner must moderate %s: %s" % (target, err))
+        allowed, _ = await permission.can_moderate_target(
+            stub, self.GROUP, self.OWNER, self.GOWNER)
+        self.assertFalse(allowed, "even bot owner must not moderate the QQ group owner")
+
+    async def test_protected_targets(self):
+        stub, permission = self._dispatcher(roles={self.ADMIN: "admin"})
+        for actor in (self.OWNER, self.MASTER, self.ADMIN):
+            for target in (self.OWNER, self.BOT):
+                allowed, _ = await permission.can_moderate_target(
+                    stub, self.GROUP, actor, target)
+                self.assertFalse(
+                    allowed, "%s must not moderate protected %s" % (actor, target))
+
+    # ---- check_permission matrix for ban/kick-style commands ----
+
+    async def test_master_member_allowed_ban_when_bot_is_owner(self):
+        stub, permission = self._dispatcher(bot_role="owner")
+        allowed, err = await permission.check_permission(
+            stub, self.GROUP, self.MASTER, "member", self.BAN_CMD)
+        self.assertTrue(allowed, err)
+
+    async def test_qq_admin_allowed_ban_when_bot_is_owner(self):
+        stub, permission = self._dispatcher(
+            roles={self.ADMIN: "admin"}, bot_role="owner")
+        allowed, err = await permission.check_permission(
+            stub, self.GROUP, self.ADMIN, "admin", self.BAN_CMD)
+        self.assertTrue(allowed, err)
+
+    async def test_plain_member_denied_ban(self):
+        stub, permission = self._dispatcher(bot_role="owner")
+        allowed, _ = await permission.check_permission(
+            stub, self.GROUP, self.MEMBER, "member", self.BAN_CMD)
+        self.assertFalse(allowed)
+
+    async def test_admin_denied_ban_when_bot_not_admin(self):
+        stub, permission = self._dispatcher(
+            roles={self.ADMIN: "admin"}, bot_role="member")
+        allowed, _ = await permission.check_permission(
+            stub, self.GROUP, self.ADMIN, "admin", self.BAN_CMD)
+        self.assertFalse(allowed)
+
+    async def test_member_denied_ban_when_bot_not_admin(self):
+        stub, permission = self._dispatcher(bot_role="member")
+        allowed, _ = await permission.check_permission(
+            stub, self.GROUP, self.MEMBER, "member", self.BAN_CMD)
         self.assertFalse(allowed)
 
 
@@ -810,8 +1026,10 @@ class BiliPushWatermarkTests(unittest.IsolatedAsyncioTestCase):
         self.bilibili = bilibili
 
     def tearDown(self):
-        self._patcher.stop()
-        self.bilibili.reset_state_for_test()
+        if hasattr(self, "_patcher"):
+            self._patcher.stop()
+        if hasattr(self, "bilibili"):
+            self.bilibili.reset_state_for_test()
 
     async def test_watermark_blocks_stale_fallback_videos(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -891,6 +1109,74 @@ class BiliPushWatermarkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bilibili.pushed_bvids(100, 42),
                              ["BV1", "BV2", "BV3"])
             self.assertEqual(bilibili.push_watermark(100, 42), 99)
+
+    async def test_timeout_confirmed_by_history_counts_as_success(self):
+        from bot import bilibili
+
+        class Client:
+            def __init__(self):
+                self.history_calls = 0
+
+            async def get_group_msg_history(self, group_id, count=30):
+                self.history_calls += 1
+                messages = []
+                if self.history_calls >= 2:
+                    messages = [{
+                        "user_id": 222,
+                        "raw_message": "https://www.bilibili.com/video/BV_confirmed",
+                    }]
+                return {"status": "ok", "data": {"messages": messages}}
+
+            async def send_group_msg(self, group_id, message):
+                return {"status": "timeout", "error_kind": "timeout"}
+
+        class Stub:
+            config = {"bot_qq": 222}
+            client = Client()
+
+        with patch("bot.bilibili.asyncio.sleep", new=AsyncMock()):
+            result = await bilibili._send_group_confirmed(
+                Stub(), 100, [], "BV_confirmed", "bili video")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["confirmed_by"], "history_after_timeout")
+
+    async def test_unconfirmed_timeout_does_not_advance_watermark(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._setup(tmp)
+            bilibili = self.bilibili
+
+            class Client:
+                _running = True
+
+                async def get_group_msg_history(self, group_id, count=30):
+                    return {"status": "ok", "data": {"messages": []}}
+
+                async def send_group_msg(self, group_id, message):
+                    return {"status": "timeout", "error_kind": "timeout"}
+
+                async def get_group_member_info(self, group_id, user_id,
+                                                no_cache=False):
+                    return {"status": "ok", "data": {"role": "member"}}
+
+            class Stub:
+                config = {
+                    "bot_qq": 222,
+                    "groups": {"100": {"enabled": True,
+                                          "bili_push": {"mids": [42]}}},
+                }
+                client = Client()
+
+            bilibili.mark_pushed(100, 42, [], watermark=1000)
+
+            async def fake_archives(dispatcher, mid, count=5):
+                return [{"bvid": "BV_failed", "title": "新", "created": 2000}]
+
+            with patch.object(bilibili, "get_archives", fake_archives), \
+                    patch("bot.bilibili.asyncio.sleep", new=AsyncMock()):
+                announced = await bilibili.poll_once(Stub())
+            self.assertEqual(announced, 0)
+            self.assertEqual(bilibili.push_watermark(100, 42), 1000)
+            self.assertNotIn("BV_failed", bilibili.pushed_bvids(100, 42))
 
 
 class BiliDynamicsTests(unittest.TestCase):
@@ -1154,6 +1440,73 @@ class HotboardFormatTests(unittest.TestCase):
         text = format_hotboard("zhihu", [{"title": "题", "url": "u"}])
         self.assertTrue(text.startswith("【知乎热榜】\n1. 题"))
 
+    def test_forward_nodes_split_header_and_items(self):
+        from bot.scheduler import build_hotboard_forward_nodes
+        nodes = build_hotboard_forward_nodes(
+            "weibo",
+            [
+                {"title": "大新闻", "url": "https://example.com/1",
+                 "hot_value": "123"},
+                {"title": "第二条", "url": "", "hot_value": ""},
+            ],
+            bot_qq=3127014580,
+            summary="今天都在聊大新闻",
+        )
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual(nodes[0]["data"]["content"],
+                         "【微博热榜】\n今天都在聊大新闻")
+        self.assertEqual(nodes[0]["data"]["uin"], "3127014580")
+        self.assertIn("1. 大新闻（123）", nodes[1]["data"]["content"])
+        self.assertIn("https://example.com/1", nodes[1]["data"]["content"])
+        self.assertEqual(nodes[2]["data"]["content"], "2. 第二条")
+
+
+class HotboardPushTests(unittest.IsolatedAsyncioTestCase):
+    async def test_daily_push_uses_merged_forward(self):
+        from unittest.mock import AsyncMock
+        from bot import scheduler
+        sent = []
+
+        class Client:
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append((group_id, nodes))
+                return {"status": "ok", "retcode": 0}
+
+            async def send_group_msg(self, group_id, message):
+                raise AssertionError("hotboard push must use merged forward")
+
+        class Stub:
+            config = {
+                "bot_qq": 3127014580,
+                "uapi_api_key": "test",
+                "hotboard_push": {"enabled": True, "types": ["weibo"]},
+                "groups": {"100": {"enabled": True, "features": {}}},
+            }
+            client = Client()
+
+        async def fake_uapi_get(dispatcher, path, params=None, kind="auto"):
+            return {"list": [
+                {"title": "热点一", "url": "https://example.com/1",
+                 "hot_value": "999"},
+                {"title": "热点二", "url": "https://example.com/2"},
+            ]}
+
+        async def fake_summary(dispatcher, board, items):
+            return "热点概况"
+
+        with patch("bot.uapi.credits_available", return_value=True), \
+                patch("bot.uapi.uapi_get", fake_uapi_get), \
+                patch.object(scheduler, "ai_hotboard_summary", fake_summary), \
+                patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+            await scheduler._daily_hotboard_push(Stub())
+
+        self.assertEqual(len(sent), 1)
+        group_id, nodes = sent[0]
+        self.assertEqual(group_id, 100)
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual(nodes[0]["data"]["content"], "【微博热榜】\n热点概况")
+        self.assertIn("热点一（999）", nodes[1]["data"]["content"])
+
 
 class AcgPushTests(unittest.IsolatedAsyncioTestCase):
     async def test_history_roundtrip_and_forward_dedup(self):
@@ -1176,6 +1529,7 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
                 class Stub:
                     config = {
                         "bot_qq": 222,
+                        "uapi_api_key": "test",
                         "acg_images": {"enabled": True, "count": 3},
                         "groups": {"100": {"enabled": True, "features": {}}},
                     }
@@ -1196,6 +1550,91 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("u1", urls)
                 self.assertEqual(len(nodes), 3)
                 self.assertIn("u3", scheduler._load_acg_history())
+
+    async def test_large_push_is_split_into_batches(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+            batches = []
+
+            class Client:
+                async def send_group_forward_msg(self, group_id, nodes):
+                    batches.append(len(nodes))
+                    return {"status": "ok", "retcode": 0}
+
+            class Stub:
+                config = {
+                    "bot_qq": 222,
+                    "uapi_api_key": "test",
+                    "acg_images": {"enabled": True, "count": 12,
+                                   "batch_size": 5},
+                    "groups": {"100": {"enabled": True, "features": {}}},
+                }
+                client = Client()
+
+            async def fake_resolve(dispatcher, path, params=None):
+                fake_resolve.value += 1
+                return "u{}".format(fake_resolve.value)
+            fake_resolve.value = 0
+
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch("bot.uapi.uapi_resolve_image_url", fake_resolve), \
+                    patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+                await scheduler._daily_acg_push(Stub())
+            self.assertEqual(batches, [5, 5, 2])
+
+    async def test_failed_batch_is_retried_next_run(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+
+            class Client:
+                def __init__(self):
+                    self.calls = 0
+                    self.sent_urls = []
+
+                async def send_group_forward_msg(self, group_id, nodes):
+                    self.calls += 1
+                    urls = [node["data"]["content"][0]["data"]["file"]
+                            for node in nodes]
+                    self.sent_urls.append(urls)
+                    if self.calls == 2:
+                        return {"status": "timeout", "error_kind": "timeout"}
+                    return {"status": "ok", "retcode": 0}
+
+            client = Client()
+
+            class Stub:
+                config = {
+                    "bot_qq": 222,
+                    "uapi_api_key": "test",
+                    "acg_images": {"enabled": True, "count": 6,
+                                   "batch_size": 3},
+                    "groups": {"100": {"enabled": True, "features": {}}},
+                }
+
+            stub = Stub()
+            stub.client = client
+
+            async def first_resolve(dispatcher, path, params=None):
+                first_resolve.value += 1
+                return "u{}".format(first_resolve.value)
+            first_resolve.value = 0
+
+            async def no_new_urls(dispatcher, path, params=None):
+                return None
+
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch("bot.uapi.uapi_resolve_image_url", first_resolve), \
+                    patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+                await scheduler._daily_acg_push(stub)
+                state = scheduler._load_acg_state()
+                self.assertEqual(state["pending"]["100"], ["u4", "u5", "u6"])
+                with patch("bot.uapi.uapi_resolve_image_url", no_new_urls):
+                    await scheduler._daily_acg_push(stub)
+                state = scheduler._load_acg_state()
+            self.assertNotIn("100", state["pending"])
+            self.assertEqual(client.sent_urls[-1], ["u4", "u5", "u6"])
 
 
 class DelayedQueueWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -1250,3 +1689,490 @@ class DelayedQueueWorkerTests(unittest.IsolatedAsyncioTestCase):
             pass
         self.assertEqual(len(fired), 1)
         self.assertEqual(d._delayed_queue_index, {})
+
+
+class AIToolRegistryTests(unittest.TestCase):
+    """Three-tier tool registry: completeness, scene gating, schema validity."""
+
+    EXPECTED_READ = {
+        "get_group_info", "get_member_info", "get_recent_messages",
+        "get_group_files", "get_file_url", "get_group_notice",
+        "get_group_honor", "get_shut_list", "get_friend_info", "ocr_image",
+        "get_essence_list", "get_group_info_ex", "check_url_safely",
+        "translate_en2zh", "get_group_at_all_remain", "uapi_weather",
+        "uapi_hotboard", "uapi_saying", "uapi_answerbook", "uapi_epic_free",
+        "get_group_msg_history", "get_forward_msg", "get_friend_list",
+        "get_recent_contact", "uapi_search", "uapi_translate",
+    }
+
+    def test_three_tiers_complete(self):
+        import ai_tools
+        tiers = {}
+        for name, entry in ai_tools.TOOL_REGISTRY.items():
+            tiers.setdefault(entry["tier"], set()).add(name)
+        self.assertEqual(tiers.get("read"), self.EXPECTED_READ)
+        self.assertEqual(tiers.get("interaction"),
+                         {"set_msg_emoji_like", "send_like", "send_music_card"})
+        self.assertEqual(tiers.get("playful"), {"playful_ban"})
+
+    def test_dangerous_tools_in_no_tier(self):
+        import ai_tools
+        for name in ("kick_member", "ban_member", "unban_member", "whole_ban",
+                     "set_group_kick", "set_group_ban", "set_group_whole_ban",
+                     "kick", "ban", "unban", "allban"):
+            self.assertNotIn(name, ai_tools.TOOL_REGISTRY)
+
+    def test_every_tool_has_valid_schema(self):
+        import ai_tools
+        for name, entry in ai_tools.TOOL_REGISTRY.items():
+            params = entry["parameters"]
+            self.assertEqual(params.get("type"), "object", name)
+            self.assertIsInstance(params.get("properties"), dict, name)
+            self.assertIsInstance(params.get("required"), list, name)
+            for req in params["required"]:
+                self.assertIn(req, params["properties"], name)
+            self.assertTrue(entry.get("description"), name)
+            self.assertTrue(callable(entry.get("handler")), name)
+
+    def test_scene_gating(self):
+        import ai_tools
+        read_only = ai_tools.build_tool_schemas(explicit=False)
+        names = {t["function"]["name"] for t in read_only}
+        self.assertIn("get_group_info", names)
+        self.assertNotIn("send_like", names)
+        self.assertNotIn("send_music_card", names)
+        self.assertNotIn("playful_ban", names)
+        full = ai_tools.build_tool_schemas(explicit=True)
+        full_names = {t["function"]["name"] for t in full}
+        self.assertEqual(full_names, set(ai_tools.TOOL_REGISTRY))
+        for t in full:
+            self.assertEqual(t.get("type"), "function")
+            fn = t["function"]
+            self.assertTrue(fn.get("name"))
+            self.assertTrue(fn.get("description"))
+            self.assertEqual(fn["parameters"].get("type"), "object")
+
+
+class PlayfulBanTests(unittest.IsolatedAsyncioTestCase):
+    """playful_ban hard constraints: clamp, quota, target protection, cooldown."""
+
+    GROUP = 100
+    BOT = 222
+
+    def _dispatcher(self, roles=None, bot_role="owner", masters=None):
+        from bot import permission
+        permission._bot_role_cache.clear()
+        roles = roles or {}
+        bot_qq = self.BOT
+        bans = []
+
+        class Client:
+            session = None
+
+            async def get_group_member_info(self, group_id, user_id, no_cache=False):
+                if user_id == bot_qq:
+                    return {"status": "ok", "data": {"role": bot_role}}
+                return {"status": "ok", "data": {"role": roles.get(user_id, "member")}}
+
+            async def set_group_ban(self, group_id, user_id, duration=1800):
+                bans.append((group_id, user_id, duration))
+                return {"status": "ok"}
+
+        class Stub:
+            config = {
+                "bot_owner": 111,
+                "bot_qq": 222,
+                "group_defaults": {},
+                "groups": {"100": {"enabled": True,
+                                   "masters": masters if masters is not None else []}},
+            }
+            client = Client()
+
+        return Stub(), bans
+
+    def _ai_tools(self, tmp):
+        import ai_tools
+        ai_tools.reset_playful_ban_for_test()
+        ai_tools._PLAYFUL_BAN_AUDIT = os.path.join(tmp, "audit.json")
+        return ai_tools
+
+    def _ctx(self, target=666):
+        return {"group_id": self.GROUP, "user_id": 333, "message_id": 0}
+
+    async def test_duration_clamped_to_1_120(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, bans = self._dispatcher()
+            await ai_tools.execute_playful_ban(
+                stub, {"user_id": 666, "duration": 9999}, self._ctx())
+            ai_tools._playful_ban_last_ts.clear()
+            await ai_tools.execute_playful_ban(
+                stub, {"user_id": 667, "duration": -5}, self._ctx())
+            self.assertEqual([b[2] for b in bans], [120, 1])
+
+    async def test_reason_truncated_to_50(self):
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, _ = self._dispatcher()
+            await ai_tools.execute_playful_ban(
+                stub, {"user_id": 666, "reason": "哈" * 100}, self._ctx())
+            with open(ai_tools._PLAYFUL_BAN_AUDIT, encoding="utf-8") as f:
+                audit = _json.load(f)
+            self.assertEqual(len(audit), 1)
+            self.assertEqual(len(audit[0]["reason"]), 50)
+            self.assertEqual(audit[0]["actor"], "AI")
+
+    async def test_daily_group_limit_5(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, bans = self._dispatcher()
+            for i in range(5):
+                ai_tools._playful_ban_last_ts.clear()
+                r = await ai_tools.execute_playful_ban(
+                    stub, {"user_id": 700 + i}, self._ctx())
+                self.assertTrue(r["ok"], r)
+            ai_tools._playful_ban_last_ts.clear()
+            r = await ai_tools.execute_playful_ban(
+                stub, {"user_id": 705}, self._ctx())
+            self.assertFalse(r["ok"])
+            self.assertEqual(r["error"], "daily_limit_reached")
+            self.assertEqual(len(bans), 5)
+
+    async def test_same_target_once_per_day(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, bans = self._dispatcher()
+            r = await ai_tools.execute_playful_ban(stub, {"user_id": 666}, self._ctx())
+            self.assertTrue(r["ok"], r)
+            ai_tools._playful_ban_last_ts.clear()
+            r = await ai_tools.execute_playful_ban(stub, {"user_id": 666}, self._ctx())
+            self.assertFalse(r["ok"])
+            self.assertEqual(r["error"], "target_already_banned_today")
+            self.assertEqual(len(bans), 1)
+
+    async def test_admin_level_targets_protected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, bans = self._dispatcher(
+                roles={555: "admin", 444: "owner"}, masters=[333])
+            for target in (555, 444, 333, 111, 222):  # admin/gowner/master/owner/bot
+                ai_tools._playful_ban_last_ts.clear()
+                r = await ai_tools.execute_playful_ban(
+                    stub, {"user_id": target}, self._ctx())
+                self.assertFalse(r["ok"], "target %s must be protected" % target)
+                self.assertEqual(r["error"], "target_protected")
+            self.assertEqual(bans, [])
+
+    async def test_group_cooldown_60s(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, bans = self._dispatcher()
+            r = await ai_tools.execute_playful_ban(stub, {"user_id": 666}, self._ctx())
+            self.assertTrue(r["ok"], r)
+            r = await ai_tools.execute_playful_ban(stub, {"user_id": 667}, self._ctx())
+            self.assertFalse(r["ok"])
+            self.assertEqual(r["error"], "cooldown_active")
+            self.assertEqual(len(bans), 1)
+
+    async def test_bot_must_be_group_admin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, bans = self._dispatcher(bot_role="member")
+            r = await ai_tools.execute_playful_ban(stub, {"user_id": 666}, self._ctx())
+            self.assertFalse(r["ok"])
+            self.assertEqual(r["error"], "bot_not_admin")
+            self.assertEqual(bans, [])
+
+    async def test_private_chat_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, bans = self._dispatcher()
+            r = await ai_tools.execute_playful_ban(
+                stub, {"user_id": 666}, {"group_id": 0, "user_id": 333, "message_id": 0})
+            self.assertFalse(r["ok"])
+            self.assertEqual(r["error"], "group_only")
+            self.assertEqual(bans, [])
+
+
+class ChatWithToolsTests(unittest.IsolatedAsyncioTestCase):
+    """Multi-round native function-calling loop and degrade paths."""
+
+    def _stub(self, config=None):
+        class Client:
+            session = None
+
+        class Stub:
+            pass
+
+        stub = Stub()
+        stub.config = config or {"runtime": {}, "sigmai_api_key": "x"}
+        stub.client = Client()
+        return stub
+
+    async def test_tool_call_then_final_text(self):
+        import ai_tools
+        from bot import ai as ai_module
+        from unittest.mock import AsyncMock
+        executed = []
+
+        async def fake_execute(dispatcher, name, args, **kw):
+            executed.append((name, args))
+            return {"ok": True, "tool": name, "data": {"weather": "晴"}}
+
+        responses = [
+            {"content": None, "tool_calls": [
+                {"id": "call_1", "type": "function",
+                 "function": {"name": "uapi_weather",
+                              "arguments": '{"city": "杭州"}'}}]},
+            {"content": "杭州今天晴天"},
+        ]
+        seen_conversations = []
+
+        async def fake_inner(config, messages, max_tokens=400, temperature=0.7,
+                             session=None, tools=None):
+            seen_conversations.append((list(messages), tools))
+            return responses.pop(0)
+
+        ai_module._PROVIDER_NO_TOOLS.clear()
+        with patch.object(ai_module, "_call_deepseek_inner", new=fake_inner), \
+             patch.object(ai_tools, "execute_ai_tool", new=fake_execute):
+            reply = await ai_module._chat_with_tools(
+                self._stub(), [{"role": "user", "content": "杭州天气咋样"}],
+                ai_tools.build_tool_schemas(explicit=True), 100, 333)
+        self.assertEqual(reply, "杭州今天晴天")
+        self.assertEqual(len(executed), 1)
+        self.assertEqual(executed[0][0], "uapi_weather")
+        self.assertEqual(executed[0][1].get("city"), "杭州")
+        # tool result must be injected back before the second model call
+        second_messages = seen_conversations[1][0]
+        roles = [m.get("role") for m in second_messages]
+        self.assertIn("assistant", roles)
+        self.assertIn("tool", roles)
+
+    async def test_rounds_exhausted_forces_plain_final_call(self):
+        import ai_tools
+        from bot import ai as ai_module
+        calls = []
+
+        async def fake_execute(dispatcher, name, args, **kw):
+            return {"ok": True, "tool": name}
+
+        async def fake_inner(config, messages, max_tokens=400, temperature=0.7,
+                             session=None, tools=None):
+            calls.append(tools)
+            if tools:
+                return {"content": None, "tool_calls": [
+                    {"id": "c%d" % len(calls), "type": "function",
+                     "function": {"name": "uapi_saying", "arguments": "{}"}}]}
+            return "想不出别的了 就这样吧"
+
+        ai_module._PROVIDER_NO_TOOLS.clear()
+        with patch.object(ai_module, "_call_deepseek_inner", new=fake_inner), \
+             patch.object(ai_tools, "execute_ai_tool", new=fake_execute):
+            reply = await ai_module._chat_with_tools(
+                self._stub(), [{"role": "user", "content": "随便聊聊"}],
+                ai_tools.build_tool_schemas(explicit=True), 100, 333)
+        self.assertEqual(reply, "想不出别的了 就这样吧")
+        self.assertEqual(len(calls), 5)  # 4 tool rounds + 1 forced plain call
+        self.assertIsNone(calls[-1])
+
+    async def test_no_provider_keys_returns_none(self):
+        from bot import ai as ai_module
+        env = {"SIGMAI_API_KEY": "", "QQBOT_SIGMAI_API_KEY": "",
+               "DEEPSEEK_API_KEY": "", "QQBOT_DEEPSEEK_API_KEY": ""}
+        with patch.dict("os.environ", env):
+            reply = await ai_module._chat_with_tools(
+                self._stub(config={"runtime": {}}),
+                [{"role": "user", "content": "hi"}],
+                [{"type": "function", "function": {"name": "x"}}], 100, 333)
+        self.assertIsNone(reply)
+
+    async def test_tools_unsupported_provider_degrades(self):
+        from bot import ai as ai_module
+        sigmai_key = ("https://www.sigmai.net/v1", "DeepSeek-V4-Flash")
+        deepseek_key = ("https://api.deepseek.com", "deepseek-chat")
+        ai_module._PROVIDER_NO_TOOLS.update({sigmai_key, deepseek_key})
+        try:
+            self.assertFalse(ai_module._providers_support_tools(
+                {"sigmai_api_key": "x", "deepseek_api_key": "y"}))
+            reply = await ai_module._chat_with_tools(
+                self._stub(), [{"role": "user", "content": "hi"}],
+                [{"type": "function", "function": {"name": "x"}}], 100, 333)
+            self.assertIsNone(reply)
+        finally:
+            ai_module._PROVIDER_NO_TOOLS.discard(sigmai_key)
+            ai_module._PROVIDER_NO_TOOLS.discard(deepseek_key)
+
+    async def test_provider_tools_rejection_recorded_on_400(self):
+        from bot import ai as ai_module
+
+        class Response:
+            status = 400
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def text(self):
+                return '{"error":{"message":"tools is not supported for this model"}}'
+
+        class Session:
+            def post(self, _url, **kwargs):
+                return Response()
+
+        config = {"deepseek_api_key": "test-key", "runtime": {}}
+        key = ("https://api.deepseek.com", "deepseek-chat")
+        ai_module._PROVIDER_NO_TOOLS.discard(key)
+        tools = [{"type": "function", "function": {
+            "name": "uapi_saying", "description": "x",
+            "parameters": {"type": "object", "properties": {}, "required": []}}}]
+        try:
+            with patch.dict("os.environ", {"SIGMAI_API_KEY": "", "QQBOT_SIGMAI_API_KEY": ""}):
+                reply = await ai_module._call_deepseek_inner(
+                    config, [{"role": "user", "content": "hi"}],
+                    session=Session(), tools=tools)
+            self.assertIsNone(reply)
+            self.assertIn(key, ai_module._PROVIDER_NO_TOOLS)
+        finally:
+            ai_module._PROVIDER_NO_TOOLS.discard(key)
+
+    async def test_tools_param_reaches_payload(self):
+        from bot import ai as ai_module
+        captured = {}
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def json(self):
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+        class Session:
+            def post(self, _url, **kwargs):
+                captured.update(kwargs.get("json") or {})
+                return Response()
+
+        config = {"deepseek_api_key": "test-key", "runtime": {}}
+        tools = [{"type": "function", "function": {
+            "name": "uapi_saying", "description": "x",
+            "parameters": {"type": "object", "properties": {}, "required": []}}}]
+        with patch.dict("os.environ", {"SIGMAI_API_KEY": "", "QQBOT_SIGMAI_API_KEY": ""}):
+            message = await ai_module._call_deepseek_inner(
+                config, [{"role": "user", "content": "hi"}],
+                session=Session(), tools=tools)
+        self.assertEqual(captured.get("tools"), tools)
+        self.assertEqual(captured.get("tool_choice"), "auto")
+        self.assertEqual(message, {"content": "ok"})
+
+
+class SearchWebFallbackTests(unittest.IsolatedAsyncioTestCase):
+    """search_web: uapis aggregate search primary, Bing scrape fallback."""
+
+    BING_HTML = ('<li class="b_algo"><h2><a href="http://example.com">必应标题</a></h2>'
+                 '<p>必应抓取的摘要内容，足够长可以被解析出来。</p></li>')
+
+    def _dispatcher(self, bing_html=""):
+        html = bing_html
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def text(self):
+                return html
+
+        class Session:
+            def __init__(self):
+                self.get_calls = 0
+
+            def get(self, url, **kwargs):
+                self.get_calls += 1
+                return Response()
+
+        class Client:
+            def __init__(self):
+                self.session = Session()
+
+        class Stub:
+            pass
+
+        d = Stub()
+        d.config = {"web_search": {"enabled": True}, "uapi": {}}
+        d.client = Client()
+        d._search_sem = asyncio.Semaphore(1)
+        d._web_search_cache = {}
+        return d
+
+    async def test_uapi_primary_and_bing_untouched(self):
+        from unittest.mock import AsyncMock
+        from bot import ai as ai_module
+        from bot import uapi
+        d = self._dispatcher(bing_html=self.BING_HTML)
+        payload = {"results": [{"title": "聚合标题", "snippet": "聚合摘要",
+                                "url": "http://uapi.example"}]}
+        with patch.object(uapi, "credits_available", return_value=True), \
+             patch.object(uapi, "uapi_post", new=AsyncMock(return_value=payload)):
+            result = await ai_module.search_web(d, "今天有什么新闻")
+        self.assertIn("聚合标题", result)
+        self.assertIn("http://uapi.example", result)
+        self.assertEqual(d.client.session.get_calls, 0, "Bing must not be hit when uapi works")
+
+    async def test_bing_fallback_when_uapi_fails(self):
+        from unittest.mock import AsyncMock
+        from bot import ai as ai_module
+        from bot import uapi
+        d = self._dispatcher(bing_html=self.BING_HTML)
+        with patch.object(uapi, "credits_available", return_value=True), \
+             patch.object(uapi, "uapi_post", new=AsyncMock(return_value=None)):
+            result = await ai_module.search_web(d, "今天有什么新闻")
+        self.assertIn("必应标题", result)
+        self.assertEqual(d.client.session.get_calls, 1)
+
+    async def test_bing_fallback_when_budget_exhausted(self):
+        from unittest.mock import AsyncMock
+        from bot import ai as ai_module
+        from bot import uapi
+        d = self._dispatcher(bing_html=self.BING_HTML)
+        with patch.object(uapi, "credits_available", return_value=False), \
+             patch.object(uapi, "uapi_post", new=AsyncMock(return_value=None)) as post_mock:
+            result = await ai_module.search_web(d, "今天有什么新闻")
+        self.assertIn("必应标题", result)
+        post_mock.assert_not_called()
+        self.assertEqual(d.client.session.get_calls, 1)
+
+    async def test_both_paths_fail_returns_empty_and_caches(self):
+        from unittest.mock import AsyncMock
+        from bot import ai as ai_module
+        from bot import uapi
+        d = self._dispatcher(bing_html="<html><body>nothing</body></html>")
+        with patch.object(uapi, "credits_available", return_value=True), \
+             patch.object(uapi, "uapi_post", new=AsyncMock(return_value=None)):
+            result = await ai_module.search_web(d, "今天有什么新闻")
+        self.assertEqual(result, "")
+        self.assertIn("今天有什么新闻", d._web_search_cache)
+
+    async def test_format_uapi_search_results_shapes(self):
+        from bot.ai import _format_uapi_search_results
+        # nested data.results shape
+        text = _format_uapi_search_results(
+            {"data": {"results": [{"title": "t1", "content": "c1"}]}})
+        self.assertIn("t1", text)
+        # bare list shape
+        text = _format_uapi_search_results([{"name": "n1", "description": "d1"}])
+        self.assertIn("n1", text)
+        # unparseable payload -> empty (caller falls back to Bing)
+        self.assertEqual(_format_uapi_search_results({"foo": "bar"}), "")
+        self.assertEqual(_format_uapi_search_results(None), "")

@@ -2,8 +2,14 @@
 
 import json
 import logging
+import os
+import re
+
+import aiohttp
 
 log = logging.getLogger("qqbot")
+
+_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def _clip(value, limit=1200):
@@ -276,6 +282,16 @@ def interaction_quota_left(group_id):
     return max(0, INTERACTION_DAILY_LIMIT - used)
 
 
+def _record_interaction_usage(group_id):
+    key = _quota_key(group_id)
+    _interaction_usage[key] = _interaction_usage.get(key, 0) + 1
+    if len(_interaction_usage) > 500:
+        today = _time.strftime("%Y%m%d")
+        for item in list(_interaction_usage):
+            if not item.startswith(today):
+                _interaction_usage.pop(item, None)
+
+
 async def execute_interaction_tool(dispatcher, name, arguments,
                                    group_id=0, user_id=0):
     """Execute a scene-gated interaction tool (emoji reaction / like).
@@ -294,7 +310,6 @@ async def execute_interaction_tool(dispatcher, name, arguments,
     handler = handlers.get(name)
     if not handler:
         return {"ok": False, "error": "interaction_tool_not_allowed", "tool": name}
-    key = _quota_key(group_id)
     if interaction_quota_left(group_id) <= 0:
         return {"ok": False, "error": "interaction_quota_exhausted", "tool": name}
     try:
@@ -303,12 +318,7 @@ async def execute_interaction_tool(dispatcher, name, arguments,
         log.warning("interaction tool %s failed: %s", name, exc)
         return {"ok": False, "error": "tool_failed", "tool": name,
                 "message": _clip(exc, 200)}
-    _interaction_usage[key] = _interaction_usage.get(key, 0) + 1
-    if len(_interaction_usage) > 500:
-        today = _time.strftime("%Y%m%d")
-        for item in list(_interaction_usage):
-            if not item.startswith(today):
-                _interaction_usage.pop(item, None)
+    _record_interaction_usage(group_id)
     log.info("INTERACTION_TOOL group=%s user=%s tool=%s status=%s",
              group_id, user_id, name, result.get("status"))
     return {"ok": result.get("status") == "ok", "tool": name,
@@ -321,3 +331,379 @@ def reset_quota_for_test():
 
 def format_tool_result(result):
     return json.dumps(result, ensure_ascii=False, separators=(",", ":"))[:1800]
+
+
+# ==================== TIERED TOOL REGISTRY (native function calling) ====================
+# Tiers:
+#   read        - safe read-only queries, offered in every scene
+#   interaction - visible side effects (emoji/like/music), explicit scenes only,
+#                 per-group daily quota
+#   playful     - playful_ban only, explicit scenes only, hardcoded constraints
+# Kick / unban / whole-ban NEVER enter any tier.
+
+def _schema(properties, required=()):
+    return {"type": "object", "properties": properties, "required": list(required)}
+
+
+def _p_str(desc):
+    return {"type": "string", "description": desc}
+
+
+def _p_int(desc):
+    return {"type": "integer", "description": desc}
+
+
+# ---------- new read-tier handlers ----------
+
+async def get_group_msg_history(dispatcher, group_id, count=20):
+    count = max(1, min(int(count or 20), 50))
+    result = await dispatcher.client.get_group_msg_history(group_id, count=count)
+    data = result.get("data")
+    if isinstance(data, dict):
+        data = data.get("messages") or []
+    lines = []
+    for msg in (data or []):
+        sender = msg.get("sender", {}) if isinstance(msg, dict) else {}
+        name = sender.get("card") or sender.get("nickname") or str(sender.get("user_id", ""))
+        raw = re.sub(r"\[CQ:[^\]]+\]", "", msg.get("raw_message", "") or "").strip()
+        if raw:
+            lines.append("{}: {}".format(name, raw[:60]))
+    return {"ok": result.get("status") == "ok", "data": lines[-20:],
+            "message": result.get("msg") or result.get("wording", "")}
+
+
+async def get_forward_msg(dispatcher, message_id):
+    result = await dispatcher.client.get_forward_msg(int(message_id))
+    return {"ok": result.get("status") == "ok", "data": result.get("data"),
+            "message": result.get("msg") or result.get("wording", "")}
+
+
+async def get_friend_list(dispatcher):
+    result = await dispatcher.client.get_friend_list()
+    data = result.get("data")
+    friends = data
+    if isinstance(data, list):
+        friends = [{"user_id": f.get("user_id"), "nickname": f.get("nickname"),
+                    "remark": f.get("remark")} for f in data[:30]]
+    return {"ok": result.get("status") == "ok", "data": friends,
+            "message": result.get("msg") or result.get("wording", "")}
+
+
+async def get_recent_contact(dispatcher, count=10):
+    count = max(1, min(int(count or 10), 30))
+    result = await dispatcher.client.get_recent_contact(count)
+    return {"ok": result.get("status") == "ok", "data": result.get("data"),
+            "message": result.get("msg") or result.get("wording", "")}
+
+
+async def uapi_search(dispatcher, query):
+    from bot import uapi
+    if not uapi.credits_available(dispatcher.config, "user"):
+        return {"ok": False, "error": "credit_budget_exhausted"}
+    data = await uapi.uapi_post(dispatcher, "/search/aggregate",
+                                json_body={"query": str(query)[:80]}, kind="user")
+    if not data:
+        return {"ok": False, "error": "uapi_failed"}
+    return {"ok": True, "data": data}
+
+
+async def uapi_translate(dispatcher, text):
+    from bot import uapi
+    if not uapi.credits_available(dispatcher.config, "user"):
+        return {"ok": False, "error": "credit_budget_exhausted"}
+    data = await uapi.uapi_post(dispatcher, "/translate/text",
+                                json_body={"text": str(text)[:300]}, kind="user")
+    if not data:
+        return {"ok": False, "error": "uapi_failed"}
+    return {"ok": True, "data": data}
+
+
+# ---------- interaction-tier handlers (args dict + scene context) ----------
+
+async def _tool_set_msg_emoji_like(dispatcher, args, ctx):
+    message_id = int(args.get("message_id") or ctx.get("message_id") or 0)
+    emoji_id = str(args.get("emoji_id") or "128077")
+    result = await dispatcher.client.set_msg_emoji_like(message_id, emoji_id)
+    return {"ok": result.get("status") == "ok",
+            "message": result.get("msg") or result.get("wording", "")}
+
+
+async def _tool_send_like(dispatcher, args, ctx):
+    uid = int(args.get("user_id") or ctx.get("user_id") or 0)
+    times = max(1, min(int(args.get("times") or 1), 10))
+    result = await dispatcher.client.send_like(uid, times)
+    return {"ok": result.get("status") == "ok",
+            "message": result.get("msg") or result.get("wording", "")}
+
+
+async def _tool_send_music_card(dispatcher, args, ctx):
+    """Search NetEase music and send a [CQ:music] card (mirrors 点歌 command)."""
+    keyword = str(args.get("keyword") or "").strip()[:40]
+    if not keyword:
+        return {"ok": False, "error": "missing_keyword"}
+    try:
+        session = dispatcher.client.session
+        url = "https://music.163.com/api/search/get?s=" + keyword + "&type=1&limit=1"
+        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"},
+                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            data = await resp.json(content_type=None) if resp.status == 200 else None
+    except Exception as e:
+        log.warning("send_music_card search failed: %s", e)
+        data = None
+    songs = []
+    if isinstance(data, dict):
+        songs = data.get("result", {}).get("songs", []) or []
+    if not songs:
+        return {"ok": False, "error": "song_not_found"}
+    music_msg = [{"type": "music", "data": {"type": "163", "id": str(songs[0]["id"])}}]
+    if ctx.get("group_id"):
+        r = await dispatcher.client.send_group_msg(ctx["group_id"], music_msg)
+    else:
+        r = await dispatcher.client.send_private_msg(ctx.get("user_id"), music_msg)
+    return {"ok": r.get("status") == "ok", "data": {"song": songs[0].get("name")},
+            "message": r.get("msg") or r.get("wording", "")}
+
+
+# ---------- playful tier: playful_ban with hardcoded constraints ----------
+
+PLAYFUL_BAN_MAX_DURATION = 120
+PLAYFUL_BAN_DAILY_GROUP_LIMIT = 5
+PLAYFUL_BAN_COOLDOWN_SECONDS = 60
+_PLAYFUL_BAN_AUDIT = os.path.join(_ROOT, "data", "playful_ban_audit.json")
+_playful_ban_group_usage = {}   # "YYYYmmdd:group_id" -> count
+_playful_ban_target_usage = {}  # "YYYYmmdd:group_id:user_id" -> True
+_playful_ban_last_ts = {}       # group_id -> timestamp
+
+
+def _prune_playful_ban_state(today):
+    for dct in (_playful_ban_group_usage, _playful_ban_target_usage):
+        if len(dct) > 500:
+            for item in list(dct):
+                if not item.startswith(today):
+                    dct.pop(item, None)
+
+
+def _audit_playful_ban(record):
+    from bot.utils import atomic_write_json
+    try:
+        entries = []
+        if os.path.exists(_PLAYFUL_BAN_AUDIT):
+            with open(_PLAYFUL_BAN_AUDIT, encoding="utf-8") as f:
+                entries = json.load(f)
+            if not isinstance(entries, list):
+                entries = []
+        entries.append(record)
+        atomic_write_json(_PLAYFUL_BAN_AUDIT, entries[-100:], indent=2)
+    except Exception as e:
+        log.warning("playful_ban audit write failed: %s", e)
+
+
+async def execute_playful_ban(dispatcher, args, ctx):
+    """AI-autonomous playful ban. All constraints below are code-enforced."""
+    from bot.permission import get_user_level, get_bot_role, LEVEL_ADMIN
+    group_id = int(ctx.get("group_id") or 0)
+    if not group_id:
+        return {"ok": False, "error": "group_only", "tool": "playful_ban"}
+    try:
+        target_id = int(args.get("user_id") or 0)
+    except (TypeError, ValueError):
+        target_id = 0
+    if not target_id:
+        return {"ok": False, "error": "invalid_target", "tool": "playful_ban"}
+    try:
+        duration = int(args.get("duration") or 30)
+    except (TypeError, ValueError):
+        duration = 30
+    duration = max(1, min(duration, PLAYFUL_BAN_MAX_DURATION))
+    reason = str(args.get("reason") or "玩闹")[:50]
+    # Target protection: admin level and above (master/gowner/admin/super) is off-limits
+    level, _ = await get_user_level(dispatcher, group_id, target_id, "member")
+    if level >= LEVEL_ADMIN:
+        return {"ok": False, "error": "target_protected", "tool": "playful_ban"}
+    bot_role, _ = await get_bot_role(dispatcher, group_id)
+    if bot_role not in ("admin", "owner"):
+        return {"ok": False, "error": "bot_not_admin", "tool": "playful_ban"}
+    today = _time.strftime("%Y%m%d")
+    gkey = "{}:{}".format(today, group_id)
+    if _playful_ban_group_usage.get(gkey, 0) >= PLAYFUL_BAN_DAILY_GROUP_LIMIT:
+        return {"ok": False, "error": "daily_limit_reached", "tool": "playful_ban"}
+    tkey = "{}:{}".format(gkey, target_id)
+    if tkey in _playful_ban_target_usage:
+        return {"ok": False, "error": "target_already_banned_today", "tool": "playful_ban"}
+    now = _time.time()
+    if now - _playful_ban_last_ts.get(group_id, 0) < PLAYFUL_BAN_COOLDOWN_SECONDS:
+        return {"ok": False, "error": "cooldown_active", "tool": "playful_ban"}
+    result = await dispatcher.client.set_group_ban(group_id, target_id, duration)
+    ok = result.get("status") == "ok"
+    _playful_ban_group_usage[gkey] = _playful_ban_group_usage.get(gkey, 0) + 1
+    _playful_ban_target_usage[tkey] = True
+    _playful_ban_last_ts[group_id] = now
+    _prune_playful_ban_state(today)
+    log.warning("PLAYFUL_BAN group=%s actor=AI target=%s duration=%ss reason=%s status=%s",
+                group_id, target_id, duration, reason, result.get("status"))
+    _audit_playful_ban({
+        "ts": now, "group_id": group_id, "actor": "AI",
+        "target_id": target_id, "duration": duration, "reason": reason,
+        "ok": ok,
+    })
+    return {"ok": ok, "tool": "playful_ban", "duration": duration,
+            "message": result.get("msg") or result.get("wording", "")}
+
+
+def reset_playful_ban_for_test():
+    _playful_ban_group_usage.clear()
+    _playful_ban_target_usage.clear()
+    _playful_ban_last_ts.clear()
+
+
+# ---------- registry ----------
+
+def _wrap_read(fn):
+    # Only pass kwargs the underlying function actually accepts; the executor
+    # injects context args (e.g. group_id) that plain uapi tools don't take.
+    import inspect as _inspect
+    _params = _inspect.signature(fn).parameters
+    _accepts_kwargs = any(p.kind == _inspect.Parameter.VAR_KEYWORD
+                          for p in _params.values())
+
+    async def _run(dispatcher, args, ctx):
+        if _accepts_kwargs:
+            return await fn(dispatcher, **args)
+        filtered = {k: v for k, v in args.items() if k in _params}
+        return await fn(dispatcher, **filtered)
+    return _run
+
+
+TOOL_REGISTRY = {}
+
+
+def _register(name, handler, tier, description, parameters):
+    TOOL_REGISTRY[name] = {"handler": handler, "tier": tier,
+                           "description": description, "parameters": parameters}
+
+
+_READ_TOOLS = [
+    ("get_group_info", get_group_info, "查看本群资料（群名、人数等）",
+     _schema({})),
+    ("get_member_info", get_member_info, "查看群成员资料（昵称、群名片、角色、入群时间）",
+     _schema({"user_id": _p_int("目标QQ号，不填则为当前说话的人")})),
+    ("get_recent_messages", get_recent_messages, "查看本群最近消息（最多20条）",
+     _schema({"count": _p_int("条数1-20，默认10")})),
+    ("get_group_files", get_group_files, "查看群文件列表，可按关键词过滤",
+     _schema({"keyword": _p_str("文件名关键词，可空")})),
+    ("get_file_url", get_file_url, "获取群文件下载链接",
+     _schema({"file_id": _p_str("文件ID"), "busid": _p_int("busid")},
+             ("file_id", "busid"))),
+    ("get_group_notice", get_group_notice, "查看群公告列表", _schema({})),
+    ("get_group_honor", get_group_honor, "查看群荣誉（龙王、群聊之火等）",
+     _schema({"honor_type": _p_str("all/talkative/performer/legend/strong_newbie/emotion，默认all")})),
+    ("get_shut_list", get_shut_list, "查看当前被禁言的成员列表", _schema({})),
+    ("get_friend_info", get_friend_info, "查看任意QQ号的资料卡片",
+     _schema({"user_id": _p_int("目标QQ号")}, ("user_id",))),
+    ("ocr_image", get_image_ocr, "识别图片里的文字",
+     _schema({"image": _p_str("图片file id")}, ("image",))),
+    ("get_essence_list", get_essence_list, "查看群精华消息列表", _schema({})),
+    ("get_group_info_ex", get_group_info_ex, "查看本群更详细的资料", _schema({})),
+    ("check_url_safely", check_url_safety, "检测链接是否安全",
+     _schema({"url": _p_str("要检测的链接")}, ("url",))),
+    ("translate_en2zh", translate_text, "英译中",
+     _schema({"text": _p_str("要翻译的英文")}, ("text",))),
+    ("get_group_at_all_remain", get_at_all_remain, "查询本群今天还能@全体几次", _schema({})),
+    ("uapi_weather", uapi_weather, "查真实天气",
+     _schema({"city": _p_str("城市名")}, ("city",))),
+    ("uapi_hotboard", uapi_hotboard, "查各平台热榜",
+     _schema({"type": _p_str("weibo/zhihu/bilibili/douyin/baidu/toutiao/ithome/github")})),
+    ("uapi_saying", uapi_saying, "随机一句名言（一言）", _schema({})),
+    ("uapi_answerbook", uapi_answerbook, "答案之书，给一个问题一个玄学回答",
+     _schema({"question": _p_str("问题，可空")})),
+    ("uapi_epic_free", uapi_epic_free, "查Epic本周免费游戏", _schema({})),
+    ("get_group_msg_history", get_group_msg_history, "追溯本群聊天记录（最多50条，返回精简文本）",
+     _schema({"count": _p_int("条数1-50，默认20")})),
+    ("get_forward_msg", get_forward_msg, "查看合并转发消息的内容",
+     _schema({"message_id": _p_int("合并转发的消息id")}, ("message_id",))),
+    ("get_friend_list", get_friend_list, "查看机器人的好友列表", _schema({})),
+    ("get_recent_contact", get_recent_contact, "查看最近联系过的会话",
+     _schema({"count": _p_int("条数1-30，默认10")})),
+    ("uapi_search", uapi_search, "联网搜索（聚合搜索结果）",
+     _schema({"query": _p_str("搜索关键词")}, ("query",))),
+    ("uapi_translate", uapi_translate, "多语言翻译（uapis通道）",
+     _schema({"text": _p_str("要翻译的文本")}, ("text",))),
+]
+
+_INTERACTION_TOOLS = [
+    ("set_msg_emoji_like", _tool_set_msg_emoji_like, "给某条消息贴表情回应",
+     _schema({"message_id": _p_int("消息id，不填则为当前消息"),
+              "emoji_id": _p_str("表情id，默认128077(点赞)")})),
+    ("send_like", _tool_send_like, "给群友资料卡点赞",
+     _schema({"user_id": _p_int("目标QQ号，不填则为当前说话的人"),
+              "times": _p_int("次数1-10，默认1")})),
+    ("send_music_card", _tool_send_music_card, "点歌：搜网易云歌曲并发音乐卡片到当前会话",
+     _schema({"keyword": _p_str("歌名/歌手关键词")}, ("keyword",))),
+]
+
+_PLAYFUL_TOOLS = [
+    ("playful_ban", execute_playful_ban,
+     "玩闹禁言：只在互相调侃或本人自请的玩闹语境用，1-120秒，用完要说明是玩闹",
+     _schema({"user_id": _p_int("目标QQ号"),
+              "duration": _p_int("秒数1-120，默认30"),
+              "reason": _p_str("玩闹理由，50字内")}, ("user_id",))),
+]
+
+for _name, _fn, _desc, _params in _READ_TOOLS:
+    _register(_name, _wrap_read(_fn), "read", _desc, _params)
+for _name, _fn, _desc, _params in _INTERACTION_TOOLS:
+    _register(_name, _fn, "interaction", _desc, _params)
+for _name, _fn, _desc, _params in _PLAYFUL_TOOLS:
+    _register(_name, _fn, "playful", _desc, _params)
+
+
+def build_tool_schemas(explicit=False):
+    """OpenAI-compatible tools list. Explicit scenes get all three tiers,
+    interjection scenes get the read tier only."""
+    tools = []
+    for name, entry in TOOL_REGISTRY.items():
+        if entry["tier"] != "read" and not explicit:
+            continue
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": entry["description"],
+                "parameters": entry["parameters"],
+            },
+        })
+    return tools
+
+
+async def execute_ai_tool(dispatcher, name, arguments, group_id=0, user_id=0,
+                          message_id=0, interaction_allowed=False):
+    """Unified tiered executor for native function calling."""
+    entry = TOOL_REGISTRY.get(name)
+    if not entry:
+        return {"ok": False, "error": "tool_not_allowed", "tool": name}
+    tier = entry.get("tier", "read")
+    if tier != "read" and not interaction_allowed:
+        return {"ok": False, "error": "tool_not_in_scene", "tool": name}
+    args = dict(arguments) if isinstance(arguments, dict) else {}
+    ctx = {"group_id": int(group_id or 0), "user_id": int(user_id or 0),
+           "message_id": int(message_id or 0)}
+    if tier == "read":
+        if ctx["group_id"]:
+            args.setdefault("group_id", ctx["group_id"])
+        if name == "get_member_info" and not args.get("user_id"):
+            args["user_id"] = ctx["user_id"]
+    if tier == "interaction" and interaction_quota_left(ctx["group_id"]) <= 0:
+        return {"ok": False, "error": "interaction_quota_exhausted", "tool": name}
+    try:
+        result = await entry["handler"](dispatcher, args, ctx)
+    except Exception as exc:
+        log.warning("AI tool %s failed: %s", name, exc)
+        return {"ok": False, "error": "tool_failed", "tool": name,
+                "message": _clip(exc, 200)}
+    if tier == "interaction":
+        _record_interaction_usage(ctx["group_id"])
+        log.info("INTERACTION_TOOL group=%s user=%s tool=%s", ctx["group_id"],
+                 ctx["user_id"], name)
+    if isinstance(result, dict):
+        result.setdefault("tool", name)
+    return result

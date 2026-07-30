@@ -13,6 +13,7 @@ bot_stdout.log*
 bot.pid
 
 config.json
+config.json.*
 data/
 docs/
 

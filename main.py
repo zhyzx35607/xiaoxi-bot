@@ -38,6 +38,13 @@ chat_handler.setFormatter(logging.Formatter(
 ))
 chat_log.addHandler(chat_handler)
 
+for _log_path in (os.path.join(_BASE_DIR, "bot.log"),
+                  os.path.join(_BASE_DIR, "chat.log")):
+    try:
+        os.chmod(_log_path, 0o600)
+    except OSError:
+        pass
+
 
 def apply_env_overrides(config):
     """Load secrets/runtime endpoints from environment without writing them to config.json."""
@@ -82,6 +89,33 @@ def apply_env_overrides(config):
     if vision_model:
         config.setdefault("vision_api", {})["model"] = vision_model
 
+    return config
+
+
+def load_config(config_path):
+    backup_path = config_path + ".last-good"
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+        if not isinstance(config, dict):
+            raise ValueError("config root must be a JSON object")
+    except (json.JSONDecodeError, OSError, ValueError) as error:
+        try:
+            with open(backup_path, encoding="utf-8") as handle:
+                config = json.load(handle)
+            if not isinstance(config, dict):
+                raise ValueError("backup config root must be a JSON object")
+        except (json.JSONDecodeError, OSError, ValueError):
+            raise RuntimeError(
+                "config.json is invalid and no valid last-good backup exists: {}".format(error)
+            ) from error
+        atomic_write_json(config_path, config, indent=2)
+        log.error("Recovered invalid config.json from %s: %s", backup_path, error)
+    atomic_write_json(backup_path, config, indent=2)
+    try:
+        os.chmod(backup_path, 0o600)
+    except OSError:
+        pass
     return config
 
 
@@ -139,8 +173,9 @@ def migrate_config(config):
         "non_explicit_judge_cooldown": 180,
         "enable_long_memory_compress": False,
         "enable_scheduler": False,
-        "rss_restart_mb": 260,
-        "rss_log_mb": 150,
+        "scheduler_timezone": "Asia/Shanghai",
+        "rss_restart_mb": 700,
+        "rss_log_mb": 400,
     }
     runtime = config.setdefault("runtime", {})
     for key, value in runtime_defaults.items():
@@ -200,10 +235,14 @@ def migrate_config(config):
     acg_defaults = {
         "enabled": True,
         "times": [0, 6, 12, 18],
-        "min": 10,
-        "max": 20,
+        "count": 50,
+        "batch_size": 10,
     }
     acg = config.setdefault("acg_images", {})
+    for obsolete_key in ("min", "max"):
+        if obsolete_key in acg:
+            del acg[obsolete_key]
+            migrated = True
     for key, value in acg_defaults.items():
         if key not in acg:
             acg[key] = value
@@ -225,6 +264,8 @@ def migrate_config(config):
         "download_max_mb": 80,
         "poll_interval": 60,
         "uapi_fallback": True,
+        "risk_cooldown_seconds": 1800,
+        "official_retries": 2,
     }
     bilibili = config.setdefault("bilibili", {})
     for key, value in bilibili_defaults.items():
@@ -262,13 +303,13 @@ def migrate_config(config):
 
 async def amain():
     config_path = os.path.join(_BASE_DIR, "config.json")
-    with open(config_path, encoding="utf-8") as f:
-        config = json.load(f)
+    config = load_config(config_path)
 
     # Migrate old config if needed
     config, migrated = migrate_config(config)
     if migrated:
         atomic_write_json(config_path, config, indent=2)
+        atomic_write_json(config_path + ".last-good", config, indent=2)
         log.info("Config migrated to new format")
     config = apply_env_overrides(config)
 

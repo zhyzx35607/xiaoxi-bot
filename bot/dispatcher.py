@@ -15,9 +15,46 @@ log = logging.getLogger("qqbot")
 chat_log = logging.getLogger("qqbot.chat")
 
 
-def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, sender_name=""):
-    """Write bounded chat history, excluding groups not explicitly enabled."""
+def _private_chat_allowed(dispatcher, user_id):
+    """Return whether a private-message sender may enter any bot pipeline."""
+    pc_cfg = dispatcher.config.get("private_chat", {})
+    if user_id == dispatcher.config.get("bot_owner"):
+        return True
+    allowed_users = {
+        int(value) for value in pc_cfg.get("allowed_users", [])
+        if str(value).isdigit()
+    }
+    return bool(pc_cfg.get("enabled", False) or user_id in allowed_users)
+
+
+def _disabled_group_activation_allowed(dispatcher, event):
+    """Allow only the owner/bot account to recover a disabled group in place."""
+    if event.get("post_type") != "message" or event.get("message_type") != "group":
+        return False
+    if event.get("user_id") not in {
+        dispatcher.config.get("bot_owner"), dispatcher.config.get("bot_qq")
+    }:
+        return False
+    prefix = dispatcher.config.get("command_prefix", "/")
+    return str(event.get("raw_message") or "").strip().lower() == prefix + "enable"
+
+
+def _event_scope_allowed(dispatcher, event):
+    """Hard scope gate applied before parsing, logging, caching, or AI work."""
+    group_id = event.get("group_id")
     if group_id and not is_group_enabled(dispatcher, group_id):
+        return _disabled_group_activation_allowed(dispatcher, event)
+    if (event.get("post_type") in ("message", "message_sent")
+            and event.get("message_type") == "private"):
+        return _private_chat_allowed(dispatcher, event.get("user_id", 0))
+    return True
+
+
+def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, sender_name=""):
+    """Write bounded chat history only for explicitly permitted scopes."""
+    if group_id and not is_group_enabled(dispatcher, group_id):
+        return False
+    if not group_id and not _private_chat_allowed(dispatcher, user_id):
         return False
     text = str(raw or "").replace("\r", "\\r").replace("\n", "\\n")[:500]
     if group_id:
@@ -27,6 +64,15 @@ def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, send
         chat_log.info("%s user=%s name=%s text=%s",
                       direction, user_id, sender_name, text)
     return True
+
+
+def _cq_unescape(text):
+    """Undo CQ-code entity escaping (&#91; &#93; &#44; &amp;).
+
+    NapCat puts share cards inline into raw_message as [CQ:json,data=...],
+    where the JSON payload is entity-escaped and URLs use \\/ sequences."""
+    return (text.replace("&#91;", "[").replace("&#93;", "]")
+            .replace("&#44;", ",").replace("&amp;", "&"))
 
 
 def _share_card_text(message):
@@ -272,10 +318,9 @@ class Dispatcher:
             for k in stale_keys:
                 del dct[k]
 
-        # _private_processing: evict stale entries (> 60s)
-        stale_users = [u for u, ts in self._private_processing.items() if now - ts > 60]
-        for u in stale_users:
-            del self._private_processing[u]
+        # _private_processing entries are removed in _handle_private_ai_chat's
+        # finally block when processing finishes — no time-based eviction here,
+        # so a slow AI call can never look "expired" mid-flight.
 
         # _private_last_reply_ts: evict entries older than 2 hours
         stale_priv = [u for u, ts in self._private_last_reply_ts.items() if now - ts > 7200]
@@ -516,6 +561,8 @@ class Dispatcher:
 
     async def dispatch(self, event):
         try:
+            if not _event_scope_allowed(self, event):
+                return
             pt = event.get("post_type", "")
             if pt == "message":
                 await self._handle_message(event)
@@ -617,6 +664,11 @@ class Dispatcher:
         msg_type = event.get("message_type", "")
         group_id = event.get("group_id", None)
         user_id = event.get("user_id", 0)
+
+        # Defense in depth: keep direct callers from bypassing dispatch().
+        if not _event_scope_allowed(self, event):
+            return
+
         message = event.get("message", [])
         raw = event.get("raw_message", "") or ""
         sender = event.get("sender", {})
@@ -648,6 +700,10 @@ class Dispatcher:
             if ("b23.tv" in card_text or "bilibili.com/video" in card_text
                     or "BV1" in card_text):
                 raw = card_text
+        # NapCat may instead deliver cards inline as [CQ:json,data=...] in
+        # raw_message; unescape so URL/BV detection sees the real links.
+        if msg_type == "group" and "[CQ:json,data=" in raw:
+            raw = _cq_unescape(raw).replace("\\/", "/")
         if msg_type == "group" and raw:
             group_enabled = is_group_enabled(self, group_id)
             if group_enabled:
@@ -1007,7 +1063,7 @@ class Dispatcher:
 群组: {groups_list}
 
 /status - 查看状态
-/AI状态 - 查看 Agnes 和 DeepSeek 运行状态
+/AI状态 - 查看 SigmaI 和 DeepSeek 运行状态
 /打卡状态 - 查看定时群打卡状态
 /打卡测试 <群号> - 手动测试原生群打卡
 /list - 查看所有群组数据概览
@@ -1187,7 +1243,7 @@ class Dispatcher:
                 await self._reply(None, user_id, f"群 {parts2[1]} 的记忆清掉了")
             else:
                 from .ai import _load_memory
-                mem = _load_memory(parts2[0])
+                mem = _load_memory(parts2[0], self.config)
                 if not mem:
                     await self._reply(None, user_id, f"群 {parts2[0]} 无记忆")
                 else:
@@ -1369,6 +1425,7 @@ class Dispatcher:
             log.debug("Private dedup: user %s(%s) already processing, skipping", sender_name, user_id)
             return
         self._private_processing[user_id] = now
+        typing_started = False
 
         try:
             # === Friend-only gate (silent): non-friends get no response at all ===
@@ -1385,6 +1442,16 @@ class Dispatcher:
             if not clean_raw and not has_image:
                 log.debug("Private chat skipped (empty): %s(%s)", sender_name, user_id)
                 return
+
+            # Show "typing..." while preparing (friend check / vision / search
+            # can take seconds); handle_ai_chat keeps it on during generation.
+            try:
+                _tr = await self.client.call("set_input_status", {
+                    "user_id": user_id, "event_type": 1,
+                })
+                typing_started = isinstance(_tr, dict) and _tr.get("status") == "ok"
+            except Exception:
+                pass
 
             # Build image context (only for non-sticker images)
             from .media import extract_message_context
@@ -1425,6 +1492,13 @@ class Dispatcher:
                 # Reset after 10 min gap (handled by _cleanup_stale_state)
         finally:
             self._private_processing.pop(user_id, None)
+            if typing_started:
+                try:
+                    await self.client.call("set_input_status", {
+                        "user_id": user_id, "event_type": 0,
+                    })
+                except Exception:
+                    pass
 
 
     def _parse_private_group_args(self, args):
@@ -1524,7 +1598,7 @@ class Dispatcher:
 
 
     def _check_rate_limit(self, group_id):
-        """Check if group has exceeded 100 replies per 30min. Returns (allowed, remaining)."""
+        """Check if group has exceeded the 30-min reply cap (default 50). Returns (allowed, remaining)."""
         from collections import deque
         cfg = self.config.get("chat_limits", {})
         if not cfg.get("rate_limit_enabled", True):
@@ -1789,6 +1863,8 @@ class Dispatcher:
 
     async def _trigger_delayed_reply(self, group_id, user_id, message_id, message, raw, sender_card):
         """Re-evaluate a delayed candidate with fresh context and let the AI decide."""
+        if not is_group_enabled(self, group_id):
+            return
         from .ai import handle_ai_chat, search_web, _schedule_state
         from .guard import is_blacklisted
 

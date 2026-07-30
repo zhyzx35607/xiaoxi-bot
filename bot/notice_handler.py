@@ -60,7 +60,7 @@ async def handle_notice(dispatcher, event):
 
 
 async def _generate_welcome_text(dispatcher, nickname, sex=""):
-    """Generate a short, friendly welcome message using AI (Agnes > DeepSeek)."""
+    """Generate a short, friendly welcome message using AI (DeepSeek)."""
     sex_part = "（" + sex + "）" if sex else ""
     prompt = f"新生「{nickname}」{sex_part}加入了群聊，请用一句简短（15字以内）有趣友好的话欢迎ta。自然口语化，不用emoji。直接回复内容，不用任何前缀。"
     try:
@@ -331,12 +331,29 @@ async def handle_title_change(dispatcher, event):
     user_id = event.get("user_id", 0)
     title = event.get("title", "")
     log.info("Title changed: g=%s u=%s title=%s", group_id, user_id, title)
+    # Bot-initiated sets: the issuing command already replied, skip the
+    # duplicate congrats (also avoids contradicting a timeout-then-success).
+    pending = _bot_title_sets.pop((group_id, user_id), None)
+    if pending and time.time() - pending[1] < 120 and pending[0] == title:
+        return
     if group_id and title and user_id != dispatcher.config.get("bot_qq"):
         try:
             await dispatcher.client.send_group_msg(group_id,
                 f"恭喜获得专属头衔「{title}」！")
         except Exception:
             pass
+
+
+# (group_id, user_id) -> (title, ts): titles the bot set via /title or 我要头衔
+_bot_title_sets = {}
+
+
+def mark_title_set_by_bot(group_id, user_id, title):
+    _bot_title_sets[(group_id, user_id)] = (title, time.time())
+    if len(_bot_title_sets) > 200:
+        cutoff = time.time() - 600
+        for k in [k for k, v in _bot_title_sets.items() if v[1] < cutoff]:
+            del _bot_title_sets[k]
 
 
 async def handle_profile_like(dispatcher, event):

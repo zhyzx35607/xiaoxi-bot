@@ -24,10 +24,11 @@ _STICKER_LAST_SENT = {}
 _STICKER_DAILY_COUNT = {}
 _PROVIDER_COOLDOWNS = {}
 _PROVIDER_STATS = {}
-_LONG_MEMORY_TASKS = set()
-def _schedule_long_memory(coro):
-    """Run at most one memory compression task at a time."""
-    if len(_LONG_MEMORY_TASKS) >= 1:
+_PROVIDER_NO_TOOLS = set()  # (base_url, model) known to reject the tools parameter
+_LONG_MEMORY_TASKS = {}  # target key -> running task
+def _schedule_long_memory(key, coro):
+    """Run at most one memory compression task per target at a time."""
+    if key in _LONG_MEMORY_TASKS:
         coro.close()
         return None
     try:
@@ -35,9 +36,9 @@ def _schedule_long_memory(coro):
     except RuntimeError:
         coro.close()
         return None
-    _LONG_MEMORY_TASKS.add(task)
+    _LONG_MEMORY_TASKS[key] = task
     def _done(completed):
-        _LONG_MEMORY_TASKS.discard(completed)
+        _LONG_MEMORY_TASKS.pop(key, None)
         if not completed.cancelled() and completed.exception():
             log.error("Long-memory task failed: %s", completed.exception())
     task.add_done_callback(_done)
@@ -71,7 +72,7 @@ STYLE_RULES = (
 )
 TIMING_RULES = (
     "什么时候说话，什么时候潜水：\n"
-    "你在群里是个安静的人，潜水是常态。群里没人直接找你时，大约85%的消息你都该跳过。\n"
+    "你在群里是个安静的人，但也不是一直潜水。群里没人直接找你时，大约65%的消息你都该跳过。\n"
     "判断标准：一个安静的真人看到这条消息，会不会接话。\n"
     "该说话：\n"
     "- 有人@你、叫你名字、明显在问你 → 回。\n"
@@ -105,6 +106,13 @@ OUTPUT_PROTOCOL = (
 # Backward-compatible aliases used by deepseek_chat and _build_system_prompt.
 PERSONALITY = PERSONA_PROFILE
 SAFETY_RULES = STYLE_RULES
+TOOL_USAGE_RULES = (
+    "【工具使用规则】\n"
+    "你可以调用工具：查群资料/聊天记录/天气热榜/翻译/搜索，也能贴表情、点赞、点歌。\n"
+    "需要事实就先查再说，别凭印象编；可以连续组合调用多个工具。\n"
+    "玩闹禁言（playful_ban）只在明显互相调侃或本人自请时用，一次最多120秒，用完说明是玩闹。\n"
+    "工具失败就直说没查到，不许编造结果。踢人、解禁、全员禁言你没有权限，别碰。"
+)
 def _schedule_state(now_dt=None):
     """Return (state_key, hint_text) based on Beijing time."""
     now_dt = now_dt or datetime.now(timezone(timedelta(hours=8)))
@@ -133,7 +141,8 @@ def _split_reply_lines(text, max_parts=3):
     return lines
 def _build_system_prompt(bot_role_awareness="", memory_ctx="",
                          chat_context="", image_context="", web_context="",
-                         rate_warning="", long_mem_ctx="", user_mem_ctx=""):
+                         rate_warning="", long_mem_ctx="", user_mem_ctx="",
+                         tool_ctx=""):
     parts = [PERSONALITY]
     parts.append(SAFETY_RULES)
     parts.append(TIMING_RULES)
@@ -159,13 +168,15 @@ def _build_system_prompt(bot_role_awareness="", memory_ctx="",
         parts.append(memory_ctx)
     if user_mem_ctx:
         parts.append(user_mem_ctx)
+    if tool_ctx:
+        parts.append(tool_ctx)
     if chat_context:
         parts.append("【最近的群聊记录（参考上下文用，你自主判断是否参与）】\n" + chat_context)
     return "\n\n".join(parts)
 # ========== MEMORY ==========
 def _memory_file(group_id):
     return os.path.join(MEMORY_DIR, f"group_{group_id}.json")
-def _load_memory(group_id):
+def _load_memory(group_id, config=None):
     if group_id in _memories:
         return _memories[group_id]
     path = _memory_file(group_id)
@@ -174,8 +185,9 @@ def _load_memory(group_id):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            # Clean old entries (72h default, matching config memory_expire_hours)
-            cutoff = now - 72 * 3600
+            # Clean old entries (config memory_expire_hours, default 72h)
+            expire_hours = int((config or {}).get("memory_expire_hours", 72))
+            cutoff = now - expire_hours * 3600
             fresh = [e for e in data if e.get("ts", 0) > cutoff]
             if len(fresh) < len(data):
                 log.info("Memory cleanup: removed %d expired entries for group %s", len(data)-len(fresh), group_id)
@@ -189,13 +201,13 @@ def _load_memory(group_id):
     return _memories[group_id]
 def _is_repetitive(user_id, new_reply):
     """Check if new_reply is too similar to recent replies to the same user.
-    Returns True if similarity > 0.85 with any of last 3 replies → skip sending.
+    Returns True if similarity > 0.85 with any of last 5 replies → skip sending.
     """
     # Lazy cleanup on every call
     global _LAST_REPLY_CLEANUP_TS
     _cleanup_replies_by_user()
     if user_id not in _last_replies_by_user:
-        _last_replies_by_user[user_id] = deque(maxlen=3)
+        _last_replies_by_user[user_id] = deque(maxlen=5)
         _last_replies_ts[user_id] = time.time()
         return False
     recent = _last_replies_by_user[user_id]
@@ -219,7 +231,7 @@ def _is_repetitive(user_id, new_reply):
 def _record_reply(user_id, reply):
     """Record a sent reply for anti-echo tracking."""
     if user_id not in _last_replies_by_user:
-        _last_replies_by_user[user_id] = deque(maxlen=3)
+        _last_replies_by_user[user_id] = deque(maxlen=5)
         _last_replies_ts[user_id] = time.time()
     _last_replies_by_user[user_id].append(reply.strip())
     _last_replies_ts[user_id] = time.time()
@@ -271,7 +283,8 @@ def _save_memory(group_id, memory, config=None, session=None):
         # Trigger bounded async compression.
         runtime = config.get("runtime", {}) if config else {}
         if config and session and overflow and runtime.get("enable_long_memory_compress", False):
-            _schedule_long_memory(_compress_to_long_term(group_id, overflow, config, session))
+            _schedule_long_memory("group:{}".format(group_id),
+                                  _compress_to_long_term(group_id, overflow, config, session))
     _memories[group_id] = memory
     _memory_timestamps[group_id] = now
     path = _memory_file(group_id)
@@ -301,7 +314,7 @@ def _load_user_memory(group_id, user_id):
         except Exception:
             pass
     return []
-def _save_user_memory(group_id, user_id, memory, config=None):
+def _save_user_memory(group_id, user_id, memory, config=None, session=None, max_entries=None):
     from .memory import sanitize_for_memory
     now = time.time()
     for e in memory:
@@ -309,22 +322,31 @@ def _save_user_memory(group_id, user_id, memory, config=None):
             e["ts"] = now
         if "content" in e:
             e["content"] = sanitize_for_memory(e.get("content", ""))
-    # Cap at user_memory_max from config (default 15)
-    max_entries = int((config or {}).get("user_memory_max", 15))
+    # Cap at user_memory_max from config (default 15); private chat passes 30
+    if max_entries is None:
+        max_entries = int((config or {}).get("user_memory_max", 15))
     if len(memory) > max_entries:
-        # Compress oldest entries into a summary
-        split = max(1, max_entries // 2)
-        oldest = memory[:split]
-        recent = memory[split:]
-        summary_parts = []
-        for e in oldest:
-            c = (e.get("content") or "")[:60].replace("\n", " ")
-            role = e.get("role", "user")
-            summary_parts.append("[{}] {}".format(role, c))
-        if summary_parts:
-            summary = {"role": "system", "content": "[记忆压缩] " + "; ".join(summary_parts[-4:]), "ts": now}
-            recent.insert(0, summary)
-        memory = recent[-max_entries:]
+        overflow = memory[:len(memory) - max_entries]
+        memory = memory[-max_entries:]
+        # Prefer real LLM compression into long-term memory; fall back to a
+        # plain truncation summary when no session/config is available.
+        runtime = config.get("runtime", {}) if config else {}
+        if (config and session and len(overflow) >= 4
+                and runtime.get("enable_long_memory_compress", False)):
+            key = ("group:{}:u{}".format(group_id, user_id) if group_id
+                   else "private:{}".format(user_id))
+            _schedule_long_memory(
+                key, _compress_user_to_long(group_id, user_id, overflow, config, session))
+        else:
+            summary_parts = []
+            for e in overflow:
+                c = (e.get("content") or "")[:60].replace("\n", " ")
+                role = e.get("role", "user")
+                summary_parts.append("[{}] {}".format(role, c))
+            if summary_parts:
+                summary = {"role": "system", "content": "[记忆压缩] " + "; ".join(summary_parts[-4:]), "ts": now}
+                memory.insert(0, summary)
+                memory = memory[-max_entries:]
     path = _user_memory_file(group_id, user_id)
     atomic_write_json(path, memory)
 def clear_user_memory(group_id, user_id):
@@ -355,11 +377,13 @@ def _save_long_memory(group_id, entries):
     if len(entries) > 10:
         entries = entries[-10:]
     atomic_write_json(path, entries)
-# ========== PRIVATE CHAT LONG-TERM MEMORY ==========
-def _private_long_memory_file(user_id):
+# ========== PER-USER LONG-TERM MEMORY ==========
+def _user_long_memory_file(group_id, user_id):
+    if group_id:
+        return os.path.join(MEMORY_DIR, "group_{}_u{}_long.json".format(group_id, user_id))
     return os.path.join(MEMORY_DIR, "private_{}_long.json".format(user_id))
-def _load_private_long_memory(user_id):
-    path = _private_long_memory_file(user_id)
+def _load_user_long_memory(group_id, user_id):
+    path = _user_long_memory_file(group_id, user_id)
     now = time.time()
     if os.path.exists(path):
         try:
@@ -372,14 +396,14 @@ def _load_private_long_memory(user_id):
         except Exception:
             pass
     return []
-def _save_private_long_memory(user_id, entries):
-    path = _private_long_memory_file(user_id)
+def _save_user_long_memory(group_id, user_id, entries):
+    path = _user_long_memory_file(group_id, user_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if len(entries) > 8:
         entries = entries[-8:]
     atomic_write_json(path, entries)
-async def _compress_private_to_long(user_id, old_entries, config, session):
-    """Summarize old private chat memory into long-term memory."""
+async def _compress_user_to_long(group_id, user_id, old_entries, config, session):
+    """Summarize old per-user chat memory into long-term memory."""
     if not old_entries or len(old_entries) < 4:
         return
     parts = []
@@ -388,7 +412,7 @@ async def _compress_private_to_long(user_id, old_entries, config, session):
         c = (e.get("content") or "")[:100].replace("\n", " ")
         parts.append("{}: {}".format(role, c))
     prompt = (
-        "将以下私聊对话摘要为1-2句话，用中文，只描述讨论的话题内容，不评价：\n\n"
+        "将以下对话摘要为1-2句话，用中文，只描述讨论的话题内容，不评价：\n\n"
         + "\n".join(parts[-8:])
     )
     try:
@@ -397,12 +421,13 @@ async def _compress_private_to_long(user_id, old_entries, config, session):
             max_tokens=80, temperature=0.3, session=session,
         )
         if summary and len(summary) > 5:
-            long = _load_private_long_memory(user_id)
+            long = _load_user_long_memory(group_id, user_id)
             long.append({"ts": time.time(), "content": summary})
-            _save_private_long_memory(user_id, long)
-            log.info("Private long-term memory saved for user %s: %s", user_id, summary[:60])
+            _save_user_long_memory(group_id, user_id, long)
+            log.info("User long-term memory saved (group %s, user %s): %s",
+                     group_id, user_id, summary[:60])
     except Exception as e:
-        log.error("Private long-term compression failed: %s", e)
+        log.error("User long-term compression failed: %s", e)
 async def _compress_to_long_term(group_id, old_entries, config, session):
     # Summarize old working memory into long-term memory
     if not old_entries or len(old_entries) < 4:
@@ -528,8 +553,10 @@ async def _call_deepseek(config, messages, max_tokens=400, temperature=0.7, sess
     runtime = config.get("runtime", {})
     async with _get_semaphore("ai", runtime.get("ai_concurrency", 1)):
         return await _call_deepseek_inner(config, messages, max_tokens, temperature, session)
-async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7, session=None):
-    # Try SigmaI first (if configured), then fall back to official DeepSeek
+async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7, session=None, tools=None):
+    # Try SigmaI first (if configured), then fall back to official DeepSeek.
+    # With tools given (OpenAI function calling), returns the raw message dict;
+    # otherwise returns the content string as before.
     sigmai_cfg = _get_sigmai_config(config)
     deepseek_cfg = _get_deepseek_config(config)
     async def _call_api(cfg, model_label, use_session, timeout_seconds):
@@ -574,6 +601,9 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
             "presence_penalty": 0.3,
             "frequency_penalty": 0.3,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         url = f"{cfg['base_url']}/chat/completions"
         async def _do_post(sess):
             request_timeout = max(5, min(30, int(timeout_seconds)))
@@ -581,7 +611,12 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
                                 timeout=aiohttp.ClientTimeout(total=request_timeout)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    content_text = data["choices"][0]["message"]["content"].strip()
+                    message = data["choices"][0].get("message") or {}
+                    if tools:
+                        _PROVIDER_COOLDOWNS.pop(provider_key, None)
+                        _record_result(True)
+                        return message
+                    content_text = (message.get("content") or "").strip()
                     _PROVIDER_COOLDOWNS.pop(provider_key, None)
                     if not content_text:
                         _record_result(False, "empty_content")
@@ -592,6 +627,14 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
                     return content_text
                 else:
                     body = await resp.text()
+                    if tools and resp.status in (400, 404, 422) and "tool" in body.lower():
+                        # Provider/model does not support function calling:
+                        # remember it and let the caller degrade to plain calls.
+                        _PROVIDER_NO_TOOLS.add(provider_key)
+                        _record_result(False, "tools_unsupported")
+                        log.warning("%s rejected tools (HTTP %d), degrading to plain calls",
+                                    model_label, resp.status)
+                        return None
                     _record_result(False, "HTTP {}".format(resp.status))
                     log.warning("%s API returned %d: %s", model_label, resp.status, body[:200])
                     cooldown = 3600 if resp.status in (400, 401, 403, 404) else 60
@@ -653,6 +696,14 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
         return await _call_api(deepseek_cfg, "DeepSeek", session, deepseek_timeout)
     log.warning("No AI model API key configured (SigmaI or DeepSeek)")
     return None
+def _providers_support_tools(config):
+    """True unless every configured chat provider is known to reject tools."""
+    configured = [c for c in (_get_sigmai_config(config), _get_deepseek_config(config))
+                  if c["api_key"]]
+    if not configured:
+        return False
+    return any((c["base_url"], c["model"]) not in _PROVIDER_NO_TOOLS
+               for c in configured)
 def get_ai_provider_status(config):
     """Return safe, in-memory provider health data without exposing secrets."""
     providers = (
@@ -863,7 +914,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 bot_role = f"你是本群的{role_display}，作为管理员要以身作则友好交流。"
         except Exception:
             pass
-    memory = _load_memory(group_id) if group_id else []
+    memory = _load_memory(group_id, config) if group_id else []
     
     # Build memory context string
     mem_ctx = ""
@@ -902,8 +953,14 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             long_lines = ["- " + e["content"][:120] for e in long_mem[-5:]]
             if long_lines:
                 long_mem_ctx = "【本群历史话题摘要】\n" + "\n".join(long_lines)
+        u_long = _load_user_long_memory(group_id, user_id) if user_id else []
+        if u_long:
+            u_long_lines = ["- " + e["content"][:120] for e in u_long[-5:]]
+            if u_long_lines:
+                long_mem_ctx += "\n\n【你和 {} 之前聊过的长期话题】\n".format(
+                    sender_name if sender_name else "此人") + "\n".join(u_long_lines)
     else:
-        long_mem = _load_private_long_memory(user_id) if user_id else []
+        long_mem = _load_user_long_memory(0, user_id) if user_id else []
         long_mem_ctx = ""
         if long_mem:
             long_lines = ["- " + e["content"][:120] for e in long_mem[-5:]]
@@ -941,6 +998,10 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             "• 有人发长文吐槽/分享 → 如果跟你有关可以回应\n"
             "• 如果实在不确定，就不回——群友不是客服，不需要每条都回。"
         )
+    # Tiered tools for native function calling: explicit scenes (interaction_allowed)
+    # get all three tiers; interjection scenes get the read tier only.
+    from ai_tools import build_tool_schemas
+    tools = build_tool_schemas(explicit=interaction_allowed)
     system_prompt = _build_system_prompt(
         bot_role_awareness=bot_role,
         memory_ctx=mem_ctx,
@@ -950,6 +1011,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         rate_warning=rate_warning,
         long_mem_ctx=long_mem_ctx,
         user_mem_ctx=user_mem_ctx,
+        tool_ctx=TOOL_USAGE_RULES if tools else "",
     )
     
     # === Private chat: detailed behavior rules for AI to follow ===
@@ -1016,30 +1078,38 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         clean_msg = None  # Skip combined message below
     if clean_msg is not None:
         messages.append({"role": "user", "content": f"{sender_name}: {clean_msg}"})
-    # Bounded tool loop (read-only + budgeted uapi; interaction tools only
-    # in explicit/follow-up scenes) before the final reply.
-    if _should_consider_napcat_tool(original_clean_msg or raw_message):
-        tool_result = await _maybe_call_napcat_tool(
-            dispatcher, group_id, user_id, original_clean_msg or raw_message,
-            chat_context, interaction_allowed=interaction_allowed,
-            message_id=message_id)
-        if tool_result:
-            messages.append({"role": "system", "content": "【工具查询结果】\n" + tool_result})
     temperature = 0.65
         # Fixed token budget: resource boundary, not behavior control
     is_question = bool(clean_msg) and ("?" in str(clean_msg) or "？" in str(clean_msg) or
                     any(w in str(clean_msg) for w in ("怎么", "为什么", "如何", "啥", "什么")))
-    if is_question:
-        dyn_max_tokens = 450
-    elif group_id:
-        dyn_max_tokens = 250
+    if group_id:
+        dyn_max_tokens = 450 if is_question else 400
     else:
-        dyn_max_tokens = 350
+        dyn_max_tokens = 500
     # Light pre-call delay simulates "reading the message"
     is_private = not group_id
     pre_delay = random.uniform(0.2, 0.8) if is_private else random.uniform(0.3, 1.0)
     async def _delayed_ai_request():
         await asyncio.sleep(pre_delay)
+        # Native function calling: explicit scenes get all tool tiers,
+        # interjections get the read tier only. One semaphore hold per loop.
+        if tools:
+            tool_reply = await _chat_with_tools(
+                dispatcher, messages, tools, group_id, user_id,
+                message_id=message_id, interaction_allowed=interaction_allowed,
+                max_tokens=dyn_max_tokens, temperature=temperature)
+            if tool_reply is not None:
+                return tool_reply
+            # Provider rejected tools or loop failed: legacy keyword-gated
+            # JSON tool loop, then a plain completion.
+            if _should_consider_napcat_tool(original_clean_msg or raw_message):
+                tool_result = await _maybe_call_napcat_tool(
+                    dispatcher, group_id, user_id, original_clean_msg or raw_message,
+                    chat_context, interaction_allowed=interaction_allowed,
+                    message_id=message_id)
+                if tool_result:
+                    messages.append({"role": "system",
+                                     "content": "【工具查询结果】\n" + tool_result})
         return await _call_deepseek(
             config, messages, max_tokens=dyn_max_tokens,
             temperature=temperature, session=dispatcher.client.session,
@@ -1125,7 +1195,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                     if not _allow_sticker_send(config, group_id, user_id):
                         sticker_file = None
                     log.info("AI-driven sticker: emotion=%s -> file=%s (from %d matches, same_group=%s)",
-                             wanted_emotion, sticker_file[:16], len(matches),
+                             wanted_emotion, (sticker_file or "")[:16], len(matches),
                              bool(same_group or same_group_tag))
                 else:
                     log.info("AI wanted sticker emotion=%s but no match found in %d stickers",
@@ -1236,7 +1306,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             user_mem.append({"role": "system", "content": info, "ts": now})
         user_mem.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text), "ts": now})
         user_mem.append({"role": "assistant", "content": reply, "ts": now})
-        _save_user_memory(group_id, user_id, user_mem, config)
+        _save_user_memory(group_id, user_id, user_mem, config, dispatcher.client.session)
         memory.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text)})
         memory.append({"role": "assistant", "content": reply})
         _save_memory(group_id, memory, config, dispatcher.client.session)
@@ -1249,28 +1319,14 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         except Exception as e:
             log.debug("Failed to append bot reply to buffer: %s", e)
     else:
-        # === Private chat memory (deeper: 30 entries + API long-term compression) ===
+        # === Private chat memory (deeper: 30 entries + LLM long-term compression) ===
         user_mem = _load_user_memory(0, user_id)
         for info in learned:
             user_mem.append({"role": "system", "content": info, "ts": now})
         user_mem.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text), "ts": now})
         user_mem.append({"role": "assistant", "content": reply, "ts": now})
-        for e in user_mem:
-            if "ts" not in e:
-                e["ts"] = now
-        private_max = 30
-        if len(user_mem) > private_max:
-            overflow = user_mem[:len(user_mem) - private_max]
-            user_mem = user_mem[-private_max:]
-            if config and dispatcher.client.session and len(overflow) >= 4:
-                _schedule_long_memory(
-                    _compress_private_to_long(user_id, overflow, config, dispatcher.client.session)
-                )
-        from .memory import sanitize_for_memory
-        for entry in user_mem:
-            if "content" in entry:
-                entry["content"] = sanitize_for_memory(entry.get("content", ""))
-        atomic_write_json(_user_memory_file(0, user_id), user_mem)
+        _save_user_memory(0, user_id, user_mem, config,
+                          dispatcher.client.session, max_entries=30)
     return True
 def _allow_sticker_send(config, group_id, user_id):
     """Resource/spam boundary only; AI still decides whether a sticker fits."""
@@ -1389,6 +1445,61 @@ async def _maybe_call_napcat_tool(dispatcher, group_id, user_id, text, chat_cont
             log.debug("tool loop round ignored: %s", exc)
             break
     return "\n".join(collected)
+
+async def _chat_with_tools(dispatcher, messages, tools, group_id, user_id,
+                           message_id=0, interaction_allowed=False,
+                           max_tokens=400, temperature=0.7):
+    """Multi-round native function-calling loop (max 4 tool rounds).
+
+    The whole loop runs inside a single AI semaphore hold — inner calls use
+    _call_deepseek_inner directly and must NOT re-acquire the semaphore.
+    Returns the final reply text, or None when tools are unsupported / the
+    provider failed (caller then degrades to the legacy JSON loop).
+    """
+    from ai_tools import execute_ai_tool, format_tool_result
+    config = dispatcher.config
+    if not tools or not _providers_support_tools(config):
+        return None
+    runtime = config.get("runtime", {})
+    async with _get_semaphore("ai", runtime.get("ai_concurrency", 1)):
+        conversation = list(messages)
+        for _round in range(4):
+            message = await _call_deepseek_inner(
+                config, conversation, max_tokens, temperature,
+                dispatcher.client.session, tools=tools)
+            if not isinstance(message, dict):
+                return None  # provider failed or rejected tools -> legacy fallback
+            tool_calls = message.get("tool_calls") or []
+            content = (message.get("content") or "").strip()
+            if not tool_calls:
+                return content or None
+            conversation.append({"role": "assistant", "content": content or None,
+                                 "tool_calls": tool_calls})
+            for call in tool_calls[:3]:
+                fn = call.get("function", {}) if isinstance(call, dict) else {}
+                name = fn.get("name", "")
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                    if not isinstance(args, dict):
+                        args = {}
+                except Exception:
+                    args = {}
+                result = await execute_ai_tool(
+                    dispatcher, name, args, group_id=group_id or 0,
+                    user_id=user_id or 0, message_id=message_id or 0,
+                    interaction_allowed=interaction_allowed)
+                conversation.append({"role": "tool",
+                                     "tool_call_id": call.get("id", ""),
+                                     "content": format_tool_result(result)})
+            log.info("AI tool round %d: %d call(s) executed", _round + 1,
+                     min(len(tool_calls), 3))
+        # Rounds exhausted: force a final plain-text answer without tools.
+        final = await _call_deepseek_inner(
+            config, conversation, max_tokens, temperature,
+            dispatcher.client.session)
+        if isinstance(final, dict):
+            return (final.get("content") or "").strip() or None
+        return final
 
 # ========== REPLY PARSING ==========
 def _parse_reply_actions(reply, member_map):
@@ -1531,8 +1642,8 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
         "group_id": f"private_{group_id}" if is_private else str(group_id),
         "ts": time.time()
     })
-    # Keep max 50 stickers
-    max_stickers = 50
+    # Keep at most sticker_mode.max_stickers entries
+    max_stickers = int(sticker_cfg.get("max_stickers", 50))
     if len(stickers) > max_stickers:
         stickers = stickers[-max_stickers:]
     atomic_write_json(path, stickers)
@@ -1658,7 +1769,7 @@ def _build_sticker_inventory(group_id=None, user_id=None, is_private=False):
             "回复时如果觉得发个表情包能更好表达情绪，在末尾加 [STICKER:情绪标签]。")
 # ========== WEB SEARCH ==========
 async def search_web(dispatcher, query):
-    """Search web using Bing (free, works in mainland China)."""
+    """Search web: uapis.cn aggregate search first, Bing HTML scrape as fallback."""
     config = dispatcher.config
     ws_cfg = config.get("web_search", {})
     if not ws_cfg.get("enabled", True):
@@ -1683,26 +1794,9 @@ async def search_web(dispatcher, query):
     
     try:
         async with dispatcher._search_sem:
-            encoded = urllib.parse.quote(query)
-            url = f"https://www.bing.com/search?q={encoded}&setlang=zh-cn"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept-Language": "zh-CN,zh;q=0.9",
-            }
-            timeout = aiohttp.ClientTimeout(total=6)
-            value = ""
-            if dispatcher.client.session:
-                session = dispatcher.client.session
-                async with session.get(url, headers=headers, timeout=timeout) as resp:
-                    if resp.status == 200:
-                        html = await resp.text()
-                        value = _parse_bing_results(html, query)
-            else:
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(url, headers=headers, timeout=timeout) as resp:
-                        if resp.status == 200:
-                            html = await resp.text()
-                            value = _parse_bing_results(html, query)
+            value = await _search_web_uapi(dispatcher, query)
+            if not value:
+                value = await _search_web_bing(dispatcher, query)
             if cache is not None:
                 cache[cache_key] = {"ts": now, "value": value}
                 if len(cache) > 100:
@@ -1721,6 +1815,84 @@ async def search_web(dispatcher, query):
     except Exception as e:
         log.error("Web search error: %s", e)
     
+    return ""
+async def _search_web_uapi(dispatcher, query):
+    """Primary search path: uapis.cn aggregate search via the credit channel."""
+    from bot import uapi
+    if not uapi.credits_available(dispatcher.config, "user"):
+        log.debug("uapi search skipped: credit budget exhausted")
+        return ""
+    data = await uapi.uapi_post(dispatcher, "/search/aggregate",
+                                json_body={"query": str(query)[:80]}, kind="user")
+    if not data:
+        return ""
+    value = _format_uapi_search_results(data)
+    if value:
+        log.info("Web search via uapi: %s -> %d chars", query[:30], len(value))
+    return value
+def _format_uapi_search_results(data, limit=3):
+    """Best-effort normalize the uapis aggregate search payload to text lines."""
+    items = []
+    if isinstance(data, dict):
+        for key in ("results", "data", "list", "items"):
+            if isinstance(data.get(key), list):
+                items = data[key]
+                break
+        else:
+            inner = data.get("data")
+            if isinstance(inner, dict):
+                for key in ("results", "list", "items"):
+                    if isinstance(inner.get(key), list):
+                        items = inner[key]
+                        break
+    elif isinstance(data, list):
+        items = data
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("name") or "").strip()[:100]
+        snippet = str(item.get("snippet") or item.get("content")
+                      or item.get("description") or item.get("desc") or "").strip()[:150]
+        url = str(item.get("url") or item.get("link") or "").strip()
+        if not title and not snippet:
+            continue
+        line = title or snippet[:100]
+        if title and snippet:
+            line += "\n  " + snippet
+        if url:
+            line += "\n  " + url
+        lines.append(line)
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines)
+async def _search_web_bing(dispatcher, query):
+    """Fallback search path: Bing HTML scrape (fragile, mainland-friendly)."""
+    encoded = urllib.parse.quote(query)
+    url = f"https://www.bing.com/search?q={encoded}&setlang=zh-cn"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+    timeout = aiohttp.ClientTimeout(total=6)
+    if dispatcher.client.session:
+        session = dispatcher.client.session
+        async with session.get(url, headers=headers, timeout=timeout) as resp:
+            if resp.status == 200:
+                html = await resp.text()
+                value = _parse_bing_results(html, query)
+                if value:
+                    log.info("Web search via Bing fallback: %s", query[:30])
+                return value
+    else:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, headers=headers, timeout=timeout) as resp:
+                if resp.status == 200:
+                    html = await resp.text()
+                    value = _parse_bing_results(html, query)
+                    if value:
+                        log.info("Web search via Bing fallback: %s", query[:30])
+                    return value
     return ""
 def _parse_bing_results(html, query):
     """Parse Bing HTML search results with multi-layer fallback."""
