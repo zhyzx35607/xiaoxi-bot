@@ -2,12 +2,12 @@
 import asyncio, json, logging, os, random, re, time
 import aiohttp
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-from .permission import (
+from ..permission import (
     get_user_level, get_bot_role, get_group_config,
     add_master, remove_master, list_masters,
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN
 )
-from .utils import atomic_write_json
+from ..utils import atomic_write_json
 log = logging.getLogger("qqbot")
 CONFIG_PATH = os.path.join(_ROOT, "config.json")
 def _load():
@@ -141,11 +141,11 @@ def register_all(d):
 # ==================== UAPIS FUN COMMANDS ====================
 async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
     """/热榜 [平台] — real hot board via uapis.cn."""
-    from .scheduler import BOARD_NAMES, format_hotboard, ai_hotboard_summary
+    from ..scheduler import BOARD_NAMES, format_hotboard, ai_hotboard_summary
     alias = {v: k for k, v in BOARD_NAMES.items()}
     board = (args.strip().lower() or "weibo")
     board = alias.get(board, board)
-    from . import uapi as _uapi
+    from .. import uapi as _uapi
     if not _uapi.credits_available(d.config, "user"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
@@ -161,7 +161,7 @@ async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
 
 async def cmd_saying(d, group_id, user_id, args, role, sender_card, message):
     """/一言 — random quote via uapis.cn."""
-    from . import uapi as _uapi
+    from .. import uapi as _uapi
     if not _uapi.credits_available(d.config, "user"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
@@ -177,7 +177,7 @@ async def cmd_saying(d, group_id, user_id, args, role, sender_card, message):
 
 async def cmd_answerbook(d, group_id, user_id, args, role, sender_card, message):
     """/答案之书 [问题] — answer book via uapis.cn."""
-    from . import uapi as _uapi
+    from .. import uapi as _uapi
     if not _uapi.credits_available(d.config, "user"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
@@ -193,7 +193,7 @@ async def cmd_answerbook(d, group_id, user_id, args, role, sender_card, message)
 
 async def _send_uapi_image(d, group_id, user_id, path, params, label):
     """Download a uapis.cn image endpoint to tmp and send it (bounded)."""
-    from . import uapi as _uapi
+    from .. import uapi as _uapi
     if not _uapi.credits_available(d.config, "user"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
@@ -233,7 +233,7 @@ async def cmd_bing_wallpaper(d, group_id, user_id, args, role, sender_card, mess
 
 async def cmd_epic_free(d, group_id, user_id, args, role, sender_card, message):
     """/epic免费 — Epic free games via uapis.cn."""
-    from . import uapi as _uapi
+    from .. import uapi as _uapi
     if not _uapi.credits_available(d.config, "user"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
@@ -325,7 +325,7 @@ async def cmd_touchgal_switch(d, group_id, user_id, args, role, sender_card, mes
 
 
 async def cmd_touchgal(d, group_id, user_id, args, role, sender_card, message):
-    from .touchgal import _settings, parse_command_query, search_and_format
+    from ..touchgal import _settings, parse_command_query, search_and_format
 
     query = args.strip()
     if query.lower() in ("status", "状态"):
@@ -407,7 +407,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
         _save(cfg)
         d.config = cfg
         # Prime seen-list + watermark so historical uploads never flood
-        from .bilibili import prime_push_state
+        from ..bilibili import prime_push_state
         nickname = ""
         try:
             videos = await prime_push_state(d, target_group, mid)
@@ -445,7 +445,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
 
 async def cmd_uapi_status(d, group_id, user_id, args, role, sender_card, message):
     """/积分 — show uapis.cn credit budget usage."""
-    from . import uapi as _uapi
+    from .. import uapi as _uapi
     info = _uapi.credits_remaining(d.config)
     lines = [
         "【uapis 积分额度】",
@@ -552,7 +552,7 @@ async def cmd_image_description(d, group_id, user_id, args, role, sender_card, m
         await d._reply(group_id, user_id, "请发送图片时带 /图片描述，或者回复图片使用")
         return
     data = image_seg.get("data", {})
-    from .ai import describe_image
+    from ..ai import describe_image
     desc = await describe_image(d, group_id, data.get("file", ""), data.get("sub_type", "0"), data.get("summary", ""))
     await d._reply(group_id, user_id, desc or "没有识别出图片内容")
 async def cmd_message_reaction(d, group_id, user_id, args, role, sender_card, message):
@@ -867,7 +867,7 @@ async def cmd_weather(d, group_id, user_id, args, role, sender_card, message):
     if not city:
         await d._reply(group_id, user_id, "这样用：/天气 城市名，比如 /天气 杭州")
         return
-    from . import uapi as _uapi
+    from .. import uapi as _uapi
     data = None
     if _uapi.credits_available(d.config, "user"):
         data = await _uapi.uapi_get(d, "/misc/weather",
@@ -882,7 +882,7 @@ async def cmd_weather(d, group_id, user_id, args, role, sender_card, message):
             data.get("report_time", ""),
         )
     else:
-        from .ai import deepseek_chat
+        from ..ai import deepseek_chat
         reply = await deepseek_chat(d, "查询" + city + "今天天气，给出温度、天气状况、穿衣建议。简短一句话。")
     await d._reply(group_id, user_id, reply)
 # ==================== TRANSLATE ====================
@@ -903,7 +903,7 @@ async def cmd_translate(d, group_id, user_id, args, role, sender_card, message):
     except Exception:
         pass
     # Fallback to DeepSeek
-    from .ai import deepseek_chat
+    from ..ai import deepseek_chat
     reply = await deepseek_chat(d, "请将以下文本翻译成中文，只给出翻译结果：" + text)
     await d._reply(group_id, user_id, reply)
 # ==================== CALC ====================
@@ -965,7 +965,7 @@ async def cmd_fortune(d, group_id, user_id, args, role, sender_card, message):
         return
     d._daily_fortunes[key] = True
     d.save_runtime_state(force=True)
-    from .ai import deepseek_chat
+    from ..ai import deepseek_chat
     prompt = ("请为星座运势生成一段今日运势，包含综合运势、爱情运势、工作/学业运，"
               "每项一句话，语气像普通群友，简短4-5行即可。")
     reply = await deepseek_chat(d, prompt)
@@ -1015,7 +1015,7 @@ async def cmd_ocr(d, group_id, user_id, args, role, sender_card, message):
     if result.get("status") != "ok":
         await d._reply(group_id, user_id, "识别失败：" + str(result.get("msg") or result.get("wording") or result)[:200])
         return
-    from .media import _extract_ocr_text
+    from ..media import _extract_ocr_text
     text = _extract_ocr_text(result.get("data"))
     await d._reply(group_id, user_id, text or "没识别出文字")
 async def cmd_forward_summary(d, group_id, user_id, args, role, sender_card, message):
@@ -1032,9 +1032,9 @@ async def cmd_forward_summary(d, group_id, user_id, args, role, sender_card, mes
     if not forward_seg:
         await d._reply(group_id, user_id, "要摘要合并转发的话，回复那条转发消息再发 /转发摘要")
         return
-    from .media import describe_forward
+    from ..media import describe_forward
     text = await describe_forward(d, forward_seg)
-    from .ai import deepseek_chat
+    from ..ai import deepseek_chat
     reply = await deepseek_chat(d, "请把下面这段合并转发内容总结成3-5行，保留关键人物、结论和争议点：\n\n" + text)
     await d._reply(group_id, user_id, reply)
 async def cmd_group_files(d, group_id, user_id, args, role, sender_card, message):
@@ -1179,7 +1179,7 @@ async def cmd_approve_request(d, group_id, user_id, args, role, sender_card, mes
     if not flag:
         await d._reply(group_id, user_id, "这样用：/approve flag")
         return
-    from .request_handler import approve_request
+    from ..request_handler import approve_request
     ok, msg = await approve_request(d, flag, True, "")
     await d._reply(group_id, user_id, msg if ok else "处理失败：" + msg)
 async def cmd_reject_request(d, group_id, user_id, args, role, sender_card, message):
@@ -1188,7 +1188,7 @@ async def cmd_reject_request(d, group_id, user_id, args, role, sender_card, mess
         await d._reply(group_id, user_id, "这样用：/reject flag 原因")
         return
     reason = parts[1] if len(parts) > 1 else "不通过"
-    from .request_handler import approve_request
+    from ..request_handler import approve_request
     ok, msg = await approve_request(d, parts[0], False, reason)
     await d._reply(group_id, user_id, msg if ok else "处理失败：" + msg)
 async def cmd_health(d, group_id, user_id, args, role, sender_card, message):
@@ -1226,13 +1226,13 @@ async def cmd_health(d, group_id, user_id, args, role, sender_card, message):
         lines.append("本群: {} bot身份: {}".format("开启" if gcfg.get("enabled") else "关闭", bot_role))
     if user_id == d.config.get("bot_owner"):
         try:
-            from .request_handler import load_pending_requests
+            from ..request_handler import load_pending_requests
             lines.append("待处理申请: {}".format(len(load_pending_requests())))
         except Exception:
             pass
     await d._reply(group_id, user_id, "\n".join(lines))
 async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
-    from .security import security_config
+    from ..security import security_config
     sec = security_config(d, group_id)
     sub = args.strip().lower()
     if not sub or sub in ("status", "状态"):
@@ -1246,7 +1246,7 @@ async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, "\n".join(lines))
         return
     if sub.startswith("log") or sub.startswith("日志"):
-        from .security import format_security_events
+        from ..security import format_security_events
         parts = sub.split()
         limit = 10
         if len(parts) >= 2:
@@ -1448,7 +1448,7 @@ async def cmd_special_title(d, group_id, user_id, args, role, sender_card, messa
         except Exception:
             pass
     if result.get("status") == "ok":
-        from .notice_handler import mark_title_set_by_bot
+        from ..notice_handler import mark_title_set_by_bot
         mark_title_set_by_bot(group_id, target, title)
         await d._reply(group_id, user_id, "头衔设好了" if title else "头衔清掉了")
     else:
@@ -1484,7 +1484,7 @@ async def cmd_my_title(d, group_id, user_id, args, role, sender_card, message):
         except Exception:
             pass
     if result.get("status") == "ok":
-        from .notice_handler import mark_title_set_by_bot
+        from ..notice_handler import mark_title_set_by_bot
         mark_title_set_by_bot(group_id, user_id, title)
         await d._reply(group_id, user_id, "搞定，你的头衔现在是「" + title + "」了")
     else:
@@ -1689,7 +1689,7 @@ async def cmd_clear_ai(d, group_id, user_id, args, role, sender_card, message):
     cleared = []
     for gid in target_groups:
         # 1. Clear AI chat memory
-        from .ai import clear_group_memory
+        from ..ai import clear_group_memory
         clear_group_memory(d, gid)
         # 2. Clear stickers
         import os as _os3
@@ -1698,7 +1698,7 @@ async def cmd_clear_ai(d, group_id, user_id, args, role, sender_card, message):
         if _os3.path.exists(sticker_path):
             _os3.remove(sticker_path)
         # 3. Clear blacklist entries for this group
-        from .guard import load_blacklist, save_blacklist
+        from ..guard import load_blacklist, save_blacklist
         bl = load_blacklist()
         prefix = f"{gid}_"
         removed = [k for k in bl if k.startswith(prefix)]
@@ -1708,7 +1708,7 @@ async def cmd_clear_ai(d, group_id, user_id, args, role, sender_card, message):
             save_blacklist(bl)
         # 4. Clear R18 warnings for this group
         try:
-            from .guard import load_warnings, save_warnings
+            from ..guard import load_warnings, save_warnings
             w = load_warnings()
             removed_w = [k for k in w if k.startswith(prefix)]
             for k in removed_w:
@@ -1920,7 +1920,7 @@ async def handle_music_search(d, group_id, user_id, raw_text, sender_card):
                 return True
         except Exception as e:
             log.error("Music parse error: %s", e)
-    from .ai import deepseek_chat
+    from ..ai import deepseek_chat
     reply = await deepseek_chat(d, "用户想点歌「" + keyword + "」，请用1行推荐一首歌（格式：推荐「歌名 - 歌手」）。不确定就诚实说。")
     await d.client.send_group_msg(group_id, reply)
     return True
@@ -2112,7 +2112,7 @@ async def cmd_set_group_avatar(d, group_id, user_id, args, role, sender_card, me
         await d._reply(group_id, user_id, "设置失败：" + str(err)[:200])
 # ==================== SYSMSG (系统消息) ====================
 async def cmd_sysmsg(d, group_id, user_id, args, role, sender_card, message):
-    from .request_handler import format_pending_requests
+    from ..request_handler import format_pending_requests
     local_text = format_pending_requests(limit=10)
     r = await d.client.get_group_system_msg()
     if r.get("status") != "ok":
@@ -2176,7 +2176,7 @@ async def cmd_generate_image(d, group_id, user_id, args, role, sender_card, mess
     if not text:
         await d._reply(group_id, user_id, "这样用：/生图 提示词\n例：/生图 一只在草地上跑的橘猫")
         return
-    from .ai import generate_image
+    from ..ai import generate_image
     url, err = await generate_image(d, text)
     if url:
         # Send as image segment

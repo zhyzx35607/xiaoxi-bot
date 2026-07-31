@@ -317,6 +317,15 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(legacy_notice, handle_notice)
         self.assertIs(legacy_request, handle_request)
 
+    def test_commands_package_preserves_registration_and_domain_imports(self):
+        from bot.commands import register_all as legacy_register_all
+        from bot.commands.admin import cmd_my_title
+        from bot.commands.registry import register_all
+        from bot.commands.runtime import cmd_my_title as runtime_cmd_my_title
+
+        self.assertIs(legacy_register_all, register_all)
+        self.assertIs(cmd_my_title, runtime_cmd_my_title)
+
     def test_structured_at_uses_real_segment_without_duplicate_text(self):
         from bot.ai import _build_group_reply_segments, _prepare_group_reply
 
