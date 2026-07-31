@@ -1,49 +1,65 @@
 # QQ Bot Architecture
 
-## Migration boundary
+## Runtime entry
 
-The bot is refactored in compatibility-preserving stages. Runtime behavior,
-configuration paths, data files, logs, environment variables, and systemd
-entrypoints remain unchanged during migration.
+`main.py` remains the production entrypoint. It configures logging through
+`app.logging_setup`, then delegates startup and shutdown to `app.bootstrap`.
+Configuration loading, recovery, migration, and environment overrides live in
+`app.config`.
 
-The AI implementation is split into focused modules:
+## Package boundaries
 
 ```text
-bot/ai/
-??? __init__.py   compatibility facade for the historical bot.ai import
-??? runtime.py    AI conversation orchestration only
-??? providers.py  provider failover, status, vision, and image generation
-??? prompts.py    persona, timing, and system prompt construction
-??? reply.py      reply tags, mention resolution, and OneBot segments
-??? memory.py     working, user, and long-term memory persistence
-??? stickers.py   sticker collection, analysis, and inventory
-??? search.py     UAPI search and Bing fallback
-??? tools.py      tool gating and multi-round tool execution
+app/
+??? bootstrap.py       process lifecycle
+??? config.py          config loading, migration, env overrides
+??? logging_setup.py   bot.log and chat.log setup
+
+bot/
+??? ai/                prompts, providers, reply parsing, memory, stickers, search, tools
+??? commands/          registry plus admin/moderation/query/media/fun/system domains
+??? events/            context gates, routing, messages, notices, requests
+??? transport/         OneBot WebSocket, actions, and message segments
+??? integrations/      Bilibili, TouchGal, and UAPI implementations
+??? services/          scheduler, delayed replies, member cache, health/RSS guard
+??? storage/           atomic JSON persistence
+??? dispatcher.py      state owner and external coordination facade
 ```
 
-Existing imports such as `from bot.ai import handle_ai_chat` continue to work.
-New code should import the narrowest module that owns the behavior.
+Legacy modules such as `bot.client`, `bot.bilibili`, `bot.scheduler`,
+`bot.touchgal`, and `bot.uapi` are compatibility proxies. Existing public
+imports remain valid while canonical code uses the focused packages.
 
-Other established package boundaries:
+## Stable public interfaces
 
-- `bot/transport/`: OneBot WebSocket, message segments, and actions.
-- `bot/events/`: normalized event routing and event handlers.
-- `bot/commands/`: command registration and domain modules.
-- `bot/services/`: delayed replies, member cache, scheduler, and health.
-- `bot/integrations/`: Bilibili, TouchGal, UAPI, and NapCat adapters.
-- `bot/storage/`: JSON state and persistence helpers.
-- `app/`: configuration, logging, and process bootstrap.
+```python
+from bot.ai import handle_ai_chat
+from bot.commands import register_all
+from bot.dispatcher import Dispatcher
+from bot.client import OneBotClient
+```
 
-## Compatibility rules
+The startup and runtime paths remain unchanged:
 
-- Keep `main.py`, `/opt/qqbot`, `config.json`, `data/`, and systemd paths stable.
-- Keep `bot.ai`, `bot.commands`, `bot.dispatcher`, and `bot.client` importable.
-- Do not add third-party dependencies during structural migration.
-- Separate behavior fixes from refactor commits.
-- Run the full unittest suite before each deployment.
+- `main.py`
+- `/opt/qqbot`
+- `/etc/qqbot.env`
+- `config.json`
+- `data/`
+- `qqbot.service`
 
-## Deployment rule
+## Behavior-freeze rules
 
-Each migration stage is a separate Git commit. Before deployment, create a
-server backup, run the server virtual-environment tests, restart only the
-affected service, verify OneBot connectivity, and retain a rollback target.
+- Structural changes must not alter prompts, permissions, command behavior,
+  message segments, configuration formats, or JSON data formats.
+- New code imports the narrowest canonical module.
+- Old import paths are removed only after a separately approved compatibility
+  break; the current architecture intentionally retains them.
+- No third-party dependency is added for structural refactoring.
+- Every stage passes compile, full unittest, import compatibility, data-path,
+  service startup, OneBot connection, Git cleanliness, and log checks.
+
+## Deployment
+
+See `docs/deployment.md` for the staged upload, isolated server test, restart,
+verification, and rollback procedure.
