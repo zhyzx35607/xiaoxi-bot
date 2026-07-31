@@ -3,7 +3,13 @@ import asyncio, json, logging, os, random, re, time, base64
 from collections import deque
 from datetime import datetime, timezone, timedelta
 import aiohttp, urllib.parse
-from .utils import atomic_write_json
+from ..utils import atomic_write_json
+from .reply import (
+    _build_group_reply_segments,
+    _parse_reply_actions,
+    _parse_reply_tags,
+    _prepare_group_reply,
+)
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MEMORY_DIR = os.path.join(_ROOT, "data", "memories")
@@ -251,7 +257,7 @@ def _cleanup_replies_by_user():
         log.debug("Cleaned up %d stale reply-tracking entries", len(stale))
 def _save_memory(group_id, memory, config=None, session=None):
     """Save working memory. Caps at 20, triggers compression to long-term."""
-    from .memory import sanitize_for_memory
+    from ..memory import sanitize_for_memory
     now = time.time()
     for e in memory:
         if "ts" not in e:
@@ -315,7 +321,7 @@ def _load_user_memory(group_id, user_id):
             pass
     return []
 def _save_user_memory(group_id, user_id, memory, config=None, session=None, max_entries=None):
-    from .memory import sanitize_for_memory
+    from ..memory import sanitize_for_memory
     now = time.time()
     for e in memory:
         if "ts" not in e:
@@ -908,7 +914,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     bot_role = ""
     if group_id:
         try:
-            from .permission import get_bot_role
+            from ..permission import get_bot_role
             _, role_display = await get_bot_role(dispatcher, group_id)
             if role_display != "member":
                 bot_role = f"你是本群的{role_display}，作为管理员要以身作则友好交流。"
@@ -1127,7 +1133,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         if user_id == owner or user_id == bot_qq:
             log.info("Skipping R18 escalation for bot owner/self")
         else:
-            from .guard import add_warning, get_warning_count, add_blacklist
+            from ..guard import add_warning, get_warning_count, add_blacklist
             gid = group_id if group_id else 0
             add_warning(gid, user_id)
             warn_count = get_warning_count(gid, user_id)
@@ -1279,7 +1285,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     if user_id:
         _record_reply(user_id, clean_reply if clean_reply else reply)
     # Learn from conversation & save memory
-    from .memory import extract_user_info
+    from ..memory import extract_user_info
     user_msg_text = original_clean_msg or clean_msg or raw_message
     learned = extract_user_info(user_msg_text)
     now = time.time()
@@ -1486,75 +1492,10 @@ async def _chat_with_tools(dispatcher, messages, tools, group_id, user_id,
         return final
 
 # ========== REPLY PARSING ==========
-def _parse_reply_actions(reply, member_map):
-    """Parse AI reply for @mentions and quote markers.
-    member_map: dict of {nickname: qq_number}
-    Returns: (clean_reply, at_qqs, quote_text)
-    """
-    import re as _re
-    at_qqs = []
-    quote_text = None
-    
-    # Extract 「quoted text」
-    quote_match = _re.search(r'「([^」]+)」', reply)
-    if quote_match:
-        quote_text = quote_match.group(1)
-        reply = reply.replace(quote_match.group(0), '')
-    
-    # Backward compatibility for old prompts that emitted plain @nickname.
-    # Match known nicknames exactly instead of consuming adjacent message text.
-    nicknames = sorted((str(name) for name in member_map if name),
-                       key=len, reverse=True)
-    if nicknames:
-        nickname_pattern = '|'.join(_re.escape(nick) for nick in nicknames)
-        at_pattern = _re.compile(
-            r'@(' + nickname_pattern + r')(?=$|[\s，。！？、,.!?:：；;）)\]}])')
-
-        def replace_known_mention(match):
-            nick = match.group(1)
-            at_qqs.append(member_map[nick])
-            return ''
-
-        reply = at_pattern.sub(replace_known_mention, reply)
-    # Never emit a fake textual mention when a natural @ target is ambiguous.
-    reply = _re.sub(r'(?<!\S)@(?=\S)', '', reply)
-    
-    # Clean up extra whitespace
-    reply = _re.sub(r'\s+', ' ', reply).strip()
-    
-    return reply, at_qqs, quote_text
 
 
-def _build_group_reply_segments(text, at_qqs=()):
-    """Build OneBot segments with visible spacing after real mentions."""
-    segments = []
-    for qq in list(at_qqs or ())[:2]:
-        segments.append({"type": "at", "data": {"qq": str(qq)}})
-        segments.append({"type": "text", "data": {"text": " "}})
-    if text:
-        segments.append({"type": "text", "data": {"text": str(text)}})
-    return segments
 
 
-def _prepare_group_reply(reply, member_map, *, user_id=0, message_id=0):
-    """Resolve AI reply actions into text and safe OneBot targets."""
-    clean_reply, tagged_actions = _parse_reply_tags(reply, member_map)
-    at_qqs = [int(action["qq"]) for action in tagged_actions
-              if action.get("type") == "at"
-              and str(action.get("qq", "")).isdigit()]
-    wants_reply = any(action.get("type") == "reply"
-                      for action in tagged_actions)
-    poke_targets = [action.get("target") for action in tagged_actions
-                    if action.get("type") == "poke"]
-    clean_reply, legacy_at, quote_text = _parse_reply_actions(
-        clean_reply, member_map)
-    at_qqs.extend(legacy_at)
-    at_qqs = list(dict.fromkeys(at_qqs))[:2]
-    if wants_reply and message_id:
-        quote_text = quote_text or "reply"
-    if quote_text and message_id and user_id:
-        at_qqs = [qq for qq in at_qqs if str(qq) != str(user_id)]
-    return clean_reply, at_qqs, quote_text, poke_targets
 # ========== IMAGE DESCRIPTION (识图) ==========
 async def describe_image(dispatcher, group_id, file_id, sub_type, summary=""):
     """Describe image content. Vision API (Qwen) first, QQ summary as fallback."""
@@ -1992,40 +1933,3 @@ def _post_process_reply(reply):
         reply = reply[:500] + "..."
     return reply
 # ========== REPLY TAG PARSER (STICKER/REPLY/POKE/AT) ==========
-def _parse_reply_tags(reply, member_map):
-    """Parse feature tags from AI reply text.
-    member_map: dict of {nickname: qq_number} for @ resolution.
-    Returns:
-        clean_reply (str): reply with tags stripped
-        actions (list): list of action dicts to execute
-    """
-    import re as _re_tag
-    actions = []
-    # 1. [STICKER:emotion] — already handled elsewhere
-    reply = _re_tag.sub(r'\[STICKER:[^\]]+\]', '', reply)
-    # 2. [POKE:nickname]
-    _poke_match = _re_tag.search(r'\[POKE:([^\]]+)\]', reply)
-    if _poke_match:
-        nick = _poke_match.group(1).strip()
-        qq = member_map.get(nick, 0)
-        if qq:
-            actions.append({"type": "poke", "target": qq})
-        reply = reply.replace(_poke_match.group(0), '').strip()
-    # 3. [AT:nickname] — resolve nickname to QQ
-    while True:
-        _at_match = _re_tag.search(r'\[AT:([^\]]+)\]', reply)
-        if not _at_match:
-            break
-        nick = _at_match.group(1).strip()
-        qq = member_map.get(nick, 0)
-        if qq:
-            actions.append({"type": "at", "qq": str(qq)})
-        replacement = '' if qq else nick
-        reply = reply.replace(_at_match.group(0), replacement, 1)
-    # 4. [REPLY] — flag to reply to the original message
-    if '[REPLY]' in reply:
-        actions.append({"type": "reply"})
-        reply = reply.replace('[REPLY]', '').strip()
-    # 5. Clean up whitespace
-    reply = _re_tag.sub(r'\s+', ' ', reply).strip()
-    return reply, actions

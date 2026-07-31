@@ -291,6 +291,14 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_split_reply_lines("只有一句"), ["只有一句"])
         self.assertEqual(_split_reply_lines("a\nb\nc\nd", max_parts=3), ["a", "b", "c d"])
 
+    def test_ai_package_preserves_legacy_import_surface(self):
+        import bot.ai as ai_package
+        from bot.ai import reply, runtime
+
+        self.assertIs(ai_package.handle_ai_chat, runtime.handle_ai_chat)
+        self.assertIs(ai_package._parse_reply_tags, reply._parse_reply_tags)
+        self.assertIs(ai_package._prepare_group_reply, reply._prepare_group_reply)
+
     def test_structured_at_uses_real_segment_without_duplicate_text(self):
         from bot.ai import _build_group_reply_segments, _prepare_group_reply
 

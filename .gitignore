@@ -16,6 +16,9 @@ config.json
 config.json.*
 data/
 docs/
+!docs/
+docs/*
+!docs/architecture.md
 
 CLAUDE.md
 .claude/
