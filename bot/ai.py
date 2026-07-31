@@ -1226,19 +1226,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 for nick, qq in cache.items():
                     if nick and qq:
                         member_map[nick] = qq
-            clean_reply, tagged_actions = _parse_reply_tags(reply, member_map)
-            at_qqs = [int(a["qq"]) for a in tagged_actions
-                      if a.get("type") == "at" and str(a.get("qq", "")).isdigit()]
-            wants_reply = any(a.get("type") == "reply" for a in tagged_actions)
-            poke_targets = [a.get("target") for a in tagged_actions if a.get("type") == "poke"]
-            # Backward-compatible natural @nickname and quoted-text parsing.
-            clean_reply, legacy_at, quote_text = _parse_reply_actions(clean_reply, member_map)
-            at_qqs.extend(legacy_at)
-            at_qqs = list(dict.fromkeys(at_qqs))[:2]
-            if wants_reply and message_id:
-                quote_text = quote_text or "reply"
-            if not clean_reply:
-                clean_reply = reply
+            clean_reply, at_qqs, quote_text, poke_targets = _prepare_group_reply(
+                reply, member_map, user_id=user_id, message_id=message_id)
             # Typing delay proportional to reply length
             await asyncio.sleep(_typing_delay_secs(clean_reply))
             segments = _split_reply_lines(clean_reply) or [clean_reply]
@@ -1246,13 +1235,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 seg_text = seg_text.strip()
                 if not seg_text:
                     continue
-                _segs = []
-                if i == 0 and at_qqs:
-                    for qq in at_qqs[:2]:
-                        _segs.append({"type": "at", "data": {"qq": str(qq)}})
-                    _segs.append({"type": "text", "data": {"text": seg_text}})
-                else:
-                    _segs.append({"type": "text", "data": {"text": seg_text}})
+                _segs = _build_group_reply_segments(
+                    seg_text, at_qqs if i == 0 else ())
                 if i == len(segments) - 1 and sticker_file:
                     _segs.append({"type": "image", "data": {"file": sticker_file}})
                 if quote_text and message_id and i == 0:
@@ -1517,20 +1501,60 @@ def _parse_reply_actions(reply, member_map):
         quote_text = quote_match.group(1)
         reply = reply.replace(quote_match.group(0), '')
     
-    # Extract @nickname patterns
-    at_pattern = _re.compile(r'@(\S{1,16})')
-    for m in at_pattern.finditer(reply):
-        nick = m.group(1)
-        # Remove punctuation from end of nick
-        nick = _re.sub(r'[^一-鿿\w]+$', '', nick)
-        if nick and nick in member_map:
+    # Backward compatibility for old prompts that emitted plain @nickname.
+    # Match known nicknames exactly instead of consuming adjacent message text.
+    nicknames = sorted((str(name) for name in member_map if name),
+                       key=len, reverse=True)
+    if nicknames:
+        nickname_pattern = '|'.join(_re.escape(nick) for nick in nicknames)
+        at_pattern = _re.compile(
+            r'@(' + nickname_pattern + r')(?=$|[\s，。！？、,.!?:：；;）)\]}])')
+
+        def replace_known_mention(match):
+            nick = match.group(1)
             at_qqs.append(member_map[nick])
-            reply = reply.replace(m.group(0), '', 1)
+            return ''
+
+        reply = at_pattern.sub(replace_known_mention, reply)
+    # Never emit a fake textual mention when a natural @ target is ambiguous.
+    reply = _re.sub(r'(?<!\S)@(?=\S)', '', reply)
     
     # Clean up extra whitespace
     reply = _re.sub(r'\s+', ' ', reply).strip()
     
     return reply, at_qqs, quote_text
+
+
+def _build_group_reply_segments(text, at_qqs=()):
+    """Build OneBot segments with visible spacing after real mentions."""
+    segments = []
+    for qq in list(at_qqs or ())[:2]:
+        segments.append({"type": "at", "data": {"qq": str(qq)}})
+        segments.append({"type": "text", "data": {"text": " "}})
+    if text:
+        segments.append({"type": "text", "data": {"text": str(text)}})
+    return segments
+
+
+def _prepare_group_reply(reply, member_map, *, user_id=0, message_id=0):
+    """Resolve AI reply actions into text and safe OneBot targets."""
+    clean_reply, tagged_actions = _parse_reply_tags(reply, member_map)
+    at_qqs = [int(action["qq"]) for action in tagged_actions
+              if action.get("type") == "at"
+              and str(action.get("qq", "")).isdigit()]
+    wants_reply = any(action.get("type") == "reply"
+                      for action in tagged_actions)
+    poke_targets = [action.get("target") for action in tagged_actions
+                    if action.get("type") == "poke"]
+    clean_reply, legacy_at, quote_text = _parse_reply_actions(
+        clean_reply, member_map)
+    at_qqs.extend(legacy_at)
+    at_qqs = list(dict.fromkeys(at_qqs))[:2]
+    if wants_reply and message_id:
+        quote_text = quote_text or "reply"
+    if quote_text and message_id and user_id:
+        at_qqs = [qq for qq in at_qqs if str(qq) != str(user_id)]
+    return clean_reply, at_qqs, quote_text, poke_targets
 # ========== IMAGE DESCRIPTION (识图) ==========
 async def describe_image(dispatcher, group_id, file_id, sub_type, summary=""):
     """Describe image content. Vision API (Qwen) first, QQ summary as fallback."""
@@ -1994,8 +2018,10 @@ def _parse_reply_tags(reply, member_map):
             break
         nick = _at_match.group(1).strip()
         qq = member_map.get(nick, 0)
-        actions.append({"type": "at", "qq": str(qq) if qq else nick})
-        reply = reply.replace(_at_match.group(0), '@' + nick, 1)
+        if qq:
+            actions.append({"type": "at", "qq": str(qq)})
+        replacement = '' if qq else nick
+        reply = reply.replace(_at_match.group(0), replacement, 1)
     # 4. [REPLY] — flag to reply to the original message
     if '[REPLY]' in reply:
         actions.append({"type": "reply"})

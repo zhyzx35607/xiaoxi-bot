@@ -291,6 +291,56 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_split_reply_lines("只有一句"), ["只有一句"])
         self.assertEqual(_split_reply_lines("a\nb\nc\nd", max_parts=3), ["a", "b", "c d"])
 
+    def test_structured_at_uses_real_segment_without_duplicate_text(self):
+        from bot.ai import _build_group_reply_segments, _prepare_group_reply
+
+        text, targets, quote, pokes = _prepare_group_reply(
+            "[AT:小明]你好", {"小明": 12345}, user_id=67890, message_id=99)
+        self.assertEqual(text, "你好")
+        self.assertEqual(targets, [12345])
+        self.assertIsNone(quote)
+        self.assertEqual(pokes, [])
+        self.assertEqual(_build_group_reply_segments(text, targets), [
+            {"type": "at", "data": {"qq": "12345"}},
+            {"type": "text", "data": {"text": " "}},
+            {"type": "text", "data": {"text": "你好"}},
+        ])
+
+    def test_unresolved_structured_at_degrades_without_fake_mention(self):
+        from bot.ai import _prepare_group_reply
+
+        text, targets, quote, pokes = _prepare_group_reply(
+            "[AT:陌生人]你好", {}, user_id=67890, message_id=99)
+        self.assertEqual(text, "陌生人你好")
+        self.assertEqual(targets, [])
+        self.assertNotIn("@", text)
+        self.assertIsNone(quote)
+        self.assertEqual(pokes, [])
+
+    def test_reply_to_sender_suppresses_duplicate_at(self):
+        from bot.ai import _prepare_group_reply
+
+        text, targets, quote, _ = _prepare_group_reply(
+            "[REPLY][AT:小明]收到", {"小明": 12345},
+            user_id=12345, message_id=99)
+        self.assertEqual(text, "收到")
+        self.assertEqual(targets, [])
+        self.assertEqual(quote, "reply")
+
+    def test_plain_at_requires_nickname_boundary(self):
+        from bot.ai import _parse_reply_actions
+
+        text, targets, quote = _parse_reply_actions(
+            "@小明 你好", {"小": 1, "小明": 2})
+        self.assertEqual(text, "你好")
+        self.assertEqual(targets, [2])
+        self.assertIsNone(quote)
+
+        text, targets, _ = _parse_reply_actions(
+            "@小明你好", {"小": 1, "小明": 2})
+        self.assertEqual(text, "小明你好")
+        self.assertEqual(targets, [])
+
     def test_skip_reply_signal_is_recognized(self):
         self.assertTrue("[SKIP]".strip().upper().startswith("[SKIP]"))
         self.assertTrue("[SKIP] 不想接话".strip().upper().startswith("[SKIP]"))
