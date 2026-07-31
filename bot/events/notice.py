@@ -49,7 +49,7 @@ async def handle_notice(dispatcher, event):
             log.debug("Input status notice user=%s status=%s",
                       event.get("user_id"), event.get("status_text", ""))
         elif sub == "gray_tip":
-            from .security import handle_gray_tip
+            from ..security import handle_gray_tip
             await handle_gray_tip(dispatcher, event)
         else:
             log.info("Notify event subtype=%s group=%s user=%s target=%s raw=%s",
@@ -64,7 +64,7 @@ async def _generate_welcome_text(dispatcher, nickname, sex=""):
     sex_part = "（" + sex + "）" if sex else ""
     prompt = f"新生「{nickname}」{sex_part}加入了群聊，请用一句简短（15字以内）有趣友好的话欢迎ta。自然口语化，不用emoji。直接回复内容，不用任何前缀。"
     try:
-        from .ai import _call_deepseek
+        from ..ai import _call_deepseek
         msg = [{"role": "user", "content": prompt}]
         reply = await _call_deepseek(dispatcher.config, msg, max_tokens=30, temperature=0.8,
                                       session=dispatcher.client.session)

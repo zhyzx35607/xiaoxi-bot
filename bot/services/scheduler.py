@@ -1,5 +1,5 @@
 """Compatibility access to the existing scheduler implementation."""
 
-from ..scheduler import Scheduler
+from ..scheduler import scheduler_loop
 
-__all__ = ["Scheduler"]
+__all__ = ["scheduler_loop"]

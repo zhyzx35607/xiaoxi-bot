@@ -315,13 +315,25 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(legacy_text_segment("hello"), text_segment("hello"))
 
     def test_events_package_preserves_legacy_import_surface(self):
+        from bot.dispatcher import Dispatcher
+        from bot.events.message import GroupMessageMixin, PrivateMessageMixin
         from bot.events.notice import handle_notice
         from bot.events.request import handle_request
+        from bot.events.router import RouterMixin
+        from bot.services.delayed_reply import DelayedReplyServiceMixin
+        from bot.services.health import HealthServiceMixin
+        from bot.services.member_cache import MemberCacheMixin
         from bot.notice_handler import handle_notice as legacy_notice
         from bot.request_handler import handle_request as legacy_request
 
         self.assertIs(legacy_notice, handle_notice)
         self.assertIs(legacy_request, handle_request)
+        self.assertIs(Dispatcher.dispatch, RouterMixin.dispatch)
+        self.assertIs(Dispatcher._handle_group_message, GroupMessageMixin._handle_group_message)
+        self.assertIs(Dispatcher._handle_private_ai_chat, PrivateMessageMixin._handle_private_ai_chat)
+        self.assertIs(Dispatcher._trigger_delayed_reply, DelayedReplyServiceMixin._trigger_delayed_reply)
+        self.assertIs(Dispatcher.start_rss_guard, HealthServiceMixin.start_rss_guard)
+        self.assertIs(Dispatcher._refresh_member_cache, MemberCacheMixin._refresh_member_cache)
 
     def test_commands_package_preserves_registration_and_domain_imports(self):
         from bot.commands import register_all as legacy_register_all
