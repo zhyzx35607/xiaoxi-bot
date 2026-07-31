@@ -326,6 +326,15 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(legacy_register_all, register_all)
         self.assertIs(cmd_my_title, runtime_cmd_my_title)
 
+    def test_infrastructure_boundaries_preserve_legacy_objects(self):
+        from bot import bilibili
+        from bot.integrations import bilibili as integration_bilibili
+        from bot.storage import atomic_write_json
+        from bot.utils import atomic_write_json as legacy_atomic_write_json
+
+        self.assertIs(integration_bilibili.poll_once, bilibili.poll_once)
+        self.assertIs(atomic_write_json, legacy_atomic_write_json)
+
     def test_structured_at_uses_real_segment_without_duplicate_text(self):
         from bot.ai import _build_group_reply_segments, _prepare_group_reply
 

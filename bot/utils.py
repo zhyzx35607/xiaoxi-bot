@@ -1,27 +1,5 @@
-"""Small filesystem helpers."""
-import json
-import os
-import tempfile
+"""Compatibility wrapper for storage utilities."""
 
+from .storage.json_store import atomic_write_json
 
-def atomic_write_json(path, data, *, indent=None):
-    directory = os.path.dirname(path) or "."
-    os.makedirs(directory, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=directory)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            os.chmod(tmp_path, 0o600)
-            json.dump(data, f, ensure_ascii=False, indent=indent)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+__all__ = ["atomic_write_json"]
