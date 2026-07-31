@@ -128,6 +128,11 @@ def register_all(d):
                admin_only=True)
     d.register("b站解析", cmd_bili_parse_switch, "B站视频自动解析开关 /b站解析 on/off",
                admin_only=True)
+    d.register("gal", cmd_touchgal, "查询Galgame资源页 /gal 作品名")
+    d.register("galgame", cmd_touchgal, "查询Galgame资源页 /galgame 作品名")
+    d.register("游戏资源", cmd_touchgal, "查询Galgame资源页 /游戏资源 作品名")
+    d.register("gal资源", cmd_touchgal_switch, "Galgame资源自动回复开关 /gal资源 on/off",
+               admin_only=True)
     # master commands
     d.register("b站推送", cmd_bili_push, "盯UP主新投稿 /b站推送 add/del/list",
                bot_owner=True)
@@ -311,6 +316,44 @@ async def cmd_bili_parse_switch(d, group_id, user_id, args, role, sender_card, m
     """/b站解析 on|off — toggle auto B站 video parse for this group."""
     await _toggle_group_feature(d, group_id, user_id, args,
                                 "bili_parse", "B站视频自动解析", "b站解析")
+
+
+async def cmd_touchgal_switch(d, group_id, user_id, args, role, sender_card, message):
+    """/gal资源 on|off — toggle automatic TouchGal replies for this group."""
+    await _toggle_group_feature(d, group_id, user_id, args,
+                                "galgame_resource", "Galgame资源自动回复", "gal资源")
+
+
+async def cmd_touchgal(d, group_id, user_id, args, role, sender_card, message):
+    from .touchgal import _settings, parse_command_query, search_and_format
+
+    query = args.strip()
+    if query.lower() in ("status", "状态"):
+        settings = _settings(d)
+        await d._reply(
+            group_id, user_id,
+            "TouchGal：{}\nToken：{}\n自动回复：{}\n用法：/gal 作品名 [平台]"
+            .format(
+                "已启用" if settings["enabled"] else "已关闭",
+                "已配置" if settings["token"] else "未配置",
+                "已开启" if settings["auto_reply"] else "已关闭",
+            ),
+        )
+        return
+    if not query:
+        await d._reply(
+            group_id, user_id,
+            "用法：/gal 作品名 [平台]\n例如：/gal 千恋万花 安卓\n查看状态：/gal status",
+        )
+        return
+    parsed = parse_command_query(query)
+    if not parsed["title"]:
+        await d._reply(group_id, user_id, "没有识别到作品名，请使用 /gal 作品名 [平台]")
+        return
+    result = await search_and_format(
+        d, parsed["title"], platform=parsed["platform"], explicit=True,
+    )
+    await d._reply(group_id, user_id, result.get("text") or "TouchGal 查询失败")
 
 
 def _parse_mid(text):
@@ -648,6 +691,10 @@ COMMAND_DETAILS = {
     "禁言列表": "/禁言列表\n看本群正在被禁言的人，需要 Bot 是管理。",
     "点赞信息": "/点赞信息 [@人]\n看 TA 资料卡的点赞情况。",
     "health": "/health\n看 Bot 运行状态：内存、连接、AI 供应商健康度。",
+    "gal": "/gal 作品名\n查询 TouchGal 的 Galgame 条目、平台和官方资源详情页。不会返回网盘直链。",
+    "galgame": "/galgame 作品名\n查询 TouchGal 的 Galgame 条目、平台和官方资源详情页。",
+    "游戏资源": "/游戏资源 作品名\n查询 TouchGal 的 Galgame 条目、平台和官方资源详情页。",
+    "gal资源": "/gal资源 on/off\n开关本群 Galgame 资源自动回复。需要管理权限。",
     "allban": "/allban on 或 /allban off\n全员禁言开关。需要管理权限，且 Bot 是管理或群主。",
     "精华": "回复某条消息发 /精华\n把那条消息设为精华，再设一次取消。需要管理权限。",
     "welcome": "/welcome on 或 /welcome off — 开关入群欢迎\n/welcome 内容 — 自定义欢迎语，{nickname} 代表新人\n需要管理权限。",
@@ -722,6 +769,7 @@ async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
     lines.append("  /精华列表 /群荣誉     群内容")
     lines.append("  /禁言列表 /点赞信息   其他查询")
     lines.append("  /health               运行状态")
+    lines.append("  /gal <作品名>         查 TouchGal Galgame 详情页")
     # ---- admin tier (QQ admin/group owner/master/super) ----
     if caller_level >= LEVEL_ADMIN and bot_role_str in ("admin", "owner"):
         lines.append("")
@@ -738,6 +786,7 @@ async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
         lines.append("  /acg图 on/off         每日ACG图开关")
         lines.append("  /热榜推送 on/off      每日热榜开关")
         lines.append("  /b站解析 on/off       B站解析开关")
+        lines.append("  /gal资源 on/off       Galgame资源自动回复开关")
         lines.append("  /安全 status/log      安全功能")
         if bot_role_str == "owner":
             lines.append("  /title @人 头衔       设专属头衔")

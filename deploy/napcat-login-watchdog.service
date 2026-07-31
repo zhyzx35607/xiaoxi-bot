@@ -1,0 +1,11 @@
+[Unit]
+Description=NapCat QQ login watchdog
+After=network-online.target napcat.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=NAPCAT_WATCHDOG_PORT=3001
+ExecStart=/opt/qqbot/venv/bin/python /usr/local/sbin/napcat-login-watchdog.py
+Nice=19

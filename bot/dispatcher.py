@@ -879,6 +879,15 @@ class Dispatcher:
                 except Exception as e:
                     log.warning("bili share handle failed: %s", e)
 
+        # Galgame resource request: TouchGal metadata + official detail page.
+        if feats.get("galgame_resource", True):
+            from .touchgal import handle_auto_request
+            try:
+                if await handle_auto_request(self, group_id, user_id, raw):
+                    return
+            except Exception as error:
+                log.warning("TouchGal auto request failed: %s", error)
+
         # Music search
         if feats.get("music", True):
             # Also check natural music triggers

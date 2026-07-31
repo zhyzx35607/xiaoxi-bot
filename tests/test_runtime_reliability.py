@@ -1,8 +1,10 @@
+import importlib.util
 import json
 import os
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from bot import bilibili, scheduler
@@ -34,6 +36,39 @@ class ConfigRecoveryTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "no valid last-good backup"):
                 load_config(path)
+
+    def test_atomic_json_write_keeps_file_private(self):
+        from bot.utils import atomic_write_json
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "nested", "config.json")
+            atomic_write_json(path, {"safe": True})
+            self.assertEqual(json.loads(Path(path).read_text(encoding="utf-8")), {"safe": True})
+            if os.name != "nt":
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+
+class NapCatWatchdogTests(unittest.TestCase):
+    def test_prefers_bot_websocket_port(self):
+        script_path = Path(__file__).parents[1] / "deploy" / "napcat-login-watchdog.py"
+        spec = importlib.util.spec_from_file_location("napcat_login_watchdog", script_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        config = {
+            "network": {
+                "websocketServers": [
+                    {"enable": True, "host": "127.0.0.1", "port": 3002, "token": "observer"},
+                    {"enable": True, "host": "127.0.0.1", "port": 3001, "token": "bot token"},
+                ]
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "onebot.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with patch.object(module, "CONFIG_PATH", path), \
+                    patch.object(module, "PREFERRED_PORT", 3001):
+                url = module.get_websocket_url()
+        self.assertEqual(url, "ws://127.0.0.1:3001?access_token=bot%20token")
 
 
 class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):

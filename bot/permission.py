@@ -181,13 +181,13 @@ def list_masters(dispatcher, group_id):
 def save_group_config(dispatcher):
     cfg = copy.deepcopy(dispatcher.config)
     # Never persist secrets to disk
-    for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "bili_sessdata"):
+    for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "bili_sessdata", "touchgal_api_token"):
         cfg.pop(secret_key, None)
     if isinstance(cfg.get("vision_api"), dict):
         cfg["vision_api"].pop("api_key", None)
     for gcfg in cfg.get("groups", {}).values():
         if isinstance(gcfg, dict):
-            for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "bili_sessdata"):
+            for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "bili_sessdata", "touchgal_api_token"):
                 gcfg.pop(secret_key, None)
             if isinstance(gcfg.get("vision_api"), dict):
                 gcfg["vision_api"].pop("api_key", None)

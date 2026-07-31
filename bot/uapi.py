@@ -45,6 +45,18 @@ CACHE_TTL = 600
 
 _cache = {}   # (path, key) -> (timestamp, data)
 _state = None
+_missing_key_log_ts = {}
+_MISSING_KEY_LOG_INTERVAL = 3600
+
+
+def _log_missing_key(path):
+    now = time.monotonic()
+    last_logged = _missing_key_log_ts.get(path, 0)
+    if now - last_logged >= _MISSING_KEY_LOG_INTERVAL:
+        _missing_key_log_ts[path] = now
+        log.warning("uapi: no api key configured, skip %s", path)
+    else:
+        log.debug("uapi: no api key configured, skip %s", path)
 
 
 def _today():
@@ -196,7 +208,7 @@ async def uapi_get(dispatcher, path, params=None, kind="user", timeout=8):
         return cached
     key = _api_key(dispatcher.config)
     if not key:
-        log.warning("uapi: no api key configured, skip %s", path)
+        _log_missing_key(path)
         return None
     if not _charge(dispatcher.config, path, kind):
         log.info("uapi: budget blocked %s kind=%s", path, kind)
@@ -224,7 +236,7 @@ async def uapi_post(dispatcher, path, json_body=None, kind="user", timeout=8):
     """
     key = _api_key(dispatcher.config)
     if not key:
-        log.warning("uapi: no api key configured, skip %s", path)
+        _log_missing_key(path)
         return None
     if not _charge(dispatcher.config, path, kind):
         log.info("uapi: budget blocked %s kind=%s", path, kind)
@@ -249,7 +261,7 @@ async def uapi_get_binary(dispatcher, path, params=None, kind="user",
     """GET a binary (image) endpoint. Returns (bytes, content_type) or None."""
     key = _api_key(dispatcher.config)
     if not key:
-        log.warning("uapi: no api key configured, skip %s", path)
+        _log_missing_key(path)
         return None
     if not _charge(dispatcher.config, path, kind):
         log.info("uapi: budget blocked %s kind=%s", path, kind)
@@ -285,7 +297,7 @@ async def uapi_resolve_image_url(dispatcher, path, params=None, timeout=8):
     """
     key = _api_key(dispatcher.config)
     if not key:
-        log.warning("uapi: no api key configured, skip %s", path)
+        _log_missing_key(path)
         return None
     if not _charge(dispatcher.config, path, "user"):
         log.info("uapi: budget blocked %s kind=free", path)
@@ -316,3 +328,4 @@ def reset_state_for_test():
     global _state
     _state = None
     _cache.clear()
+    _missing_key_log_ts.clear()

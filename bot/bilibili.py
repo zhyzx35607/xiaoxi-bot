@@ -1,6 +1,6 @@
-﻿"""bot/bilibili.py - Bilibili helpers: share parsing, mp4 download, UP主 push.
+"""bot/bilibili.py - Bilibili helpers: share parsing, mp4 download, UP主 push.
 
-Design notes (low-memory server):
+Operational notes (low-memory server):
   - Video info / play URL go through B站 official anonymous APIs (free).
     uapis.cn bilibili endpoints are only a fallback (they cost credits).
   - The archives poller uses the official wbi-signed endpoint every
@@ -595,7 +595,7 @@ async def get_dynamics_feed(dispatcher):
         log.info("bili feed/all failed: code=%s", data.get("code"))
         _official_failed()
     except Exception as e:
-        log.warning("bili feed/all error: %s", e)
+        log.warning("bili feed/all error type=%s detail=%r", type(e).__name__, e)
         _official_failed()
     return []
 

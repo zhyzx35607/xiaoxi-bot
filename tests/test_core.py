@@ -518,9 +518,9 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         event = {
             "post_type": "message", "message_type": "private",
             "user_id": 333, "message_id": 1,
-            "raw_message": "????????????",
-            "message": [{"type": "text", "data": {"text": "??"}}],
-            "sender": {"nickname": "???"},
+            "raw_message": "这条私聊不应该被处理",
+            "message": [{"type": "text", "data": {"text": "你好"}}],
+            "sender": {"nickname": "路人"},
         }
         with patch("bot.dispatcher._log_chat_message") as log_mock, \
                 patch.object(dispatcher, "_handle_private_ai_chat",
@@ -541,7 +541,7 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(ai_module, "handle_ai_chat",
                           new=AsyncMock()) as ai_mock:
             await dispatcher._trigger_delayed_reply(
-                9001, 333, 3, [], "????", "???")
+                9001, 333, 3, [], "稍后再回复", "路人")
         ai_mock.assert_not_called()
 
     async def test_disabled_group_is_dropped_before_content_pipeline(self):
@@ -555,9 +555,9 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         event = {
             "post_type": "message", "message_type": "group",
             "group_id": 9001, "user_id": 333, "message_id": 2,
-            "raw_message": "@?? ?????????",
-            "message": [{"type": "text", "data": {"text": "??"}}],
-            "sender": {"nickname": "???", "role": "member"},
+            "raw_message": "@小汐 这条群消息不应该被处理",
+            "message": [{"type": "text", "data": {"text": "你好"}}],
+            "sender": {"nickname": "路人", "role": "member"},
         }
         with patch("bot.dispatcher._log_chat_message") as log_mock, \
                 patch.object(dispatcher, "_handle_group_message",
@@ -949,6 +949,22 @@ class UapiBudgetTests(unittest.TestCase):
                 self.assertFalse(uapi.credits_available(config, "auto"))
                 self.assertTrue(uapi._charge(config, "/random/image", "user"))
                 uapi.reset_state_for_test()
+
+    def test_missing_key_warning_is_rate_limited_per_endpoint(self):
+        from bot import uapi
+
+        class Stub:
+            config = {}
+
+        uapi.reset_state_for_test()
+        with patch.object(uapi.log, "warning") as warning, \
+                patch.object(uapi.log, "debug") as debug:
+            asyncio.run(uapi.uapi_get(Stub(), "/misc/weather"))
+            asyncio.run(uapi.uapi_get(Stub(), "/misc/weather"))
+            asyncio.run(uapi.uapi_get(Stub(), "/misc/hotboard"))
+        self.assertEqual(warning.call_count, 2)
+        debug.assert_called_once()
+        uapi.reset_state_for_test()
 
 
 class InteractionQuotaTests(unittest.IsolatedAsyncioTestCase):
@@ -1752,6 +1768,20 @@ class AIToolRegistryTests(unittest.TestCase):
             self.assertTrue(fn.get("description"))
             self.assertEqual(fn["parameters"].get("type"), "object")
 
+    def test_context_group_id_is_filtered_for_plain_uapi_tool(self):
+        import ai_tools
+
+        class Stub:
+            config = {}
+
+        with patch("bot.uapi.uapi_get", new=AsyncMock(return_value={"weather": "晴"})) as get:
+            result = asyncio.run(ai_tools.execute_ai_tool(
+                Stub(), "uapi_weather", {"city": "杭州"}, group_id=123,
+            ))
+        self.assertTrue(result["ok"])
+        get.assert_awaited_once()
+        self.assertEqual(get.await_args.kwargs["params"], {"city": "杭州"})
+
 
 class PlayfulBanTests(unittest.IsolatedAsyncioTestCase):
     """playful_ban hard constraints: clamp, quota, target protection, cooldown."""
@@ -2176,3 +2206,96 @@ class SearchWebFallbackTests(unittest.IsolatedAsyncioTestCase):
         # unparseable payload -> empty (caller falls back to Bing)
         self.assertEqual(_format_uapi_search_results({"foo": "bar"}), "")
         self.assertEqual(_format_uapi_search_results(None), "")
+
+
+class TouchGalBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    def test_request_parser_handles_titles_and_platforms(self):
+        from bot.touchgal import extract_resource_request, parse_command_query
+
+        request = extract_resource_request("求《千恋万花》安卓直装资源")
+        self.assertEqual(request["title"], "千恋万花")
+        self.assertEqual(request["platform"], "android")
+        self.assertTrue(request["strong"])
+        self.assertEqual(parse_command_query("安卓 千恋万花")["title"], "千恋万花")
+        self.assertEqual(parse_command_query("安卓 千恋万花")["platform"], "android")
+
+    def test_request_parser_rejects_non_resource_chat(self):
+        from bot.touchgal import extract_resource_request
+
+        self.assertIsNone(extract_resource_request("有没有人今晚一起打游戏"))
+        self.assertIsNone(extract_resource_request("资源"))
+
+    def test_candidate_matching_uses_aliases(self):
+        from bot.touchgal import select_candidate
+
+        selected, ranked = select_candidate(
+            "Saku Saku",
+            [{"unique_id": "Abc12345", "name": "樱花樱花", "aliases": ["Saku Saku"]}],
+        )
+        self.assertEqual(selected["unique_id"], "Abc12345")
+        self.assertEqual(ranked[0]["score"], 100)
+
+    def test_safe_site_link_rejects_external_hosts(self):
+        from bot.touchgal import _safe_site_link
+
+        self.assertEqual(
+            _safe_site_link("https://www.touchgal.ink/game/Abc12345", "https://www.touchgal.ink"),
+            "https://www.touchgal.ink/game/Abc12345",
+        )
+        self.assertEqual(
+            _safe_site_link("https://evil.example/game/Abc12345", "https://www.touchgal.ink"),
+            "",
+        )
+
+    def test_settings_reject_unsafe_base_urls(self):
+        from bot.touchgal import DEFAULT_API_BASE, DEFAULT_SITE_BASE, _settings
+
+        class DispatcherStub:
+            config = {
+                "touchgal_api_base_url": "http://127.0.0.1:8080/api",
+                "touchgal": {"site_base_url": "https://evil.example"},
+            }
+
+        settings = _settings(DispatcherStub())
+        self.assertEqual(settings["api_base"], DEFAULT_API_BASE)
+        self.assertEqual(settings["site_base"], DEFAULT_SITE_BASE)
+
+    def test_settings_accept_https_api_override(self):
+        from bot.touchgal import _settings
+
+        class DispatcherStub:
+            config = {"touchgal_api_base_url": "https://api.example.com/touchgal/"}
+
+        self.assertEqual(
+            _settings(DispatcherStub())["api_base"],
+            "https://api.example.com/touchgal",
+        )
+
+    async def test_no_token_is_silent_for_auto_reply(self):
+        from bot.touchgal import handle_auto_request, search_and_format
+
+        class DispatcherStub:
+            config = {"touchgal": {"enabled": True, "auto_reply": True}}
+
+        result = await search_and_format(DispatcherStub(), "千恋万花", explicit=True)
+        self.assertIn("Token", result["text"])
+        self.assertFalse(await handle_auto_request(DispatcherStub(), 1, 2, "求千恋万花资源"))
+
+    async def test_ambiguous_auto_request_does_not_interrupt_chat(self):
+        from bot import touchgal
+
+        class DispatcherStub:
+            config = {"touchgal_api_token": "test", "touchgal": {"enabled": True}}
+
+        with patch.object(touchgal, "search_games", new=AsyncMock(return_value={
+            "ok": True,
+            "items": [
+                {"unique_id": "Abc12345", "name": "作品甲"},
+                {"unique_id": "Def67890", "name": "作品乙"},
+            ],
+        })):
+            result = await touchgal.search_and_format(
+                DispatcherStub(), "作品", explicit=False,
+            )
+        self.assertFalse(result["handled"])
+        self.assertEqual(result["text"], "")

@@ -71,6 +71,9 @@ def apply_env_overrides(config):
         "QQBOT_UAPI_API_KEY": "uapi_api_key",
         "BILI_SESSDATA": "bili_sessdata",
         "QQBOT_BILI_SESSDATA": "bili_sessdata",
+        "TOUCHGAL_API_TOKEN": "touchgal_api_token",
+        "QQBOT_TOUCHGAL_API_TOKEN": "touchgal_api_token",
+        "TOUCHGAL_API_BASE_URL": "touchgal_api_base_url",
     }
     for env_name, cfg_key in env_map.items():
         value = os.getenv(env_name)
@@ -273,11 +276,30 @@ def migrate_config(config):
             bilibili[key] = value
             migrated = True
 
+    touchgal_defaults = {
+        "enabled": True,
+        "auto_reply": True,
+        "allow_nsfw": False,
+        "timeout_seconds": 8,
+        "cache_ttl_seconds": 600,
+        "auto_min_score": 84,
+        "auto_cooldown_seconds": 20,
+        "max_results": 5,
+        "max_resources": 3,
+        "site_base_url": "https://www.touchgal.ink",
+    }
+    touchgal = config.setdefault("touchgal", {})
+    for key, value in touchgal_defaults.items():
+        if key not in touchgal:
+            touchgal[key] = value
+            migrated = True
+
     # Merge new per-group feature defaults into existing group_defaults
     feature_defaults = {
         "bili_parse": True,
         "acg_images": True,
         "hotboard_push": True,
+        "galgame_resource": True,
     }
     feats = config.setdefault("group_defaults", {}).setdefault("features", {})
     for key, value in feature_defaults.items():

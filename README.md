@@ -32,6 +32,7 @@
 - 娱乐查询：真实天气、各平台热榜（AI 概括 + 可点链接）、一言、答案之书、每日新闻图、必应壁纸、Epic 免费游戏（数据来自 uapis.cn，有每日积分预算控制）
 - B站功能：群里发 B站视频链接/BV号/b23 短链（包括 QQ 分享卡片），自动解析出标题、封面、播放量等信息，并尽量把视频本体发出来（免登录官方接口，超限自动降级为只发信息）
 - UP 主推送：每个群可以盯几个 B站 UP 主，新投稿约 1 分钟内推到群里（Bot 是管理会顺便 @全体）
+- Galgame 资源查询：通过 TouchGal 官方 API 搜索作品、识别平台并返回官方详情/资源页，不发送网盘直链；群内可按群开关自动识别。
 - 定时推送：每天 0/6/12/18 点发一波随机 ACG 图（50 张合并转发，记住发过的图尽量不重复），9 点和 21 点发热搜榜（默认微博，AI 先概括热点、每条带链接）；都可按群开关
 
 **AI 工具调用：**
@@ -72,6 +73,7 @@ export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"    # DeepSeek 的 key，后备（�
 export QQBOT_WS_URL="ws://127.0.0.1:3001"        # NapCat 的 WS 地址
 export QQBOT_TOKEN=""                             # OneBot access token；注意：如果 NapCat 的 WS 服务端配了 token 这里就必须填一致，否则会连上就被踢、每秒重连
 export UAPI_API_KEY="uapi-xxxxxxxxxxxxxxxx"        # uapis.cn 的 key，娱乐查询/B站推送备用通道用（没有则这些功能静默停用）
+export TOUCHGAL_API_TOKEN="tg-xxxxxxxxxxxxxxxx"     # TouchGal API Token；没有时 /gal 可用 status 查看状态
 ```
 
 如果要用图片识别和表情包分析功能，再配 Vision API（推荐开启，免费额度足够用）：
@@ -118,6 +120,8 @@ ACG 定时推送默认仍取 50 张图，但按每批 10 张发送。某个群�
 `/答案之书 [问题]` — 答案之书
 `/每日新闻` — 每日新闻图
 `/必应壁纸` — 每日必应壁纸
+`/gal 作品名 [平台]` — TouchGal Galgame 资源/详情页查询（支持 安卓、KRKR、Windows、PE）
+`/gal status` — 查看 TouchGal 开关与 Token 状态
 `/epic免费` — Epic 免费游戏
 `/translate 文本` — 翻译
 `/calc 1+2*3` — 计算器
@@ -151,6 +155,7 @@ ACG 定时推送默认仍取 50 张图，但按每批 10 张发送。某个群�
 `/acg图 on/off` — 本群每日 ACG 图推送开关
 `/热榜推送 on/off` — 本群每日热榜推送开关
 `/b站解析 on/off` — 本群 B站自动解析开关
+`/gal资源 on/off` — 本群 Galgame 资源自动回复开关
 
 **群主人（每群的主人，由总主人设置）：**
 
@@ -293,11 +298,11 @@ B站推送只有在 NapCat 明确返回成功，或通过最近群消息历史�
 有问题提 issue 就行。
 
 
-## ?????
+## 运行可靠性
 
-- ??????? `Asia/Shanghai` ????????????????? `runtime.scheduler_timezone` ???
-- OneBot WebSocket ???????ACG???? B??????????????????????
-- ACG ???? `UAPI_API_KEY`??????????????????????????? 100 ??
-- B??????? `-352` ? `-412` ????????????? 30 ?????? `bilibili.risk_cooldown_seconds` ???
-- ??????????????? `0600` ? `config.json.last-good`????????????????????
-- ???? `deploy/qqbot.service` ? `deploy/napcat.service`?NapCat ? systemd ??? cgroup ???????????? PID ???
+- 定时任务默认使用 `Asia/Shanghai` 时区，可通过 `runtime.scheduler_timezone` 调整。
+- OneBot WebSocket 离线时，签到、ACG、热榜和 B站推送会跳过本轮，恢复连接后只执行未来任务。
+- ACG 新图片需要配置 `UAPI_API_KEY`；历史待重试图片仍会继续发送，并按每批 10 张拆分。
+- B站官方接口出现 `-352` 或 `-412` 风控后默认暂停 30 分钟，可通过 `bilibili.risk_cooldown_seconds` 调整。
+- 配置文件和 `config.json.last-good` 会使用 `0600` 权限保存，环境变量中的密钥不会写回配置文件。
+- 生产环境建议使用 `deploy/qqbot.service`、`deploy/napcat.service` 及配套 timer，由 systemd 管理完整进程树。
