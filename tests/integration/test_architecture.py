@@ -1,6 +1,8 @@
 """Architecture and compatibility boundary tests."""
 
 import os
+import subprocess
+import tempfile
 import unittest
 
 
@@ -53,6 +55,32 @@ class ArchitectureRegressionTests(unittest.TestCase):
         with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as handle:
             requirements = {line.strip() for line in handle if line.strip()}
         self.assertEqual(requirements, {"aiohttp==3.14.3", "websockets==16.1.1"})
+
+    def test_rollback_restores_previous_git_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def run(*args):
+                subprocess.run(
+                    ["git", *args], cwd=directory, check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+
+            run("init", "-q")
+            run("config", "user.email", "qqbot-tests@example.invalid")
+            run("config", "user.name", "QQ Bot Tests")
+            with open(os.path.join(directory, "sentinel.txt"), "w", encoding="utf-8") as handle:
+                handle.write("before")
+            run("add", "sentinel.txt")
+            run("commit", "-qm", "before")
+            with open(os.path.join(directory, "sentinel.txt"), "w", encoding="utf-8") as handle:
+                handle.write("after")
+            with open(os.path.join(directory, "new.txt"), "w", encoding="utf-8") as handle:
+                handle.write("new")
+            run("add", ".")
+            run("commit", "-qm", "after")
+            run("reset", "--hard", "HEAD~1")
+            with open(os.path.join(directory, "sentinel.txt"), encoding="utf-8") as handle:
+                self.assertEqual(handle.read(), "before")
+            self.assertFalse(os.path.exists(os.path.join(directory, "new.txt")))
 
 
 if __name__ == "__main__":
