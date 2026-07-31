@@ -359,13 +359,24 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(commands_package.cmd_health, cmd_health)
 
     def test_infrastructure_boundaries_preserve_legacy_objects(self):
-        from bot import bilibili
+        import main
+        from app.bootstrap import amain
+        from app.config import load_config
+        from bot import bilibili, scheduler, touchgal, uapi
         from bot.integrations import bilibili as integration_bilibili
+        from bot.integrations import touchgal as integration_touchgal
+        from bot.integrations import uapi as integration_uapi
+        from bot.services import scheduler as service_scheduler
         from bot.storage import atomic_write_json
         from bot.utils import atomic_write_json as legacy_atomic_write_json
 
         self.assertIs(integration_bilibili.poll_once, bilibili.poll_once)
+        self.assertIs(integration_touchgal.search_games, touchgal.search_games)
+        self.assertIs(integration_uapi.uapi_get, uapi.uapi_get)
+        self.assertIs(service_scheduler.scheduler_loop, scheduler.scheduler_loop)
         self.assertIs(atomic_write_json, legacy_atomic_write_json)
+        self.assertIs(main.load_config, load_config)
+        self.assertIs(main.amain, amain)
 
     def test_structured_at_uses_real_segment_without_duplicate_text(self):
         from bot.ai import _build_group_reply_segments, _prepare_group_reply
