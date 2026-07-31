@@ -5,26 +5,48 @@ import types as _types
 
 from .runtime import *  # noqa: F401,F403
 from . import runtime as _runtime
+from . import admin as _admin
+from . import common as _common
+from . import fun as _fun
+from . import media as _media
+from . import moderation as _moderation
+from . import queries as _queries
+from . import registry as _registry
+from . import system as _system
 
-for _name in dir(_runtime):
-    if _name.startswith("_") and not _name.startswith("__"):
-        globals()[_name] = getattr(_runtime, _name)
+_OWNERS = (_runtime, _admin, _common, _fun, _media, _moderation, _queries, _registry, _system)
+
+
+def _export_private(owner):
+    for name, value in vars(owner).items():
+        if name.startswith("_") and not name.startswith("__"):
+            globals()[name] = value
+
+
+for _module_owner in _OWNERS:
+    _export_private(_module_owner)
 
 
 class _CompatibilityModule(_types.ModuleType):
     """Forward legacy monkeypatches to the command runtime module."""
 
     def __setattr__(self, name, value):
-        if name not in {"_runtime", "_types", "_sys"} and hasattr(_runtime, name):
-            setattr(_runtime, name, value)
+        if name not in {
+            "_runtime", "_admin", "_common", "_fun", "_media", "_moderation",
+            "_queries", "_registry", "_system", "_types", "_sys", "_OWNERS",
+        }:
+            for owner in _OWNERS:
+                if hasattr(owner, name):
+                    setattr(owner, name, value)
         super().__setattr__(name, value)
 
     def __delattr__(self, name):
-        if hasattr(_runtime, name):
-            try:
-                delattr(_runtime, name)
-            except AttributeError:
-                pass
+        for owner in _OWNERS:
+            if hasattr(owner, name):
+                try:
+                    delattr(owner, name)
+                except AttributeError:
+                    pass
         super().__delattr__(name)
 
 

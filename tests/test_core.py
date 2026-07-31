@@ -336,13 +336,25 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(Dispatcher._refresh_member_cache, MemberCacheMixin._refresh_member_cache)
 
     def test_commands_package_preserves_registration_and_domain_imports(self):
+        import bot.commands as commands_package
         from bot.commands import register_all as legacy_register_all
         from bot.commands.admin import cmd_my_title
+        from bot.commands.fun import cmd_fortune
+        from bot.commands.media import cmd_ocr
+        from bot.commands.moderation import cmd_ban
+        from bot.commands.queries import cmd_weather
         from bot.commands.registry import register_all
         from bot.commands.runtime import cmd_my_title as runtime_cmd_my_title
+        from bot.commands.system import cmd_health
 
         self.assertIs(legacy_register_all, register_all)
         self.assertIs(cmd_my_title, runtime_cmd_my_title)
+        self.assertIs(commands_package.cmd_my_title, cmd_my_title)
+        self.assertIs(commands_package.cmd_fortune, cmd_fortune)
+        self.assertIs(commands_package.cmd_ocr, cmd_ocr)
+        self.assertIs(commands_package.cmd_ban, cmd_ban)
+        self.assertIs(commands_package.cmd_weather, cmd_weather)
+        self.assertIs(commands_package.cmd_health, cmd_health)
 
     def test_infrastructure_boundaries_preserve_legacy_objects(self):
         from bot import bilibili
