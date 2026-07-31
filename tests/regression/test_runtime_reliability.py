@@ -1,3 +1,5 @@
+"""Runtime reliability and recovery regression tests."""
+
 import importlib.util
 import json
 import os
@@ -50,7 +52,7 @@ class ConfigRecoveryTests(unittest.TestCase):
 
 class NapCatWatchdogTests(unittest.TestCase):
     def test_prefers_bot_websocket_port(self):
-        script_path = Path(__file__).parents[1] / "deploy" / "napcat-login-watchdog.py"
+        script_path = Path(__file__).parents[2] / "deploy" / "napcat-login-watchdog.py"
         spec = importlib.util.spec_from_file_location("napcat_login_watchdog", script_path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)

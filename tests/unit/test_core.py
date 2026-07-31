@@ -1,3 +1,5 @@
+"""Core unit and behavioral regression tests."""
+
 import unittest
 import asyncio
 import os
