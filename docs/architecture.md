@@ -20,8 +20,9 @@ bot/
 ??? commands/          registry plus admin/moderation/query/media/fun/system domains
 ??? events/            context gates, routing, messages, notices, requests
 ??? transport/         OneBot WebSocket, actions, and message segments
-??? integrations/      Bilibili, TouchGal, and UAPI implementations
+??? integrations/      Bilibili, TouchGal, UAPI, and NapCat implementations
 ??? services/          scheduler, delayed replies, member cache, health/RSS guard
+??? security/          URL checks and gray-tip audit implementation
 ??? storage/           atomic JSON persistence
 ??? dispatcher.py      state owner and external coordination facade
 ```

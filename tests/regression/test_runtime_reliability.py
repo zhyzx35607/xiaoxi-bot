@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -55,6 +56,7 @@ class NapCatWatchdogTests(unittest.TestCase):
         script_path = Path(__file__).parents[2] / "deploy" / "napcat-login-watchdog.py"
         spec = importlib.util.spec_from_file_location("napcat_login_watchdog", script_path)
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         config = {
             "network": {

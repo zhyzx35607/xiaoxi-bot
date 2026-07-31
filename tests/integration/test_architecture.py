@@ -17,11 +17,18 @@ class ArchitectureRegressionTests(unittest.TestCase):
         from bot.commands import register_all
         from bot.commands.registry import register_all as registry_register_all
         from bot.dispatcher import Dispatcher
+        from bot import security as legacy_security
+        from bot.security import extract_urls
+        from bot.security.core import extract_urls as core_extract_urls
         from bot.transport.onebot import OneBotClient as transport_client
+        from bot.integrations.napcat import get_websocket_url
 
         self.assertIs(handle_ai_chat, runtime_chat)
         self.assertIs(register_all, registry_register_all)
         self.assertIs(OneBotClient, transport_client)
+        self.assertIs(extract_urls, core_extract_urls)
+        self.assertTrue(hasattr(legacy_security, "check_message_urls"))
+        self.assertTrue(callable(get_websocket_url))
         self.assertTrue(callable(Dispatcher.dispatch))
 
     def test_historical_monoliths_remain_thin(self):
@@ -34,6 +41,8 @@ class ArchitectureRegressionTests(unittest.TestCase):
             "bot/scheduler.py": 80,
             "bot/touchgal.py": 80,
             "bot/uapi.py": 80,
+            "bot/security/core.py": 260,
+            "deploy/napcat-login-watchdog.py": 80,
         }
         for relative_path, limit in budgets.items():
             with self.subTest(path=relative_path):
