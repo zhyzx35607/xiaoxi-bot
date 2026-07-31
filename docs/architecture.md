@@ -1,34 +1,37 @@
 # QQ Bot Architecture
 
-## Current migration boundary
+## Migration boundary
 
-The bot is being refactored in compatibility-preserving stages. Runtime
-behavior, configuration paths, data files, and systemd entrypoints remain
-unchanged during the migration.
+The bot is refactored in compatibility-preserving stages. Runtime behavior,
+configuration paths, data files, logs, environment variables, and systemd
+entrypoints remain unchanged during migration.
 
-The first completed boundary is the AI package:
+The AI implementation is split into focused modules:
 
 ```text
 bot/ai/
-├── __init__.py   compatibility facade for the historical bot.ai import
-├── runtime.py    AI conversation orchestration and provider coordination
-└── reply.py      reply tags, mention resolution, and OneBot segments
+??? __init__.py   compatibility facade for the historical bot.ai import
+??? runtime.py    AI conversation orchestration only
+??? providers.py  provider failover, status, vision, and image generation
+??? prompts.py    persona, timing, and system prompt construction
+??? reply.py      reply tags, mention resolution, and OneBot segments
+??? memory.py     working, user, and long-term memory persistence
+??? stickers.py   sticker collection, analysis, and inventory
+??? search.py     UAPI search and Bing fallback
+??? tools.py      tool gating and multi-round tool execution
 ```
 
 Existing imports such as `from bot.ai import handle_ai_chat` continue to work.
 New code should import the narrowest module that owns the behavior.
 
-## Target boundaries
-
-Future stages will introduce these packages without changing public startup
-interfaces:
+Other established package boundaries:
 
 - `bot/transport/`: OneBot WebSocket, message segments, and actions.
-- `bot/events/`: normalized event context, routing, and event handlers.
-- `bot/commands/`: command registry and domain-specific command modules.
+- `bot/events/`: normalized event routing and event handlers.
+- `bot/commands/`: command registration and domain modules.
 - `bot/services/`: delayed replies, member cache, scheduler, and health.
 - `bot/integrations/`: Bilibili, TouchGal, UAPI, and NapCat adapters.
-- `bot/storage/`: JSON state and memory persistence.
+- `bot/storage/`: JSON state and persistence helpers.
 - `app/`: configuration, logging, and process bootstrap.
 
 ## Compatibility rules

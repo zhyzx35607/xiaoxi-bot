@@ -293,11 +293,17 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
     def test_ai_package_preserves_legacy_import_surface(self):
         import bot.ai as ai_package
-        from bot.ai import reply, runtime
+        from bot.ai import memory, prompts, providers, reply, runtime, search, stickers, tools
 
         self.assertIs(ai_package.handle_ai_chat, runtime.handle_ai_chat)
         self.assertIs(ai_package._parse_reply_tags, reply._parse_reply_tags)
         self.assertIs(ai_package._prepare_group_reply, reply._prepare_group_reply)
+        self.assertIs(ai_package._build_system_prompt, prompts._build_system_prompt)
+        self.assertIs(ai_package.search_web, search.search_web)
+        self.assertIs(ai_package._load_memory, memory._load_memory)
+        self.assertIs(ai_package._call_deepseek, providers._call_deepseek)
+        self.assertIs(ai_package.describe_image, stickers.describe_image)
+        self.assertIs(ai_package._chat_with_tools, tools._chat_with_tools)
 
     def test_transport_package_preserves_legacy_import_surface(self):
         from actions import text_segment as legacy_text_segment
