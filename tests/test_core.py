@@ -308,6 +308,15 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(legacy_client, OneBotClient)
         self.assertEqual(legacy_text_segment("hello"), text_segment("hello"))
 
+    def test_events_package_preserves_legacy_import_surface(self):
+        from bot.events.notice import handle_notice
+        from bot.events.request import handle_request
+        from bot.notice_handler import handle_notice as legacy_notice
+        from bot.request_handler import handle_request as legacy_request
+
+        self.assertIs(legacy_notice, handle_notice)
+        self.assertIs(legacy_request, handle_request)
+
     def test_structured_at_uses_real_segment_without_duplicate_text(self):
         from bot.ai import _build_group_reply_segments, _prepare_group_reply
 
