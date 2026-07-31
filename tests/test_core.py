@@ -334,6 +334,8 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(Dispatcher._trigger_delayed_reply, DelayedReplyServiceMixin._trigger_delayed_reply)
         self.assertIs(Dispatcher.start_rss_guard, HealthServiceMixin.start_rss_guard)
         self.assertIs(Dispatcher._refresh_member_cache, MemberCacheMixin._refresh_member_cache)
+        self.assertTrue(Dispatcher._read_rss_kb() is None or Dispatcher._read_rss_kb() > 0)
+        self.assertIsInstance(Dispatcher._gc_type_histogram(), str)
 
     def test_commands_package_preserves_registration_and_domain_imports(self):
         import bot.commands as commands_package

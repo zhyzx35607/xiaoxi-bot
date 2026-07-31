@@ -102,6 +102,7 @@ class HealthServiceMixin:
                 pass
         self._rss_guard_task = None
 
+    @staticmethod
     def _read_rss_kb():
         try:
             with open("/proc/self/status", encoding="utf-8") as f:
@@ -112,6 +113,7 @@ class HealthServiceMixin:
             return None
         return None
 
+    @staticmethod
     def _gc_type_histogram(limit=15):
         """Top object types by count — cheap snapshot to identify memory hogs."""
         import gc
