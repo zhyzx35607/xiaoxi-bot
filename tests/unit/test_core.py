@@ -1141,8 +1141,8 @@ class UapiBudgetTests(unittest.TestCase):
             client = Client()
 
         uapi.reset_state_for_test()
-        with patch.object(uapi.log, "info") as info, \
-                patch.object(uapi.log, "debug") as debug:
+        with patch("bot.integrations.uapi.log.info") as info, \
+                patch("bot.integrations.uapi.log.debug") as debug:
             asyncio.run(uapi.uapi_get(Stub(), "/answerbook/ask"))
             asyncio.run(uapi.uapi_get(Stub(), "/answerbook/ask"))
             asyncio.run(uapi.uapi_get(Stub(), "/image/bing-daily"))
