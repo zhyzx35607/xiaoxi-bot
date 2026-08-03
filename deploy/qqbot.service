@@ -11,6 +11,7 @@ User=qqbot
 Group=qqbot
 WorkingDirectory=/opt/qqbot
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=QQBOT_CONSOLE_LOG=1
 Environment=QQBOT_CONFIG_PATH=/var/lib/qqbot/config.json
 Environment=QQBOT_LOG_DIR=/var/log/qqbot
