@@ -2697,7 +2697,7 @@ class RuntimeConcurrencyRegressionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stub.client.max_active, 1)
         voice_reply.reset_state_for_test()
 
-    async def test_uapi_requests_are_serialized_for_budget_accounting(self):
+    async def test_uapi_requests_use_bounded_concurrency(self):
         from bot.integrations import uapi
 
         class Stub:
@@ -2721,7 +2721,7 @@ class RuntimeConcurrencyRegressionTests(unittest.IsolatedAsyncioTestCase):
                 uapi._json_request(stub, "GET", "/saying"),
                 uapi._json_request(stub, "GET", "/saying"),
             )
-        self.assertEqual(max_active, 1)
+        self.assertEqual(max_active, 2)
 
     async def test_failed_scheduled_job_is_not_marked_done(self):
         dispatcher = object()

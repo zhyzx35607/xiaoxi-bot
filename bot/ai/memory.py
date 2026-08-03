@@ -11,7 +11,7 @@ from ..utils import atomic_write_json
 from .providers import _call_deepseek
 
 log = logging.getLogger("qqbot")
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MEMORY_DIR = os.path.join(_ROOT, "data", "memories")
 os.makedirs(MEMORY_DIR, exist_ok=True)
 

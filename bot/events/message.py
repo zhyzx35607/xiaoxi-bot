@@ -171,8 +171,10 @@ class GroupMessageMixin:
         if msg_type == "group" and "[CQ:json,data=" in raw:
             raw = _cq_unescape(raw).replace("\\/", "/")
         if msg_type == "group" and raw:
+            is_super_owner = user_id == self.config.get("bot_owner")
+            owner_directed = is_super_owner and await self._is_directed_at_bot(message, raw)
             group_enabled = is_group_enabled(self, group_id)
-            if group_enabled:
+            if group_enabled or owner_directed:
                 _log_chat_message(
                     self, "GROUP_IN", raw, group_id=group_id,
                     user_id=user_id, sender_name=sender_card,
@@ -197,7 +199,7 @@ class GroupMessageMixin:
                     )
                 return
 
-            if not group_enabled:
+            if not group_enabled and not owner_directed:
                 return
 
             gcfg = get_group_config(self, group_id)
@@ -209,7 +211,7 @@ class GroupMessageMixin:
             # Self-message: skip buffer + only process explicit commands
             is_self_msg = user_id == self.config.get("bot_qq")
             # URL safety check before recording message context.
-            if not is_self_msg and raw:
+            if not is_self_msg and raw and not owner_directed:
                 from ..security import check_message_urls
                 if await check_message_urls(self, group_id, user_id, raw, message_id, sender_role):
                     return
@@ -242,11 +244,11 @@ class GroupMessageMixin:
 
             # Bad word check
             from ..notice_handler import check_bad_words
-            if await check_bad_words(self, group_id, user_id, raw, message_id):
+            if not owner_directed and await check_bad_words(self, group_id, user_id, raw, message_id):
                 return
 
             # Repeat check
-            if feats.get("repeat", True):
+            if not owner_directed and feats.get("repeat", True):
                 if await self._check_repeat(group_id, raw, user_id):
                     return
 
@@ -287,6 +289,32 @@ class GroupMessageMixin:
                 return True
         return False
 
+    async def _is_directed_at_bot(self, message, raw_message=""):
+        """Return True when a message explicitly addresses or replies to the bot."""
+        if self._check_at_bot(message):
+            return True
+        names = self.config.get("name_mention", {}).get("names", ["小汐", "汐汐"])
+        if any(name and name in str(raw_message or "") for name in names):
+            return True
+        if isinstance(message, str):
+            return False
+        for segment in message:
+            if segment.get("type") != "reply":
+                continue
+            reply_id = segment.get("data", {}).get("id")
+            if not reply_id:
+                continue
+            try:
+                result = await self.client.get_msg(reply_id)
+                data = result.get("data", {}) if isinstance(result, dict) else {}
+                sender = data.get("sender", {}) if isinstance(data, dict) else {}
+                sender_id = sender.get("user_id") or data.get("user_id")
+                if int(sender_id or 0) == int(self.config.get("bot_qq") or 0):
+                    return True
+            except Exception as error:
+                log.debug("reply target lookup failed: %s", error)
+        return False
+
     def _check_followup(self, group_id, user_id):
         key = (group_id, user_id)
         last_ts = self._group_last_reply_to.get(key, 0)
@@ -312,10 +340,15 @@ class GroupMessageMixin:
         feats = gcfg.get("features", {})
         is_at_bot = self._check_at_bot(message)
         is_name_mentioned = self._check_name_mention(raw) if not is_at_bot else False
+        is_reply_to_bot = await self._is_directed_at_bot(message, "") if not is_at_bot else False
         is_at_others = (not is_at_bot) and self._extract_mentions(message)
+        force_owner_reply = (
+            user_id == self.config.get("bot_owner")
+            and (is_at_bot or is_name_mentioned or is_reply_to_bot)
+        )
 
         # === BLACKLIST GUARD: check before all interactive features ===
-        if is_blacklisted(group_id, user_id):
+        if not force_owner_reply and is_blacklisted(group_id, user_id):
             log.info("Blocked blacklisted user %s in group %s", user_id, group_id)
             return
 
@@ -327,7 +360,8 @@ class GroupMessageMixin:
             parts = clean_raw[len(prefix):].split(maxsplit=1)
             cmd = parts[0].lower()
             await self._run_command(cmd, parts[1] if len(parts) > 1 else "",
-                                    group_id, user_id, sender_role, sender_card, message)
+                                    group_id, user_id, sender_role, sender_card, message,
+                                    request_message_id=message_id)
             return
 
         # B站 video share: auto parse + download (feature-gated, 30s cooldown)
@@ -403,15 +437,15 @@ class GroupMessageMixin:
             return
 
         # === NEW AI CHAT LOGIC: hard filters + AI-driven judgment ===
-        if not feats.get("ai_chat", True):
+        if not force_owner_reply and not feats.get("ai_chat", True):
             return
         from ..ai import handle_ai_chat, search_web, _schedule_state
-        is_explicit_trigger = is_at_bot or is_name_mentioned
+        is_explicit_trigger = is_at_bot or is_name_mentioned or is_reply_to_bot
         text = re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
         # Hard filters applied to every message
-        if is_blacklisted(group_id, user_id):
+        if not force_owner_reply and is_blacklisted(group_id, user_id):
             return
-        if not self._check_global_rate_limit():
+        if not force_owner_reply and not self._check_global_rate_limit():
             if is_explicit_trigger:
                 await self.client.send_group_msg(group_id, "今天回太多 让我歇会")
             return
@@ -425,14 +459,14 @@ class GroupMessageMixin:
             nm_cfg = self.config.get("name_mention", {})
             group_cd = nm_cfg.get("cooldown_seconds", 10)
             user_cd = nm_cfg.get("user_cooldown_seconds", 15)
-            if now - self._group_last_at_bot.get(group_id, 0) < group_cd:
+            if not force_owner_reply and now - self._group_last_at_bot.get(group_id, 0) < group_cd:
                 return
-            if now - self._user_last_name_reply.get(user_id, 0) < user_cd:
+            if not force_owner_reply and now - self._user_last_name_reply.get(user_id, 0) < user_cd:
                 return
             self._group_last_at_bot[group_id] = now
             self._user_last_name_reply[user_id] = now
             self._reset_consecutive_replies(group_id)
-            allowed, remaining = self._check_rate_limit(group_id)
+            allowed, remaining = (True, 999) if force_owner_reply else self._check_rate_limit(group_id)
             if not allowed:
                 await self.client.send_group_msg(group_id, "不行了不行了 刷屏太多 我潜一会 回头聊")
                 return
@@ -470,9 +504,9 @@ class GroupMessageMixin:
 class PrivateMessageMixin:
     async def _handle_owner_private(self, user_id, message, raw, sender, message_id):
         """Handle private messages from bot owner: commands first, then AI chat."""
-        # Blacklist check
+        # The highest owner must never be silently dropped by a stale blacklist entry.
         from ..guard import is_blacklisted
-        if is_blacklisted(0, user_id):
+        if user_id != self.config.get("bot_owner") and is_blacklisted(0, user_id):
             return
 
         prefix = self.config.get("command_prefix", "/")
@@ -897,7 +931,7 @@ class PrivateMessageMixin:
 
         # === Dedup: prevent concurrent AI calls for same user ===
         now = time.time()
-        if user_id in self._private_processing:
+        if user_id in self._private_processing and user_id != self.config.get("bot_owner"):
             log.debug("Private dedup: user %s(%s) already processing, skipping", sender_name, user_id)
             return
         self._private_processing[user_id] = now
@@ -905,7 +939,7 @@ class PrivateMessageMixin:
 
         try:
             # === Friend-only gate (silent): non-friends get no response at all ===
-            if not await self._is_friend(user_id):
+            if user_id != self.config.get("bot_owner") and not await self._is_friend(user_id):
                 if not is_allowed_user:
                     log.debug("Private chat skipped (not friend): %s(%s)", sender_name, user_id)
                     return

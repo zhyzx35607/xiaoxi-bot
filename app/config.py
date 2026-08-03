@@ -1,4 +1,4 @@
-"""Configuration loading, recovery, migration, and environment overrides."""
+﻿"""Configuration loading, recovery, migration, and environment overrides."""
 
 import json
 import logging
@@ -185,6 +185,7 @@ def migrate_config(config):
         migrated = True
 
     uapi_defaults = {
+        "concurrency": 3,
         "daily_limit": 100,
         "reserve": 30,
         "month_limit": 3400,
@@ -305,4 +306,64 @@ def migrate_config(config):
             security[key] = value
             migrated = True
 
+    message_output_defaults = {
+        "forward_threshold_chars": 200,
+        "forward_node_target_chars": 800,
+        "help_always_forward": True,
+        "ai_summary_enabled": True,
+        "ai_summary_max_chars": 80,
+        "ai_summary_timeout_seconds": 4,
+        "reply_to_forward": True,
+    }
+    message_output = config.setdefault("message_output", {})
+    for key, value in message_output_defaults.items():
+        if key not in message_output:
+            message_output[key] = value
+            migrated = True
+
+    persona_defaults = {
+        "role_awareness_enabled": True,
+        "super_owner_name": "主人",
+        "master_name": "主人",
+        "gowner_name": "群主",
+        "admin_name": "管理",
+    }
+    persona = config.setdefault("persona", {})
+    for key, value in persona_defaults.items():
+        if key not in persona:
+            persona[key] = value
+            migrated = True
+
+    category_defaults = {
+        "message": False,
+        "management": False,
+        "todo": False,
+        "album": False,
+        "file": False,
+        "friend": False,
+        "account": False,
+        "interaction": False,
+        "experimental": False,
+    }
+    napcat_features = config.setdefault("napcat_features", {})
+    ai_tools = config.setdefault("ai_tools", {})
+    for key, value in category_defaults.items():
+        if key not in napcat_features:
+            napcat_features[key] = value
+            migrated = True
+        if key not in ai_tools:
+            ai_tools[key] = value
+            migrated = True
+
+    automation_defaults = {
+        "enabled": False,
+        "allow_light_management": False,
+        "max_rules": 20,
+        "max_daily_actions": 30,
+    }
+    automation = config.setdefault("automation", {})
+    for key, value in automation_defaults.items():
+        if key not in automation:
+            automation[key] = value
+            migrated = True
     return config, migrated

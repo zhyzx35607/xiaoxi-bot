@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+from email.utils import parsedate_to_datetime
 
 import aiohttp
 
@@ -39,6 +40,18 @@ ENDPOINT_COSTS = {
     "/social/bilibili/archives": 4,
     "/search/aggregate": 4,
     "/translate/text": 2,
+    "/image/qrcode": 0,
+    "/misc/holiday-calendar": 1,
+    "/daily/word": 1,
+    "/github/repo": 2,
+    "/github/user": 2,
+    "/network/urlstatus": 1,
+    "/sensitive-word/analyze": 4,
+    "/social/bilibili/liveroom": 4,
+    "/social/bilibili/userinfo": 4,
+    "/social/bilibili/replies": 4,
+    "/image/ocr": 4,
+    "/image/nsfw": 4,
     "/status/usage": 0,
 }
 
@@ -92,6 +105,9 @@ def _load_state():
         "official_month_remaining": data.get("official_month_remaining"),
         "official_month_limit": data.get("official_month_limit"),
         "official_updated_at": float(data.get("official_updated_at", 0) or 0),
+        "rate_limit": data.get("rate_limit"),
+        "rate_remaining": data.get("rate_remaining"),
+        "rate_reset": data.get("rate_reset"),
     }
     return _state
 
@@ -153,6 +169,9 @@ def credits_remaining(config):
         "official_month_remaining": state.get("official_month_remaining"),
         "official_month_limit": state.get("official_month_limit"),
         "official_updated_at": state.get("official_updated_at", 0),
+        "rate_limit": state.get("rate_limit"),
+        "rate_remaining": state.get("rate_remaining"),
+        "rate_reset": state.get("rate_reset"),
     }
 
 
@@ -219,6 +238,15 @@ def _update_official_quota(headers):
 def _record_response(config, path, kind, status, headers):
     values = _header_map(headers)
     _update_official_quota(headers)
+    state = _load_state()
+    for header, field in (("x-ratelimit-limit", "rate_limit"),
+                          ("x-ratelimit-remaining", "rate_remaining"),
+                          ("x-ratelimit-reset", "rate_reset")):
+        if header in values:
+            try:
+                state[field] = int(float(values[header]))
+            except (TypeError, ValueError):
+                state[field] = values[header]
     charged_value = values.get("uapi-credits-charged")
     if charged_value is not None:
         try:
@@ -229,6 +257,8 @@ def _record_response(config, path, kind, status, headers):
         charged = _endpoint_cost(path) if int(status) == 200 else 0
     if charged > 0:
         _record_charge(config, path, kind, charged=charged)
+    elif any(key in values for key in ("x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset")):
+        _save_state()
 
 
 def _cache_key(path, params):
@@ -266,61 +296,113 @@ def _auth_headers(config):
     return {"Authorization": "Bearer " + key} if key else {}
 
 
-def _request_lock(dispatcher):
-    lock = getattr(dispatcher, "_uapi_request_lock", None)
+def _request_semaphore(dispatcher):
+    configured = dispatcher.config.get("uapi", {}) if isinstance(
+        dispatcher.config.get("uapi"), dict) else {}
+    limit = max(1, min(10, int(configured.get("concurrency", 3) or 3)))
+    semaphore = getattr(dispatcher, "_uapi_request_semaphore", None)
+    if semaphore is None or getattr(dispatcher, "_uapi_request_limit", None) != limit:
+        semaphore = asyncio.Semaphore(limit)
+        dispatcher._uapi_request_semaphore = semaphore
+        dispatcher._uapi_request_limit = limit
+    return semaphore
+
+
+def _state_lock(dispatcher):
+    lock = getattr(dispatcher, "_uapi_state_lock", None)
     if lock is None:
         lock = asyncio.Lock()
-        dispatcher._uapi_request_lock = lock
+        dispatcher._uapi_state_lock = lock
     return lock
 
 
+async def _budget_available(dispatcher, kind, path):
+    async with _state_lock(dispatcher):
+        return credits_available(dispatcher.config, kind, path=path)
+
+
+async def _record_response_locked(dispatcher, path, kind, status, headers):
+    async with _state_lock(dispatcher):
+        _record_response(dispatcher.config, path, kind, status, headers)
+
+
+def _retry_after_seconds(headers, attempt):
+    values = _header_map(headers)
+    raw = values.get("retry-after", "").strip()
+    if raw:
+        try:
+            return max(0.0, min(30.0, float(raw)))
+        except ValueError:
+            try:
+                return max(0.0, min(30.0, parsedate_to_datetime(raw).timestamp() - time.time()))
+            except Exception:
+                pass
+    reset = values.get("x-ratelimit-reset", "").strip()
+    if reset:
+        try:
+            value = float(reset)
+            delay = value - time.time() if value > 1000000000 else value
+            return max(0.0, min(30.0, delay))
+        except ValueError:
+            pass
+    return min(8.0, 1.0 * (2 ** attempt))
+
+
 async def _json_request_unlocked(dispatcher, method, path, params=None, json_body=None,
-                        kind="user", timeout=8, use_cache=False):
+                                 kind="user", timeout=8, use_cache=False):
     if use_cache:
         cached = _cache_get(path, params)
         if cached is not None:
             return cached
-    if not credits_available(dispatcher.config, kind, path=path):
+    if not await _budget_available(dispatcher, kind, path):
         log.info("uapi: budget blocked %s kind=%s", path, kind)
         return None
     headers = _auth_headers(dispatcher.config)
     if not headers:
         _log_missing_key(path)
-    attempts = [headers]
+    auth_attempts = [headers]
     if headers and _endpoint_cost(path) == 0:
-        attempts.append({})
+        auth_attempts.append({})
     session = dispatcher.client.session
-    for index, attempt_headers in enumerate(attempts):
-        try:
-            async with session.request(
-                method, BASE_URL + path, params=params, json=json_body,
-                headers=attempt_headers,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as response:
-                _record_response(dispatcher.config, path, kind,
-                                 response.status, response.headers)
-                if response.status == 401 and index + 1 < len(attempts):
-                    log.warning("uapi %s rejected configured key; retrying free endpoint as visitor", path)
-                    continue
-                if response.status != 200:
-                    log.warning("uapi %s -> HTTP %s", path, response.status)
-                    return None
-                data = await response.json(content_type=None)
-                if use_cache:
-                    _cache_put(path, params, data)
-                return data
-        except Exception as error:
-            log.warning("uapi %s failed: %s", path, error)
-            return None
+    for auth_index, attempt_headers in enumerate(auth_attempts):
+        for retry_index in range(3):
+            try:
+                async with _request_semaphore(dispatcher):
+                    async with session.request(
+                        method, BASE_URL + path, params=params, json=json_body,
+                        headers=attempt_headers,
+                        timeout=aiohttp.ClientTimeout(total=timeout),
+                    ) as response:
+                        await _record_response_locked(
+                            dispatcher, path, kind, response.status, response.headers)
+                        if response.status == 401 and auth_index + 1 < len(auth_attempts):
+                            log.warning("uapi %s rejected configured key; retrying free endpoint as visitor", path)
+                            break
+                        if response.status == 429 and retry_index < 2:
+                            delay = _retry_after_seconds(response.headers, retry_index)
+                            log.warning("uapi %s rate limited; retrying in %.1fs", path, delay)
+                        elif response.status != 200:
+                            log.warning("uapi %s -> HTTP %s", path, response.status)
+                            return None
+                        else:
+                            data = await response.json(content_type=None)
+                            if use_cache:
+                                _cache_put(path, params, data)
+                            return data
+                if response.status == 401:
+                    break
+                await asyncio.sleep(delay)
+            except Exception as error:
+                log.warning("uapi %s failed: %s", path, error)
+                return None
     return None
 
 
 async def _json_request(dispatcher, method, path, params=None, json_body=None,
                         kind="user", timeout=8, use_cache=False):
-    async with _request_lock(dispatcher):
-        return await _json_request_unlocked(
-            dispatcher, method, path, params=params, json_body=json_body,
-            kind=kind, timeout=timeout, use_cache=use_cache)
+    return await _json_request_unlocked(
+        dispatcher, method, path, params=params, json_body=json_body,
+        kind=kind, timeout=timeout, use_cache=use_cache)
 
 
 async def uapi_get(dispatcher, path, params=None, kind="user", timeout=8):
@@ -337,7 +419,7 @@ async def uapi_post(dispatcher, path, json_body=None, kind="user", timeout=8):
 
 async def _uapi_get_binary_unlocked(dispatcher, path, params=None, kind="user",
                           max_bytes=6 * 1024 * 1024, timeout=20):
-    if not credits_available(dispatcher.config, kind, path=path):
+    if not await _budget_available(dispatcher, kind, path):
         log.info("uapi: budget blocked %s kind=%s", path, kind)
         return None
     headers = _auth_headers(dispatcher.config)
@@ -353,8 +435,8 @@ async def _uapi_get_binary_unlocked(dispatcher, path, params=None, kind="user",
                 BASE_URL + path, params=params, headers=attempt_headers,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as response:
-                _record_response(dispatcher.config, path, kind,
-                                 response.status, response.headers)
+                await _record_response_locked(dispatcher, path, kind,
+                                              response.status, response.headers)
                 if response.status == 401 and index + 1 < len(attempts):
                     continue
                 if response.status != 200:
@@ -377,14 +459,14 @@ async def _uapi_get_binary_unlocked(dispatcher, path, params=None, kind="user",
 
 async def uapi_get_binary(dispatcher, path, params=None, kind="user",
                           max_bytes=6 * 1024 * 1024, timeout=20):
-    async with _request_lock(dispatcher):
+    async with _request_semaphore(dispatcher):
         return await _uapi_get_binary_unlocked(
             dispatcher, path, params=params, kind=kind,
             max_bytes=max_bytes, timeout=timeout)
 
 
 async def _uapi_resolve_image_url_unlocked(dispatcher, path, params=None, timeout=8):
-    if not credits_available(dispatcher.config, "user", path=path):
+    if not await _budget_available(dispatcher, "user", path):
         log.info("uapi: budget blocked %s kind=user", path)
         return None
     headers = _auth_headers(dispatcher.config)
@@ -401,8 +483,8 @@ async def _uapi_resolve_image_url_unlocked(dispatcher, path, params=None, timeou
                 allow_redirects=False,
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as response:
-                _record_response(dispatcher.config, path, "user",
-                                 response.status, response.headers)
+                await _record_response_locked(dispatcher, path, "user",
+                                              response.status, response.headers)
                 if response.status == 401 and index + 1 < len(attempts):
                     continue
                 if response.status in (301, 302, 303, 307, 308):
@@ -420,9 +502,37 @@ async def _uapi_resolve_image_url_unlocked(dispatcher, path, params=None, timeou
 
 
 async def uapi_resolve_image_url(dispatcher, path, params=None, timeout=8):
-    async with _request_lock(dispatcher):
+    async with _request_semaphore(dispatcher):
         return await _uapi_resolve_image_url_unlocked(
             dispatcher, path, params=params, timeout=timeout)
+
+
+async def uapi_post_form(dispatcher, path, fields, kind="user", timeout=20):
+    """POST multipart form data for OCR/NSFW without exposing arbitrary targets."""
+    if not await _budget_available(dispatcher, kind, path):
+        log.info("uapi: budget blocked %s kind=%s", path, kind)
+        return None
+    headers = _auth_headers(dispatcher.config)
+    if not headers:
+        _log_missing_key(path)
+    form = aiohttp.FormData()
+    for key, value in (fields or {}).items():
+        if value is not None and value != "":
+            form.add_field(str(key), str(value))
+    try:
+        async with _request_semaphore(dispatcher):
+            async with dispatcher.client.session.post(
+                    BASE_URL + path, data=form, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout)) as response:
+                await _record_response_locked(
+                    dispatcher, path, kind, response.status, response.headers)
+                if response.status != 200:
+                    log.warning("uapi %s -> HTTP %s", path, response.status)
+                    return None
+                return await response.json(content_type=None)
+    except Exception as error:
+        log.warning("uapi %s failed: %s", path, error)
+        return None
 
 
 async def refresh_official_quota(dispatcher):

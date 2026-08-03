@@ -11,20 +11,20 @@ Configuration loading, recovery, migration, and environment overrides live in
 
 ```text
 app/
-??? bootstrap.py       process lifecycle
-??? config.py          config loading, migration, env overrides
-??? logging_setup.py   bot.log and chat.log setup
+├── bootstrap.py       process lifecycle
+├── config.py          config loading, migration, env overrides
+└── logging_setup.py   bot.log and chat.log setup
 
 bot/
-??? ai/                prompts, providers, reply parsing, memory, stickers, search, tools
-??? commands/          registry plus admin/moderation/query/media/fun/system domains
-??? events/            context gates, routing, messages, notices, requests
-??? transport/         OneBot WebSocket, actions, and message segments
-??? integrations/      Bilibili, TouchGal, UAPI, and NapCat implementations
-??? services/          scheduler, delayed replies, member cache, health/RSS guard
-??? security/          URL checks and gray-tip audit implementation
-??? storage/           atomic JSON persistence
-??? dispatcher.py      state owner and external coordination facade
+├── ai/                prompts, providers, reply parsing, memory, stickers, search, tools
+├── commands/          registry plus capability, admin, query, media and system domains
+├── events/            context gates, routing, messages, notices, requests
+├── transport/         OneBot WebSocket, actions, segments, long-output delivery
+├── integrations/      Bilibili, TouchGal, UApiS, and NapCat implementations
+├── services/          confirmations, scheduler, delayed replies, health/RSS guard
+├── security/          URL checks and gray-tip audit implementation
+├── storage/           atomic JSON persistence
+└── dispatcher.py      state owner and external coordination facade
 ```
 
 Legacy modules such as `bot.client`, `bot.bilibili`, `bot.scheduler`,
