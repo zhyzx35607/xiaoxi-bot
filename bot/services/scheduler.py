@@ -249,7 +249,7 @@ def build_hotboard_forward_nodes(board, items, bot_qq, limit=10, summary=None, d
     node_uin = str(bot_qq)
     nodes = [{"type": "node", "data": {"name": node_name, "uin": node_uin, "content": header}}]
     for index, item in enumerate(items[:limit], 1):
-        title = str(item.get("title") or "").strip()[:100] or "小汐小汐?"
+        title = str(item.get("title") or "").strip()[:100] or "暂无标题"
         text = "{}. {}".format(index, title)
         hot = str(item.get("hot_value") or "").strip()
         if hot:
@@ -262,7 +262,7 @@ def build_hotboard_forward_nodes(board, items, bot_qq, limit=10, summary=None, d
         urls = sources if isinstance(sources, list) and sources else [item.get("url")]
         valid_urls = [str(url).strip() for url in urls[:2] if url]
         if valid_urls:
-            text += "\n小汐?" + "\n".join(valid_urls)
+            text += "\n参考来源：\n" + "\n".join(valid_urls)
         nodes.append({"type": "node", "data": {"name": node_name, "uin": node_uin, "content": text}})
     return nodes
 
@@ -558,7 +558,7 @@ async def _try_send_acg_delivery(dispatcher):
         remaining = list(delivery.get("remaining_groups", []))
         failed = []
         for gid in remaining:
-            header = "小汐小汐小汐? #{}?20小汐".format(delivery["batch_id"])
+            header = "小汐的每日图片 · 批次 #{} · 共20张".format(delivery["batch_id"])
             nodes = [{
                 "type": "node",
                 "data": {"name": "小汐", "uin": str(bot_qq), "content": header},

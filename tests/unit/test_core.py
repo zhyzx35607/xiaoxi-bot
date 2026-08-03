@@ -1635,8 +1635,16 @@ class HotboardFormatTests(unittest.TestCase):
         self.assertEqual(nodes[0]["data"]["content"], '【微博热榜】\n今天都在聊大新闻')
         self.assertEqual(nodes[0]["data"]["uin"], "3127014580")
         self.assertIn("1. 大新闻（123）", nodes[1]["data"]["content"])
+        self.assertIn("参考来源：\nhttps://example.com/1", nodes[1]["data"]["content"])
+        self.assertNotIn("?", nodes[1]["data"]["content"])
         self.assertIn("https://example.com/1", nodes[1]["data"]["content"])
         self.assertEqual(nodes[2]["data"]["content"], "2. 第二条")
+
+    def test_forward_nodes_use_readable_empty_title(self):
+        from bot.scheduler import build_hotboard_forward_nodes
+        nodes = build_hotboard_forward_nodes(
+            "weibo", [{"title": "", "url": ""}], bot_qq=3127014580)
+        self.assertEqual(nodes[1]["data"]["content"], "1. 暂无标题")
 
 
 class HotboardPushTests(unittest.IsolatedAsyncioTestCase):
@@ -1759,6 +1767,10 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
             image_nodes = [node for node in sent[0][1]
                            if isinstance(node["data"]["content"], list)]
             self.assertEqual(len(image_nodes), 20)
+            header = sent[0][1][0]["data"]["content"]
+            self.assertRegex(
+                header, r"^小汐的每日图片 · 批次 #\d{4}-[0-9a-f]{6} · 共20张$")
+            self.assertNotIn("?", header)
             self.assertEqual(len(state["pool"]), 5)
             self.assertFalse(state["pending_due"])
             self.assertIsNone(state["delivery"])
