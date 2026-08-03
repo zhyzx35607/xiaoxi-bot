@@ -618,7 +618,8 @@ class PrivateMessageMixin:
                     pass
             try:
                 filename = "chat.log" if cmd in ("chatlog", "聊天日志") else "bot.log"
-                log_path = os.path.join(_ROOT, filename)
+                log_dir = os.getenv("QQBOT_LOG_DIR") or _ROOT
+                log_path = os.path.join(log_dir, filename)
                 text = await asyncio.to_thread(
                     _read_tail_text, log_path, n, 65536, 4000 if filename == "chat.log" else 2000)
                 await self._reply(None, user_id, text or "无日志")

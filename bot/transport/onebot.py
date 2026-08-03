@@ -11,7 +11,7 @@ from api_registry import REGISTRY
 log = logging.getLogger("qqbot")
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PID_FILE = os.path.join(_ROOT, "bot.pid")
+PID_FILE = os.getenv("QQBOT_PID_FILE") or os.path.join(_ROOT, "bot.pid")
 class OneBotClient:
     def __init__(self, config):
         self.config = config
@@ -115,6 +115,15 @@ class OneBotClient:
         except asyncio.TimeoutError:
             log.warning("Timed out waiting for %d event tasks to stop", len(tasks))
 
+    def _discard_oldest_queued_event(self, msg_queue):
+        try:
+            dropped = msg_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return False
+        if dropped is not None:
+            self._queue_bytes = max(0, self._queue_bytes - dropped[1])
+        return True
+
     async def run(self):
         if not self._acquire_pid():
             return
@@ -192,10 +201,7 @@ class OneBotClient:
                                 try:
                                     msg_queue.put_nowait(None)
                                 except asyncio.QueueFull:
-                                    try:
-                                        msg_queue.get_nowait()
-                                    except asyncio.QueueEmpty:
-                                        pass
+                                    self._discard_oldest_queued_event(msg_queue)
                                     try:
                                         msg_queue.put_nowait(None)
                                     except asyncio.QueueFull:
@@ -251,6 +257,7 @@ class OneBotClient:
                 finally:
                     self._connected_event.clear()
                     self._ws = None
+                    self._queue_bytes = 0
                     for echo, fut in list(self._pending.items()):
                         if not fut.done():
                             fut.set_result({"status": "disconnected"})

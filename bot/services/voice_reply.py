@@ -1,5 +1,6 @@
 """Occasional short AI voice replies with persistent per-group limits."""
 
+import asyncio
 import json
 import logging
 import os
@@ -50,7 +51,7 @@ def _settings(dispatcher):
     if not isinstance(config, dict):
         config = {}
     return {
-        "enabled": bool(config.get("enabled", True)),
+        "enabled": bool(config.get("enabled", False)),
         "probability": max(0.0, min(1.0, float(config.get("probability", 0.08) or 0))),
         "min_chars": max(1, int(config.get("min_chars", 5) or 5)),
         "max_chars": max(5, int(config.get("max_chars", 45) or 45)),
@@ -83,38 +84,43 @@ async def maybe_send_short_voice(dispatcher, group_id, text):
         return False
     if not _eligible_text(text, settings):
         return False
-    now = time.time()
-    state = _load_state()
-    group_key = str(group_id)
-    record = state["groups"].get(group_key, {})
-    if record.get("date") != _today():
-        record = {"date": _today(), "count": 0, "last_sent": 0}
-    if int(record.get("count", 0) or 0) >= settings["daily_limit"]:
-        return False
-    if now - float(record.get("last_sent", 0) or 0) < settings["cooldown_seconds"]:
-        return False
-    if random.random() >= settings["probability"]:
-        return False
-    try:
-        result = await dispatcher.client.send_group_ai_record(
-            int(group_id), settings["character_id"], str(text).strip())
-    except Exception as error:
-        log.info("Short voice reply failed group=%s: %s", group_id, error)
-        return False
-    if (not isinstance(result, dict) or result.get("status") != "ok"
-            or result.get("retcode", 0) != 0):
-        log.info("Short voice reply rejected group=%s status=%s retcode=%s",
-                 group_id, (result or {}).get("status") if isinstance(result, dict) else result,
-                 (result or {}).get("retcode") if isinstance(result, dict) else None)
-        return False
-    record.update({"date": _today(),
-                   "count": int(record.get("count", 0) or 0) + 1,
-                   "last_sent": now})
-    state["groups"][group_key] = record
-    _save_state()
-    log.info("Short voice reply sent group=%s chars=%d daily=%d/%d",
-             group_id, len(str(text).strip()), record["count"], settings["daily_limit"])
-    return True
+    lock = getattr(dispatcher, "_voice_reply_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        dispatcher._voice_reply_lock = lock
+    async with lock:
+        now = time.time()
+        state = _load_state()
+        group_key = str(group_id)
+        record = state["groups"].get(group_key, {})
+        if record.get("date") != _today():
+            record = {"date": _today(), "count": 0, "last_sent": 0}
+        if int(record.get("count", 0) or 0) >= settings["daily_limit"]:
+            return False
+        if now - float(record.get("last_sent", 0) or 0) < settings["cooldown_seconds"]:
+            return False
+        if random.random() >= settings["probability"]:
+            return False
+        try:
+            result = await dispatcher.client.send_group_ai_record(
+                int(group_id), settings["character_id"], str(text).strip())
+        except Exception as error:
+            log.info("Short voice reply failed group=%s: %s", group_id, error)
+            return False
+        if (not isinstance(result, dict) or result.get("status") != "ok"
+                or result.get("retcode", 0) != 0):
+            log.info("Short voice reply rejected group=%s status=%s retcode=%s",
+                     group_id, (result or {}).get("status") if isinstance(result, dict) else result,
+                     (result or {}).get("retcode") if isinstance(result, dict) else None)
+            return False
+        record.update({"date": _today(),
+                       "count": int(record.get("count", 0) or 0) + 1,
+                       "last_sent": now})
+        state["groups"][group_key] = record
+        _save_state()
+        log.info("Short voice reply sent group=%s chars=%d daily=%d/%d",
+                 group_id, len(str(text).strip()), record["count"], settings["daily_limit"])
+        return True
 
 
 def reset_state_for_test():

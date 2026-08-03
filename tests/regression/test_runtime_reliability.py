@@ -1,5 +1,6 @@
 """Runtime reliability and recovery regression tests."""
 
+import importlib
 import importlib.util
 import json
 import os
@@ -11,6 +12,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from bot import bilibili, scheduler
+import main as main_module
 from main import load_config, migrate_config
 
 
@@ -55,6 +57,9 @@ class ContentConfigMigrationTests(unittest.TestCase):
     def test_random_content_defaults_are_added(self):
         config, migrated = migrate_config({})
         self.assertTrue(migrated)
+        self.assertFalse(config["acg_images"]["enabled"])
+        self.assertFalse(config["hotboard_push"]["enabled"])
+        self.assertFalse(config["voice_reply"]["enabled"])
         self.assertEqual(config["acg_images"]["send_count"], 20)
         self.assertEqual(config["acg_images"]["dedupe_days"], 7)
         self.assertEqual(len(config["acg_images"]["windows"]), 4)
@@ -177,3 +182,37 @@ class BilibiliCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(api_call.await_count, 1)
         self.assertGreater(bilibili._state["risk_until"], time.time())
+
+class ImportAndDeploymentTests(unittest.TestCase):
+    def test_importing_main_does_not_initialize_file_logging(self):
+        with patch("app.logging_setup.setup_logging") as setup:
+            importlib.reload(main_module)
+            setup.assert_not_called()
+        importlib.reload(main_module)
+
+    def test_runtime_config_migration_removes_env_managed_secrets(self):
+        script_path = Path(__file__).parents[2] / "scripts" / "migrate_runtime_config.py"
+        spec = importlib.util.spec_from_file_location("migrate_runtime_config", script_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        config = {
+            "token": "persisted",
+            "deepseek_api_key": "persisted",
+            "vision_api": {"api_key": "persisted", "model": "vision"},
+        }
+        removed = module.remove_env_managed_secrets(config, {
+            "QQBOT_TOKEN": "runtime",
+            "DEEPSEEK_API_KEY": "runtime",
+            "VISION_API_KEY": "runtime",
+        })
+        self.assertEqual(set(removed), {"token", "deepseek_api_key", "vision_api.api_key"})
+        self.assertNotIn("token", config)
+        self.assertNotIn("deepseek_api_key", config)
+        self.assertEqual(config["vision_api"], {"model": "vision"})
+
+    def test_systemd_unit_runs_bot_as_unprivileged_user(self):
+        service = (Path(__file__).parents[2] / "deploy" / "qqbot.service").read_text(encoding="utf-8")
+        self.assertIn("User=qqbot", service)
+        self.assertIn("ProtectSystem=strict", service)
+        self.assertIn("QQBOT_CONFIG_PATH=/var/lib/qqbot/config.json", service)
+        self.assertIn("QQBOT_PID_FILE=/run/qqbot/bot.pid", service)

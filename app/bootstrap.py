@@ -15,7 +15,7 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 log = logging.getLogger("qqbot")
 
 async def amain():
-    config_path = os.path.join(_BASE_DIR, "config.json")
+    config_path = os.getenv("QQBOT_CONFIG_PATH") or os.path.join(_BASE_DIR, "config.json")
     config = load_config(config_path)
 
     # Migrate old config if needed

@@ -71,7 +71,8 @@ def add_blacklist(group_id, user_id, duration_hours=48, bot_owner=None, bot_qq=N
     if bot_owner is None or bot_qq is None:
         import json as _json, os as _os
         try:
-            cfg_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "config.json")
+            cfg_path = (_os.getenv("QQBOT_CONFIG_PATH") or _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "config.json"))
             with open(cfg_path) as _f: cfg = _json.load(_f)
             if bot_owner is None:
                 bot_owner = cfg.get("bot_owner")

@@ -93,7 +93,7 @@ def migrate_config(config):
             "bad_words": config.pop("bad_words", {"enabled": True, "auto_delete": True, "warn_msg": "@{user} 注意一下发言", "words": []}),
             "features": {
                 "ai_chat": True, "interject": True, "repeat": True, "music": True,
-                "fortune": True, "admin_cmds": True, "voice_reply": True,
+                "fortune": True, "admin_cmds": True, "voice_reply": False,
                 "auto_poke": True, "auto_essence": False
             }
         }
@@ -196,7 +196,7 @@ def migrate_config(config):
             migrated = True
 
     voice_reply_defaults = {
-        "enabled": True,
+        "enabled": False,
         "probability": 0.08,
         "min_chars": 5,
         "max_chars": 45,
@@ -211,7 +211,7 @@ def migrate_config(config):
             migrated = True
 
     acg_defaults = {
-        "enabled": True,
+        "enabled": False,
         "send_count": 20,
         "minimum_count": 20,
         "dedupe_days": 7,
@@ -232,7 +232,7 @@ def migrate_config(config):
             migrated = True
 
     hotboard_defaults = {
-        "enabled": True,
+        "enabled": False,
         "types": ["weibo"],
         "detail_count": 10,
         "windows": [["10:00", "13:00"], ["19:00", "22:00"]],
@@ -281,10 +281,10 @@ def migrate_config(config):
     # Merge new per-group feature defaults into existing group_defaults
     feature_defaults = {
         "bili_parse": True,
-        "acg_images": True,
-        "hotboard_push": True,
+        "acg_images": False,
+        "hotboard_push": False,
         "galgame_resource": True,
-        "voice_reply": True,
+        "voice_reply": False,
     }
     feats = config.setdefault("group_defaults", {}).setdefault("features", {})
     for key, value in feature_defaults.items():

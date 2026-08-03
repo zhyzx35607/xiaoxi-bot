@@ -5,6 +5,7 @@ allowance. Official monthly quota and actual debits are learned from UApiS
 response headers instead of being guessed before a request is sent.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -265,7 +266,15 @@ def _auth_headers(config):
     return {"Authorization": "Bearer " + key} if key else {}
 
 
-async def _json_request(dispatcher, method, path, params=None, json_body=None,
+def _request_lock(dispatcher):
+    lock = getattr(dispatcher, "_uapi_request_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        dispatcher._uapi_request_lock = lock
+    return lock
+
+
+async def _json_request_unlocked(dispatcher, method, path, params=None, json_body=None,
                         kind="user", timeout=8, use_cache=False):
     if use_cache:
         cached = _cache_get(path, params)
@@ -306,6 +315,14 @@ async def _json_request(dispatcher, method, path, params=None, json_body=None,
     return None
 
 
+async def _json_request(dispatcher, method, path, params=None, json_body=None,
+                        kind="user", timeout=8, use_cache=False):
+    async with _request_lock(dispatcher):
+        return await _json_request_unlocked(
+            dispatcher, method, path, params=params, json_body=json_body,
+            kind=kind, timeout=timeout, use_cache=use_cache)
+
+
 async def uapi_get(dispatcher, path, params=None, kind="user", timeout=8):
     return await _json_request(
         dispatcher, "GET", path, params=params, kind=kind,
@@ -318,7 +335,7 @@ async def uapi_post(dispatcher, path, json_body=None, kind="user", timeout=8):
         timeout=timeout)
 
 
-async def uapi_get_binary(dispatcher, path, params=None, kind="user",
+async def _uapi_get_binary_unlocked(dispatcher, path, params=None, kind="user",
                           max_bytes=6 * 1024 * 1024, timeout=20):
     if not credits_available(dispatcher.config, kind, path=path):
         log.info("uapi: budget blocked %s kind=%s", path, kind)
@@ -358,7 +375,15 @@ async def uapi_get_binary(dispatcher, path, params=None, kind="user",
     return None
 
 
-async def uapi_resolve_image_url(dispatcher, path, params=None, timeout=8):
+async def uapi_get_binary(dispatcher, path, params=None, kind="user",
+                          max_bytes=6 * 1024 * 1024, timeout=20):
+    async with _request_lock(dispatcher):
+        return await _uapi_get_binary_unlocked(
+            dispatcher, path, params=params, kind=kind,
+            max_bytes=max_bytes, timeout=timeout)
+
+
+async def _uapi_resolve_image_url_unlocked(dispatcher, path, params=None, timeout=8):
     if not credits_available(dispatcher.config, "user", path=path):
         log.info("uapi: budget blocked %s kind=user", path)
         return None
@@ -392,6 +417,12 @@ async def uapi_resolve_image_url(dispatcher, path, params=None, timeout=8):
             log.warning("uapi %s failed: %s", path, error)
             return None
     return None
+
+
+async def uapi_resolve_image_url(dispatcher, path, params=None, timeout=8):
+    async with _request_lock(dispatcher):
+        return await _uapi_resolve_image_url_unlocked(
+            dispatcher, path, params=params, timeout=timeout)
 
 
 async def refresh_official_quota(dispatcher):

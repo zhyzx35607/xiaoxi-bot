@@ -6,7 +6,7 @@ import os
 from ..utils import atomic_write_json
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(_ROOT, "config.json")
+CONFIG_PATH = os.getenv("QQBOT_CONFIG_PATH") or os.path.join(_ROOT, "config.json")
 
 def _load():
     with open(CONFIG_PATH, encoding="utf-8") as f:
