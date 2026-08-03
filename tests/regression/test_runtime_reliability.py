@@ -216,3 +216,5 @@ class ImportAndDeploymentTests(unittest.TestCase):
         self.assertIn("ProtectSystem=strict", service)
         self.assertIn("QQBOT_CONFIG_PATH=/var/lib/qqbot/config.json", service)
         self.assertIn("QQBOT_PID_FILE=/run/qqbot/bot.pid", service)
+        installer = (Path(__file__).parents[2] / "deploy" / "install-qqbot-service.sh").read_text(encoding="utf-8")
+        self.assertIn('git -C "${project_root}" ls-files -z', installer)
