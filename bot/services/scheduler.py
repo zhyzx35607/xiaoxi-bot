@@ -596,15 +596,16 @@ async def _try_send_acg_delivery(dispatcher):
 
 
 async def _daily_acg_push(dispatcher):
-    """Mark one randomized ACG delivery as due; never send fewer than 20 images."""
+    """Persist an ACG delivery request for the collector to fulfill."""
     cfg = dispatcher.config.get("acg_images", {})
-    if not cfg.get("enabled", True):
-        return
+    if not cfg.get("enabled", False):
+        return True
     async with _state_lock(dispatcher):
         state = _load_acg_state()
         state["pending_due"] = True
         _save_acg_state(state)
     await _try_send_acg_delivery(dispatcher)
+    return True
 
 
 async def _acg_collector_loop(dispatcher):
@@ -628,30 +629,32 @@ async def _acg_collector_loop(dispatcher):
 
 
 async def _daily_hotboard_push(dispatcher):
-    """Fetch one hot board digest and broadcast it to enabled groups."""
+    """Fetch configured hot boards and confirm every group delivery."""
     if not _client_connected(dispatcher):
-        log.info("Hotboard push skipped: OneBot is offline")
-        return
+        log.info("Hotboard push deferred: OneBot is offline")
+        return False
     cfg = dispatcher.config.get("hotboard_push", {})
-    if not cfg.get("enabled", True):
-        return
+    if not cfg.get("enabled", False):
+        return True
     boards = cfg.get("types", ["weibo"]) or ["weibo"]
     groups = [gid for gid in _enabled_group_ids(dispatcher)
               if _feature_on(dispatcher, gid, "hotboard_push")]
     if not groups:
-        return
+        return True
     from ..integrations import uapi as _uapi
+    all_delivered = True
     for board in boards:
         board = str(board)[:20]
         if not _uapi.credits_available(
                 dispatcher.config, "auto", path="/misc/hotboard"):
-            log.info("hotboard push skipped: auto credit budget exhausted")
-            break
+            log.info("hotboard push deferred: auto credit budget exhausted")
+            return False
         data = await _uapi.uapi_get(dispatcher, "/misc/hotboard",
                                     params={"type": board}, kind="auto")
         items = (data or {}).get("list") if isinstance(data, dict) else None
         if not items:
-            log.info("hotboard push: board=%s no data", board)
+            log.info("hotboard push deferred: board=%s no data", board)
+            all_delivered = False
             continue
         digest = await build_detailed_hotboard(dispatcher, board, items)
         nodes = build_hotboard_forward_nodes(
@@ -663,15 +666,17 @@ async def _daily_hotboard_push(dispatcher):
                 status = ((result or {}).get("status")
                           if isinstance(result, dict) else result)
                 if status != "ok":
+                    all_delivered = False
                     log.warning("hotboard push failed group=%s board=%s status=%s",
                                 gid, board, status)
                 else:
                     log.info("hotboard push: group=%s board=%s items=%d status=ok",
                              gid, board, len(nodes) - 1)
             except Exception as error:
+                all_delivered = False
                 log.warning("hotboard push failed group=%s board=%s: %s", gid, board, error)
             await asyncio.sleep(2)
-
+    return all_delivered
 
 def _scheduled_jobs(dispatcher):
     """Return randomized content jobs plus the fixed daily check-in."""
@@ -707,6 +712,26 @@ def _mark_scheduled_job_done(dispatcher, name, index):
     _save_acg_state(state)
 
 
+async def _execute_scheduled_job(dispatcher, name):
+    if name == "checkin":
+        if not _client_connected(dispatcher):
+            log.info("Scheduled check-in skipped: OneBot is offline")
+            return True
+        await _daily_checkin(dispatcher)
+        return True
+    if name == "acg":
+        return await _daily_acg_push(dispatcher)
+    if name == "hotboard":
+        return await _daily_hotboard_push(dispatcher)
+    raise ValueError("unknown scheduled job: {}".format(name))
+
+
+async def _run_due_scheduled_job(dispatcher, name, index):
+    completed = await _execute_scheduled_job(dispatcher, name)
+    if name != "checkin" and completed:
+        _mark_scheduled_job_done(dispatcher, name, index)
+    return completed
+
 async def scheduler_loop(dispatcher):
     """Run check-in, randomized content jobs, and the ACG pool collector."""
     log.info("Scheduler started")
@@ -718,19 +743,15 @@ async def scheduler_loop(dispatcher):
             if wait_seconds <= 60:
                 if wait_seconds > 0:
                     await asyncio.sleep(wait_seconds)
-                if name != "checkin":
-                    _mark_scheduled_job_done(dispatcher, name, index)
-                if not _client_connected(dispatcher):
-                    log.info("Scheduled job %s skipped: OneBot is offline", name)
-                    if name == "acg":
-                        await _daily_acg_push(dispatcher)
-                elif name == "checkin":
-                    await _daily_checkin(dispatcher)
-                elif name == "acg":
-                    await _daily_acg_push(dispatcher)
-                elif name == "hotboard":
-                    await _daily_hotboard_push(dispatcher)
-                await asyncio.sleep(65)
+                completed = True
+                try:
+                    completed = await _run_due_scheduled_job(dispatcher, name, index)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    completed = False
+                    log.warning("Scheduled job %s failed: %s", name, error, exc_info=True)
+                await asyncio.sleep(65 if completed else 300)
             else:
                 chunk = min(1800, wait_seconds - 30)
                 await asyncio.sleep(chunk if chunk > 0 else 60)
