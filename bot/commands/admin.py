@@ -19,7 +19,7 @@ from ..utils import atomic_write_json
 from .common import CONFIG_PATH, _load, _save
 
 log = logging.getLogger("qqbot")
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 async def cmd_at_all(d, group_id, user_id, args, role, sender_card, message):
     """/全体 内容 — @everyone (admin+, bot must be admin/owner)."""

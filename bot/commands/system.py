@@ -19,7 +19,7 @@ from ..utils import atomic_write_json
 from .common import CONFIG_PATH, _load, _save
 
 log = logging.getLogger("qqbot")
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 async def cmd_api_status(d, group_id, user_id, args, role, sender_card, message):
     """Show the registered API catalog without probing every endpoint."""
@@ -94,116 +94,172 @@ COMMAND_DETAILS = {
     "approve": "/approve — 通过待处理的加群/好友申请\n/reject — 拒绝\n总主人私聊使用。",
 }
 
+_HELP_CATEGORIES = {
+    "聊天与互动": {"help", "like", "点赞信息", "戳", "表情回应", "已读", "转发", "转发摘要", "mytitle", "头衔"},
+    "娱乐与查询": {"weather", "天气", "热榜", "热搜", "一言", "答案之书", "每日新闻", "必应壁纸", "epic免费", "fortune", "rank", "calc", "translate", "gal", "galgame", "游戏资源"},
+    "图片与媒体": {"图片描述", "ocr", "生图"},
+    "群资料与成员": {"群信息", "成员", "成员列表", "陌生人信息", "info", "群荣誉", "禁言列表", "精华列表", "history"},
+    "文件与内容": {"群文件", "文件状态", "文件链接", "删除文件", "新建文件夹", "删除文件夹", "移动文件", "重命名文件", "精华", "删精华", "公告", "删公告", "setgroupavatar"},
+    "群管理": {"kick", "ban", "unban", "allban", "welcome", "badword", "安全", "全体", "title"},
+    "功能与自动化": {"enable", "disable", "list", "clearai", "ai聊天", "私聊ai", "acg图", "热榜推送", "b站解析", "b站推送", "gal资源", "积分"},
+    "主人与维护": {"api", "health", "好友列表", "sysmsg", "approve", "reject", "master", "admin"},
+}
+
+_PRIVATE_VISIBLE = {
+    "help", "like", "点赞信息", "陌生人信息", "weather", "天气", "热榜", "热搜", "一言",
+    "答案之书", "每日新闻", "必应壁纸", "epic免费", "fortune", "calc", "translate", "ocr",
+    "图片描述", "生图", "gal", "galgame", "游戏资源", "health", "积分", "私聊ai",
+}
+
+
+def _help_permission_label(info):
+    if info.get("bot_owner_only"):
+        return "最高主人"
+    if info.get("bot_owner"):
+        return "群主人及以上"
+    if info.get("admin_only"):
+        return "管理员及以上"
+    return "所有人"
+
+
+def _help_visible(info, level, group_id):
+    if info.get("bot_owner_only") and level < LEVEL_SUPER:
+        return False
+    if info.get("bot_owner") and level < LEVEL_MASTER:
+        return False
+    if info.get("admin_only") and level < LEVEL_ADMIN:
+        return False
+    return True
+
+
+def _help_command_text(name, info, bot_role, group_id):
+    detail = COMMAND_DETAILS.get(name) or info.get("help") or "暂无详细说明"
+    usage = detail.strip()
+    permission = _help_permission_label(info)
+    scope = "群聊" if group_id else "私聊"
+    requirements = []
+    if info.get("bot_admin_required"):
+        requirements.append("小汐需为群管理")
+    if info.get("bot_owner_required"):
+        requirements.append("小汐需为群主")
+    if requirements and bot_role not in ("admin", "owner"):
+        status = "当前不可用：" + "、".join(requirements)
+    else:
+        status = "当前可用"
+    return "【/{}】\n{}\n场景：{}｜身份：{}｜{}".format(
+        name, usage, scope, permission, status)
+
+
 async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
-    # /help <命令名> — detailed usage for one command
     query = args.strip().lstrip("/").lower()
-    if query:
-        matched = None
-        for name in d.commands:
-            if name.lower() == query:
-                matched = name
-                break
+    caller_level, caller_name = await get_user_level(d, group_id, user_id, role)
+    bot_role = "member"
+    if group_id:
+        bot_role, _ = await get_bot_role(d, group_id)
+
+    if query and query not in {name.lower() for name in _HELP_CATEGORIES}:
+        matched = next((name for name in d.commands if name.lower() == query), None)
         if not matched:
-            for name in d.commands:
-                if query in name.lower():
-                    matched = name
-                    break
+            matched = next((name for name in d.commands if query in name.lower()), None)
         if not matched:
-            await d._reply(group_id, user_id,
-                           "没有这个命令，发 /help 看全部命令")
+            await d._reply(group_id, user_id, "没有这个命令，发 /help 看全部命令")
             return
         info = d.commands.get(matched, {})
-        lines = ["【/{}】".format(matched)]
-        detail = COMMAND_DETAILS.get(matched) or COMMAND_DETAILS.get(query)
-        if detail:
-            lines.append(detail)
-        elif info.get("help"):
-            lines.append(info["help"])
-        else:
-            lines.append("暂无详细说明")
-        await d._reply(group_id, user_id, "\n".join(lines))
+        if not _help_visible(info, caller_level, group_id):
+            await d._reply(group_id, user_id, "这个功能不在你当前身份的菜单里")
+            return
+        text = _help_command_text(matched, info, bot_role, group_id)
+        await d._reply(group_id, user_id, text, title="/{} 的用法".format(matched),
+                       role_hint=role)
         return
 
-    caller_level, caller_name = await get_user_level(d, group_id, user_id, role)
-    bot_owner = d.config.get("bot_owner")
-    is_super = (user_id == bot_owner) or (user_id == d.config.get("bot_qq"))
-    bot_role_str = "member"
-    if group_id:
-        bot_role_str, _ = await get_bot_role(d, group_id)
-    lines = []
-    lines.append("* ====== 小汐的使用指南 ====== *")
-    # ---- everyone ----
-    lines.append("")
-    lines.append("【聊天】")
-    lines.append("  @小汐 + 想说的话      跟我聊天")
-    lines.append("  点歌+歌名             搜歌分享")
-    lines.append("  发B站链接/BV号        自动解析并发视频")
-    lines.append("  我要头衔xxx           给自己设专属头衔(Bot是群主才生效)")
-    lines.append("")
-    lines.append("【娱乐查询】")
-    lines.append("  /天气 <城市>    /热榜 [平台]    /一言")
-    lines.append("  /答案之书 [问题]      /epic免费")
-    lines.append("  /每日新闻       /必应壁纸")
-    lines.append("  /fortune 今日运势     /rank 发言排行")
-    lines.append("  /like 赞我            /calc 计算器")
-    lines.append("  /translate 翻译       /生图 AI画图")
-    lines.append("")
-    lines.append("【查询工具】")
-    lines.append("  /info [@人]           成员资料")
-    lines.append("  /history [条数]       最近消息")
-    lines.append("  /ocr                  识别图片文字")
-    lines.append("  /转发摘要             总结合并转发")
-    lines.append("  /群文件 [关键词]      搜群文件")
-    lines.append("  /精华列表 /群荣誉     群内容")
-    lines.append("  /禁言列表 /点赞信息   其他查询")
-    lines.append("  /health               运行状态")
-    lines.append("  /gal <作品名>         查 TouchGal Galgame 详情页")
-    # ---- admin tier (QQ admin/group owner/master/super) ----
-    if caller_level >= LEVEL_ADMIN and bot_role_str in ("admin", "owner"):
-        lines.append("")
-        lines.append("【管理命令】(你是管理，可用)")
-        lines.append("  /kick @人             踢出群")
-        lines.append("  /ban @人 [分钟]       禁言(默认30)")
-        lines.append("  /unban @人            解除禁言")
-        lines.append("  /allban on/off        全员禁言")
-        lines.append("  /全体 <内容>          @全体成员")
-        lines.append("  /公告 <内容>          发群公告")
-        lines.append("  /精华                 回复消息设精华")
-        lines.append("  /welcome on/off/内容  入群欢迎")
-        lines.append("  /badword add/del/list 违禁词")
-        lines.append("  /acg图 on/off         每日ACG图开关")
-        lines.append("  /热榜推送 on/off      每日热榜开关")
-        lines.append("  /b站解析 on/off       B站解析开关")
-        lines.append("  /gal资源 on/off       Galgame资源自动回复开关")
-        lines.append("  /安全 status/log      安全功能")
-        if bot_role_str == "owner":
-            lines.append("  /title @人 头衔       设专属头衔")
-    elif caller_level >= LEVEL_ADMIN:
-        lines.append("")
-        lines.append("（你有管理身份，但我现在不是本群管理，管理命令暂时都用不了）")
-    # ---- master tier ----
-    if caller_level >= LEVEL_MASTER:
-        lines.append("")
-        lines.append("【群主人命令】(你是本群主人，可用)")
-        lines.append("  /enable /disable      开/关本群功能")
-        lines.append("  /list                 群数据概览")
-        lines.append("  /clearai              清本群AI数据")
-        lines.append("  /b站推送 add/del/list 盯UP主新投稿")
-        lines.append("  /积分                 uapis额度用量")
-    # ---- super tier ----
-    if is_super:
-        lines.append("")
-        lines.append("【最高主人命令】")
-        lines.append("  /master add/del/list  设置群主人")
-        lines.append("  /私聊AI on/off/allow/deny 私聊AI开关")
-        lines.append("  /AI聊天 on/off        本群AI聊天开关")
-        lines.append("  /approve /reject      处理加群/好友申请")
-        lines.append("  私聊跨群：/命令 群号 参数")
-    lines.append("")
-    lines.append("发 /help <命令名> 看某个命令的详细用法")
-    lines.append("比如 /help b站推送")
-    lines.append("* ============================ *")
-    await d._reply(group_id, user_id, "\n".join(lines))
+    selected_category = None
+    if query:
+        selected_category = next(
+            (name for name in _HELP_CATEGORIES if name.lower() == query), None)
+        if not selected_category:
+            aliases = {
+                "消息": "聊天与互动", "互动": "聊天与互动", "查询": "娱乐与查询",
+                "媒体": "图片与媒体", "成员": "群资料与成员", "文件": "文件与内容",
+                "群管": "群管理", "自动化": "功能与自动化", "账号": "主人与维护",
+                "实验": "主人与维护",
+            }
+            selected_category = aliases.get(query)
+
+    role_names = {
+        LEVEL_SUPER: "最高主人", LEVEL_MASTER: "群主人", LEVEL_GOWNER: "QQ群主",
+        LEVEL_ADMIN: "管理员", LEVEL_MEMBER: "普通群友",
+    }
+    header = "场景：{}\n身份：{}\n小汐在本群：{}\n下面只放你现在能用或需要知道的功能。".format(
+        "群聊" if group_id else "私聊",
+        role_names.get(caller_level, caller_name),
+        bot_role if group_id else "不适用",
+    )
+    sections = [header]
+    categories = [selected_category] if selected_category else list(_HELP_CATEGORIES)
+    assigned = set()
+    for category in categories:
+        if not category:
+            continue
+        names = _HELP_CATEGORIES[category]
+        entries = []
+        for name, info in d.commands.items():
+            if name not in names or name in assigned:
+                continue
+            if not group_id and caller_level < LEVEL_SUPER and name not in _PRIVATE_VISIBLE:
+                continue
+            if not _help_visible(info, caller_level, group_id):
+                continue
+            entries.append(_help_command_text(name, info, bot_role, group_id))
+            assigned.add(name)
+        if entries:
+            sections.append("【{}】\n\n{}".format(category, "\n\n".join(entries)))
+
+    if not selected_category:
+        other_entries = []
+        for name, info in d.commands.items():
+            if name in assigned or not _help_visible(info, caller_level, group_id):
+                continue
+            if not group_id and caller_level < LEVEL_SUPER and name not in _PRIVATE_VISIBLE:
+                continue
+            other_entries.append(_help_command_text(name, info, bot_role, group_id))
+        if other_entries:
+            sections.append("【其他功能】\n\n" + "\n\n".join(other_entries))
+
+    title = "小汐的{}帮助".format(selected_category or "完整")
+    await d._reply(
+        group_id, user_id, "\n\n".join(sections), force_forward=True,
+        kind="help", title=title, sections=sections, role_hint=role,
+    )
+async def cmd_target_group_help(d, group_id, user_id, args, role, sender_card, message):
+    parts = args.strip().split(maxsplit=1)
+    if len(parts) != 2 or not parts[0].isdigit() or parts[1].strip().lower() not in ("帮助", "help"):
+        await d._reply(group_id, user_id, "用法：/群 <群号> 帮助")
+        return
+    target_group = int(parts[0])
+    target_level, _ = await get_user_level(d, target_group, user_id, role)
+    if target_level < LEVEL_ADMIN:
+        await d._reply(group_id, user_id, "你不是这个群的管理，不能看它的管理菜单")
+        return
+
+    class _PrivateHelpProxy:
+        def __init__(self, dispatcher):
+            self._dispatcher = dispatcher
+            self.config = dispatcher.config
+            self.client = dispatcher.client
+            self.commands = dispatcher.commands
+
+        def __getattr__(self, name):
+            return getattr(self._dispatcher, name)
+
+        async def _reply(self, _group_id, target_user, text, **kwargs):
+            return await self._dispatcher._reply(None, target_user, text, **kwargs)
+
+    await cmd_help(
+        _PrivateHelpProxy(d), target_group, user_id, "", role,
+        sender_card, message,
+    )
+
 
 async def cmd_health(d, group_id, user_id, args, role, sender_card, message):
     import subprocess

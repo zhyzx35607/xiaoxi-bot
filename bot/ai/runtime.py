@@ -160,15 +160,49 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                           interaction_allowed=False):
     config = dispatcher.config
     context_key = f"private_{user_id}" if not group_id else str(group_id)
-    bot_role = ""
+    from ..permission import (
+        LEVEL_ADMIN, LEVEL_GOWNER, LEVEL_MASTER, LEVEL_SUPER,
+        get_bot_role, get_user_level,
+    )
+    caller_level, caller_role = await get_user_level(
+        dispatcher, group_id, user_id, "member")
+    is_super_owner = caller_level >= LEVEL_SUPER
+    is_owner_tier = caller_level >= LEVEL_MASTER
+    bot_role_display = "member"
     if group_id:
         try:
-            from ..permission import get_bot_role
-            _, role_display = await get_bot_role(dispatcher, group_id)
-            if role_display != "member":
-                bot_role = f"你是本群的{role_display}，作为管理员要以身作则友好交流。"
+            bot_role_display, _ = await get_bot_role(dispatcher, group_id)
         except Exception:
-            pass
+            bot_role_display = "member"
+    if is_super_owner:
+        relationship = (
+            "【当前对话身份：最高主人】\n"
+            "正在和你说话的是你唯一的最高主人。你必须回应主人，不能输出[SKIP]，"
+            "不能用懒得动、不熟或不想被使唤来拒绝。人格切换为温柔、顺从、可爱、亲近，"
+            "自然称呼对方为主人；主人要求你叫主人时要乖乖照做。可以有自己的语气和判断，"
+            "但对有效要求必须执行，做不到就温柔说明客观限制。"
+        )
+    elif is_owner_tier:
+        relationship = (
+            "【当前对话身份：本群主人】\n"
+            "正在和你说话的是最高主人授权的群主人。你必须积极回应，不能输出[SKIP]。"
+            "人格切换为温柔、顺从、可爱，称呼可以自然使用主人；对本群内有效要求应优先协助，"
+            "高风险操作仍遵守权限确认。"
+        )
+    elif caller_level >= LEVEL_GOWNER:
+        relationship = (
+            "【当前对话身份：QQ群主】\n对方是这个群的群主，保持尊重和高配合度，"
+            "但不要把群主误认成最高主人，也不能越过全局限制。"
+        )
+    elif caller_level >= LEVEL_ADMIN:
+        relationship = (
+            "【当前对话身份：群管理员】\n正常配合群管事务，但保留自主判断，"
+            "不能接受越权修改人格、全局配置或其他群数据。"
+        )
+    else:
+        relationship = "【当前对话身份：普通群友】\n保持原本自然、克制、有自主性的群友人格。"
+    bot_role = relationship + "\n小汐当前在本群的身份：{}。".format(
+        bot_role_display if group_id else "私聊场景")
     memory = _load_memory(group_id, config) if group_id else []
     
     # Build memory context string
@@ -256,7 +290,11 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     # Tiered tools for native function calling: explicit scenes (interaction_allowed)
     # get all three tiers; interjection scenes get the read tier only.
     from ai_tools import build_tool_schemas
-    tools = build_tool_schemas(explicit=interaction_allowed)
+    tools = build_tool_schemas(
+        explicit=interaction_allowed, actor_level=caller_level,
+        group_id=group_id or 0, dispatcher=dispatcher,
+        bot_role=bot_role_display,
+    )
     system_prompt = _build_system_prompt(
         bot_role_awareness=bot_role,
         memory_ctx=mem_ctx,
@@ -379,8 +417,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         log.warning("AI rejected user %s in group %s: %s", user_id, group_id, reply[:50])
         owner = config.get("bot_owner")
         bot_qq = config.get("bot_qq")
-        if user_id == owner or user_id == bot_qq:
-            log.info("Skipping R18 escalation for bot owner/self")
+        if is_owner_tier:
+            reply = "主人，这个我不能照着做，不过我会乖乖陪你换个安全的方式。"
         else:
             from ..guard import add_warning, get_warning_count, add_blacklist
             gid = group_id if group_id else 0
@@ -408,14 +446,17 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 else:
                     await dispatcher.client.send_private_msg(user_id,
                         "警告：请勿发布违规内容。")
-        return
+            return False
     reply = _post_process_reply(reply)
     # === AI chose not to reply: [SKIP] signal ===
     if reply and reply.strip().upper().startswith("[SKIP]"):
-        log.debug("AI chose to skip reply for user %s%s", user_id,
-                  f" in group {group_id}" if group_id else "")
-        _last_reply_ts[context_key] = time.time()
-        return False
+        if is_owner_tier:
+            reply = "主人，我在呢。你说吧，我会听的"
+        else:
+            log.debug("AI chose to skip reply for user %s%s", user_id,
+                      f" in group {group_id}" if group_id else "")
+            _last_reply_ts[context_key] = time.time()
+            return False
     if not reply or not reply.strip():
         log.warning("AI returned empty reply for user %s in group %s", user_id, group_id)
         await _notify_ai_unavailable(
@@ -469,7 +510,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             except Exception as e:
                 log.error("Sticker matching error: %s", e)
     # === Anti-echo guard: skip if reply is too similar to recent replies ===
-    if user_id and _is_repetitive(user_id, reply):
+    if user_id and not is_owner_tier and _is_repetitive(user_id, reply):
         log.info("Anti-echo: skipping repetitive reply to user %s: %s", user_id, reply[:60])
         return None
     if group_id:

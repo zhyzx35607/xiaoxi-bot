@@ -24,6 +24,18 @@ def get_group_config(dispatcher, group_id):
         "welcome_msg": {**defaults.get("welcome_msg", {}), **group_cfg.get("welcome_msg", {})},
         "bad_words": {**defaults.get("bad_words", {}), **group_cfg.get("bad_words", {})},
         "features": {**defaults.get("features", {}), **group_cfg.get("features", {})},
+        "napcat_features": {
+            **dispatcher.config.get("napcat_features", {}),
+            **group_cfg.get("napcat_features", {}),
+        },
+        "ai_tools": {
+            **dispatcher.config.get("ai_tools", {}),
+            **group_cfg.get("ai_tools", {}),
+        },
+        "automation": {
+            **dispatcher.config.get("automation", {}),
+            **group_cfg.get("automation", {}),
+        },
     }
     # Merge bad_words as union of default and group-specific lists
     default_words = set(defaults.get("bad_words", {}).get("words", []))

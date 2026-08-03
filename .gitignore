@@ -37,3 +37,4 @@ backups/
 *.final-audit-backup
 *.tool-backup
 *.audit-backup
+!docs/api-contracts.json

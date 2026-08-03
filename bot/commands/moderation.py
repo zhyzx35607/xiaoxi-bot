@@ -19,7 +19,7 @@ from ..utils import atomic_write_json
 from .common import CONFIG_PATH, _load, _save
 
 log = logging.getLogger("qqbot")
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 async def cmd_approve_request(d, group_id, user_id, args, role, sender_card, message):
     flag = args.strip().split(maxsplit=1)[0] if args.strip() else ""

@@ -685,9 +685,14 @@ def _dyn_entry(group_id, mid):
 
 
 async def _announce_dynamic(dispatcher, group_id, dyn):
-    text = "【B站动态】 {}\n{}\n{}".format(
+    from ..permission import get_bot_role
+    text = "【B站动态】{}\n{}\n{}".format(
         dyn["name"], dyn["text"][:300], dyn["link"])
-    segments = [{"type": "text", "data": {"text": text}}]
+    segments = []
+    bot_role, _ = await get_bot_role(dispatcher, int(group_id))
+    if bot_role in ("admin", "owner"):
+        segments.append({"type": "at", "data": {"qq": "all"}})
+    segments.append({"type": "text", "data": {"text": text}})
     for url in dyn["images"]:
         if url.startswith("//"):
             url = "https:" + url
