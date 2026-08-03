@@ -482,8 +482,6 @@ async def _collect_one_acg_image(dispatcher):
     cfg = dispatcher.config.get("acg_images", {})
     if not cfg.get("enabled", True) or not _client_connected(dispatcher):
         return False
-    if not str(dispatcher.config.get("uapi_api_key") or "").strip():
-        return False
     async with _state_lock(dispatcher):
         state = _load_acg_state()
         _prune_recent(state, dispatcher)
@@ -610,20 +608,12 @@ async def _daily_acg_push(dispatcher):
 
 
 async def _acg_collector_loop(dispatcher):
-    missing_key_logged = False
     try:
         while dispatcher.client._running:
             cfg = dispatcher.config.get("acg_images", {})
             if not cfg.get("enabled", True):
                 await asyncio.sleep(30)
                 continue
-            if not str(dispatcher.config.get("uapi_api_key") or "").strip():
-                if not missing_key_logged:
-                    log.info("ACG collector paused: uapi api key is not configured")
-                    missing_key_logged = True
-                await asyncio.sleep(300)
-                continue
-            missing_key_logged = False
             try:
                 await _collect_one_acg_image(dispatcher)
                 await _try_send_acg_delivery(dispatcher)
@@ -642,9 +632,6 @@ async def _daily_hotboard_push(dispatcher):
     if not _client_connected(dispatcher):
         log.info("Hotboard push skipped: OneBot is offline")
         return
-    if not str(dispatcher.config.get("uapi_api_key") or "").strip():
-        log.info("Hotboard push skipped: uapi api key is not configured")
-        return
     cfg = dispatcher.config.get("hotboard_push", {})
     if not cfg.get("enabled", True):
         return
@@ -656,7 +643,8 @@ async def _daily_hotboard_push(dispatcher):
     from ..integrations import uapi as _uapi
     for board in boards:
         board = str(board)[:20]
-        if not _uapi.credits_available(dispatcher.config, "auto"):
+        if not _uapi.credits_available(
+                dispatcher.config, "auto", path="/misc/hotboard"):
             log.info("hotboard push skipped: auto credit budget exhausted")
             break
         data = await _uapi.uapi_get(dispatcher, "/misc/hotboard",

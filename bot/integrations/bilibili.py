@@ -544,8 +544,6 @@ async def get_archives(dispatcher, mid, count=5):
     # uapis.cn fallback: optional, max one call per 5min, auto credit bucket
     if not bili_cfg.get("uapi_fallback", True):
         return []
-    if not str(dispatcher.config.get("uapi_api_key") or "").strip():
-        return []
     now = time.time()
     if now - _state["last_uapi_poll"] < 300:
         return []

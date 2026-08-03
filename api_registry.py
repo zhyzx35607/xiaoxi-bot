@@ -18,6 +18,7 @@ class ApiSpec:
 _NAMES = {
     "message": (
         "send_msg", "send_group_msg", "send_private_msg", "delete_msg", "get_msg",
+        "send_group_msg_reply", "send_group_msg_with_at",
         "get_group_msg_history", "mark_msg_as_read", "mark_group_msg_as_read",
         "mark_all_as_read", "set_input_status", "set_msg_emoji_like",
         "send_group_forward_msg", "send_private_forward_msg", "forward_group_single_msg",
@@ -48,7 +49,10 @@ _NAMES = {
                 "get_friend_msg_history", "get_friends_with_category", "get_recent_contact",
                 "get_robot_uin_range"),
     "request": ("get_group_system_msg", "set_friend_add_request", "set_group_add_request"),
-    "napcat": ("check_url_safely", "translate_en2zh", "send_group_sign", "get_ai_characters", "get_ai_record", "send_group_ai_record",
+    "napcat": ("get_status", "get_version_info", "get_login_info", "can_send_image",
+                "can_send_record", "check_url_safely", "translate_en2zh", "send_group_sign",
+                "get_ai_characters", "get_ai_record", "send_group_ai_record",
+                "ark_share_group", "ark_share_peer",
                 "ArkShareGroup", "ArkSharePeer", "create_collection", "get_collection_list",
                 "fetch_custom_face", "set_online_status", "set_qq_avatar", "set_self_longnick",
                 "set_group_sign", "group_poke", "send_poke",

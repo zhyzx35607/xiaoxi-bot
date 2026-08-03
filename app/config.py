@@ -93,7 +93,7 @@ def migrate_config(config):
             "bad_words": config.pop("bad_words", {"enabled": True, "auto_delete": True, "warn_msg": "@{user} 注意一下发言", "words": []}),
             "features": {
                 "ai_chat": True, "interject": True, "repeat": True, "music": True,
-                "fortune": True, "admin_cmds": True, "voice_reply": False,
+                "fortune": True, "admin_cmds": True, "voice_reply": True,
                 "auto_poke": True, "auto_essence": False
             }
         }
@@ -195,6 +195,21 @@ def migrate_config(config):
             uapi[key] = value
             migrated = True
 
+    voice_reply_defaults = {
+        "enabled": True,
+        "probability": 0.08,
+        "min_chars": 5,
+        "max_chars": 45,
+        "cooldown_seconds": 3600,
+        "daily_limit": 2,
+        "character_id": "lucy-voice-xueling",
+    }
+    voice_reply = config.setdefault("voice_reply", {})
+    for key, value in voice_reply_defaults.items():
+        if key not in voice_reply:
+            voice_reply[key] = value
+            migrated = True
+
     acg_defaults = {
         "enabled": True,
         "send_count": 20,
@@ -269,6 +284,7 @@ def migrate_config(config):
         "acg_images": True,
         "hotboard_push": True,
         "galgame_resource": True,
+        "voice_reply": True,
     }
     feats = config.setdefault("group_defaults", {}).setdefault("features", {})
     for key, value in feature_defaults.items():

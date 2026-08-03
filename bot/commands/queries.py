@@ -28,7 +28,7 @@ async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
     board = (args.strip().lower() or "weibo")
     board = alias.get(board, board)
     from .. import uapi as _uapi
-    if not _uapi.credits_available(d.config, "user"):
+    if not _uapi.credits_available(d.config, "user", path="/misc/hotboard"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
     data = await _uapi.uapi_get(d, "/misc/hotboard", params={"type": board}, kind="user")
@@ -56,7 +56,7 @@ async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
 async def _send_uapi_image(d, group_id, user_id, path, params, label):
     """Download a uapis.cn image endpoint to tmp and send it (bounded)."""
     from .. import uapi as _uapi
-    if not _uapi.credits_available(d.config, "user"):
+    if not _uapi.credits_available(d.config, "user", path=path):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
     result = await _uapi.uapi_get_binary(d, path, params=params, kind="user")
@@ -93,7 +93,7 @@ async def cmd_bing_wallpaper(d, group_id, user_id, args, role, sender_card, mess
 async def cmd_epic_free(d, group_id, user_id, args, role, sender_card, message):
     """/epic免费 — Epic free games via uapis.cn."""
     from .. import uapi as _uapi
-    if not _uapi.credits_available(d.config, "user"):
+    if not _uapi.credits_available(d.config, "user", path="/game/epic-free"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
     data = await _uapi.uapi_get(d, "/game/epic-free", kind="user")
@@ -112,14 +112,20 @@ async def cmd_epic_free(d, group_id, user_id, args, role, sender_card, message):
 async def cmd_uapi_status(d, group_id, user_id, args, role, sender_card, message):
     """/积分 — show uapis.cn credit budget usage."""
     from .. import uapi as _uapi
-    info = _uapi.credits_remaining(d.config)
+    info = await _uapi.refresh_official_quota(d)
     lines = [
         "【uapis 积分额度】",
         "今日命令：剩 {}/{}".format(info["user_left"], info["user_cap"]),
         "今日预留（自动任务）：剩 {}/{}".format(info["auto_left"], info["auto_cap"]),
-        "本月累计：已用 {}，上限 {}".format(
-            info["month_cap"] - info["month_left"], info["month_cap"]),
+        "本地保护额度：本月已记 {}，上限 {}".format(
+            info["month_used"], info["month_cap"]),
     ]
+    official_left = info.get("official_month_remaining")
+    official_cap = info.get("official_month_limit")
+    if official_left is not None and official_cap:
+        lines.append("官方额度：剩 {}/{}".format(official_left, official_cap))
+    else:
+        lines.append("官方额度：暂未从响应头获取")
     await d._reply(group_id, user_id, "\n".join(lines))
 
 async def cmd_weather(d, group_id, user_id, args, role, sender_card, message):
@@ -129,7 +135,7 @@ async def cmd_weather(d, group_id, user_id, args, role, sender_card, message):
         return
     from .. import uapi as _uapi
     data = None
-    if _uapi.credits_available(d.config, "user"):
+    if _uapi.credits_available(d.config, "user", path="/misc/weather"):
         data = await _uapi.uapi_get(d, "/misc/weather",
                                     params={"city": city[:20]}, kind="user")
     if data:
@@ -142,8 +148,7 @@ async def cmd_weather(d, group_id, user_id, args, role, sender_card, message):
             data.get("report_time", ""),
         )
     else:
-        from ..ai import deepseek_chat
-        reply = await deepseek_chat(d, "查询" + city + "今天天气，给出温度、天气状况、穿衣建议。简短一句话。")
+        reply = "天气服务暂时没取到可靠数据，晚点再查吧"
     await d._reply(group_id, user_id, reply)
 
 async def cmd_translate(d, group_id, user_id, args, role, sender_card, message):
