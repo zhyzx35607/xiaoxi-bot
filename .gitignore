@@ -19,6 +19,7 @@ docs/
 !docs/
 docs/*
 !docs/architecture.md
+!docs/napcat-docs-manifest.json
 
 CLAUDE.md
 .claude/

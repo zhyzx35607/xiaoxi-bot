@@ -151,7 +151,7 @@ Tests cover: chat logging, tail reader, API result normalization, NapCat tool ga
 - An RSS watchdog (`dispatcher.start_rss_guard`) logs memory growth and triggers a graceful SIGTERM restart at `runtime.rss_restart_mb` (default 700 MB, below the current systemd `MemoryMax=1G`).
 - `tmp/` holds transient video/image downloads; files are deleted right after sending.
 - Bilibili push state advances only after a confirmed send. Ambiguous timeouts are checked against recent group history before the next retry.
-- ACG pushes are split using `acg_images.batch_size` (default 10); failed per-group batches persist in `data/acg_history.json` for the next scheduled retry.
+- ACG content uses a persistent 20-image pool with seven-day URL deduplication. Random daily windows and pending per-group deliveries persist in `data/acg_history.json`.
 
 
 ## Runtime reliability rules

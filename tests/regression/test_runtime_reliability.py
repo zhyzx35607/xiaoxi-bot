@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from bot import bilibili, scheduler
-from main import load_config
+from main import load_config, migrate_config
 
 
 class ConfigRecoveryTests(unittest.TestCase):
@@ -49,6 +49,21 @@ class ConfigRecoveryTests(unittest.TestCase):
             self.assertEqual(json.loads(Path(path).read_text(encoding="utf-8")), {"safe": True})
             if os.name != "nt":
                 self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+
+class ContentConfigMigrationTests(unittest.TestCase):
+    def test_random_content_defaults_are_added(self):
+        config, migrated = migrate_config({})
+        self.assertTrue(migrated)
+        self.assertEqual(config["acg_images"]["send_count"], 20)
+        self.assertEqual(config["acg_images"]["dedupe_days"], 7)
+        self.assertEqual(len(config["acg_images"]["windows"]), 4)
+        self.assertEqual(config["hotboard_push"]["detail_count"], 10)
+        self.assertEqual(len(config["hotboard_push"]["windows"]), 2)
+        self.assertNotIn("times", config["acg_images"])
+        self.assertNotIn("count", config["acg_images"])
+        self.assertNotIn("batch_size", config["acg_images"])
+        self.assertNotIn("times", config["hotboard_push"])
 
 
 class NapCatWatchdogTests(unittest.TestCase):
@@ -121,8 +136,10 @@ class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
                 scheduler._save_acg_history([], {"100": ["https://example.com/a.jpg"]})
                 await scheduler._daily_acg_push(Stub())
-                self.assertNotIn("100", scheduler._load_acg_state()["pending"])
-        self.assertEqual(len(sent), 1)
+                state = scheduler._load_acg_state()
+                self.assertTrue(state["pending_due"])
+                self.assertEqual(state["pool"], ["https://example.com/a.jpg"])
+        self.assertEqual(len(sent), 0)
 
     async def test_checkin_skips_when_onebot_offline(self):
         class Client:

@@ -50,6 +50,9 @@ class ArchitectureRegressionTests(unittest.TestCase):
                 with open(path, encoding="utf-8") as handle:
                     self.assertLessEqual(sum(1 for _ in handle), limit)
 
+    def test_removed_security_monolith_does_not_return(self):
+        self.assertFalse(os.path.exists(os.path.join(ROOT, "bot", "security.py")))
+
     def test_runtime_paths_remain_compatible(self):
         from bot.integrations import bilibili, uapi
         from bot.services import scheduler

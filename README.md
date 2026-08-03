@@ -33,7 +33,7 @@
 - B站功能：群里发 B站视频链接/BV号/b23 短链（包括 QQ 分享卡片），自动解析出标题、封面、播放量等信息，并尽量把视频本体发出来（免登录官方接口，超限自动降级为只发信息）
 - UP 主推送：每个群可以盯几个 B站 UP 主，新投稿约 1 分钟内推到群里（Bot 是管理会顺便 @全体）
 - Galgame 资源查询：通过 TouchGal 官方 API 搜索作品、识别平台并返回官方详情/资源页，不发送网盘直链；群内可按群开关自动识别。
-- 定时推送：每天 0/6/12/18 点发一波随机 ACG 图（50 张合并转发，记住发过的图尽量不重复），9 点和 21 点发热搜榜（默认微博，AI 先概括热点、每条带链接）；都可按群开关
+- Scheduled content: four ACG packages are randomized inside 08-11, 12-15, 16-19, and 20-23; two evidence-based Weibo digests are randomized inside 10-13 and 19-22. Each ACG package contains exactly 20 images.
 
 **AI 工具调用：**
 - AI 聊天时能自己调用只读工具查群信息、查天气热榜等（最多连调 2 轮）
@@ -101,7 +101,7 @@ sudo systemctl enable --now qqbot.service
 
 config.json 里可以按群开关各种功能，调整 AI 插话的积极性、频率限制等等。用到的时候看看文件里的注释就行。
 
-ACG 定时推送默认仍取 50 张图，但按每批 10 张发送。某个群的批次发送失败时，URL 会记录到待重试列表，下次定时任务优先补发，不会因为一次超时直接丢失整批图片。可通过 `acg_images.count` 和 `acg_images.batch_size` 调整数量与批大小。
+ACG images are collected into a persistent pool. A scheduled delivery waits until 20 unique images are ready, then sends one merged-forward package; recently sent URLs become eligible again after seven days.
 
 ## 命令一览
 
@@ -317,7 +317,7 @@ bot/
 
 - 定时任务默认使用 `Asia/Shanghai` 时区，可通过 `runtime.scheduler_timezone` 调整。
 - OneBot WebSocket 离线时，签到、ACG、热榜和 B站推送会跳过本轮，恢复连接后只执行未来任务。
-- ACG 新图片需要配置 `UAPI_API_KEY`；历史待重试图片仍会继续发送，并按每批 10 张拆分。
+- New ACG images require `UAPI_API_KEY`; the persistent collector pauses without a key and resumes without losing a pending delivery.
 - B站官方接口出现 `-352` 或 `-412` 风控后默认暂停 30 分钟，可通过 `bilibili.risk_cooldown_seconds` 调整。
 - 配置文件和 `config.json.last-good` 会使用 `0600` 权限保存，环境变量中的密钥不会写回配置文件。
 - 生产环境建议使用 `deploy/qqbot.service`、`deploy/napcat.service` 及配套 timer，由 systemd 管理完整进程树。

@@ -197,12 +197,17 @@ def migrate_config(config):
 
     acg_defaults = {
         "enabled": True,
-        "times": [0, 6, 12, 18],
-        "count": 50,
-        "batch_size": 10,
+        "send_count": 20,
+        "minimum_count": 20,
+        "dedupe_days": 7,
+        "collector_interval_seconds": 1,
+        "windows": [
+            ["08:00", "11:00"], ["12:00", "15:00"],
+            ["16:00", "19:00"], ["20:00", "23:00"],
+        ],
     }
     acg = config.setdefault("acg_images", {})
-    for obsolete_key in ("min", "max"):
+    for obsolete_key in ("min", "max", "times", "count", "batch_size"):
         if obsolete_key in acg:
             del acg[obsolete_key]
             migrated = True
@@ -213,10 +218,14 @@ def migrate_config(config):
 
     hotboard_defaults = {
         "enabled": True,
-        "times": [9, 21],
-        "types": ["bilibili"],
+        "types": ["weibo"],
+        "detail_count": 10,
+        "windows": [["10:00", "13:00"], ["19:00", "22:00"]],
     }
     hotboard = config.setdefault("hotboard_push", {})
+    if "times" in hotboard:
+        del hotboard["times"]
+        migrated = True
     for key, value in hotboard_defaults.items():
         if key not in hotboard:
             hotboard[key] = value
