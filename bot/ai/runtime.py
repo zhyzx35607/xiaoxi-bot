@@ -486,21 +486,28 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             # Typing delay proportional to reply length
             await asyncio.sleep(_typing_delay_secs(clean_reply))
             segments = _split_reply_lines(clean_reply) or [clean_reply]
-            for i, seg_text in enumerate(segments):
-                seg_text = seg_text.strip()
-                if not seg_text:
-                    continue
-                _segs = _build_group_reply_segments(
-                    seg_text, at_qqs if i == 0 else ())
-                if i == len(segments) - 1 and sticker_file:
-                    _segs.append({"type": "image", "data": {"file": sticker_file}})
-                if quote_text and message_id and i == 0:
-                    await dispatcher.client.send_group_msg_reply(group_id, _segs, message_id)
-                else:
-                    await dispatcher.client.send_group_msg(group_id, _segs)
-                if i < len(segments) - 1:
-                    await asyncio.sleep(random.uniform(0.5, 2.0))
-            log.debug("Split reply into %d segments for group %s", len(segments), group_id)
+            voice_sent = False
+            if (len(segments) == 1 and not at_qqs and not quote_text
+                    and not poke_targets and not sticker_file):
+                from ..services.voice_reply import maybe_send_short_voice
+                voice_sent = await maybe_send_short_voice(
+                    dispatcher, group_id, segments[0].strip())
+            if not voice_sent:
+                for i, seg_text in enumerate(segments):
+                    seg_text = seg_text.strip()
+                    if not seg_text:
+                        continue
+                    _segs = _build_group_reply_segments(
+                        seg_text, at_qqs if i == 0 else ())
+                    if i == len(segments) - 1 and sticker_file:
+                        _segs.append({"type": "image", "data": {"file": sticker_file}})
+                    if quote_text and message_id and i == 0:
+                        await dispatcher.client.send_group_msg_reply(group_id, _segs, message_id)
+                    else:
+                        await dispatcher.client.send_group_msg(group_id, _segs)
+                    if i < len(segments) - 1:
+                        await asyncio.sleep(random.uniform(0.5, 2.0))
+                log.debug("Split reply into %d segments for group %s", len(segments), group_id)
             for target in poke_targets[:1]:
                 if target:
                     await dispatcher.client.group_poke(group_id, target)

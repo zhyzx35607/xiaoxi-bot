@@ -1054,7 +1054,7 @@ class UapiBudgetTests(unittest.TestCase):
                 self.assertFalse(uapi.credits_available(config, "user"))
                 # auto bucket still available
                 self.assertTrue(uapi.credits_available(config, "auto"))
-                for _ in range(15):
+                for _ in range(30):
                     self.assertTrue(uapi._charge(config, "/misc/hotboard", "auto"))
                 self.assertFalse(uapi.credits_available(config, "auto"))
                 # free endpoint never blocked
@@ -1077,6 +1077,24 @@ class UapiBudgetTests(unittest.TestCase):
                 self.assertEqual(uapi._load_state()["day_user"], 0)
                 uapi.reset_state_for_test()
 
+    def test_legacy_pre_response_header_counters_are_reset(self):
+        from bot import uapi
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "s.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({
+                    "date": uapi._today(), "month": uapi._month(),
+                    "day_user": 50, "day_auto": 20, "month_used": 999,
+                }, handle)
+            with patch.object(uapi, "_STATE_PATH", path):
+                uapi.reset_state_for_test()
+                state = uapi._load_state()
+                self.assertEqual(state["accounting_version"], 2)
+                self.assertEqual(state["day_user"], 0)
+                self.assertEqual(state["day_auto"], 0)
+                self.assertEqual(state["month_used"], 0)
+                uapi.reset_state_for_test()
+
     def test_month_limit_blocks_all(self):
         from bot import uapi
         with tempfile.TemporaryDirectory() as tmp:
@@ -1091,21 +1109,178 @@ class UapiBudgetTests(unittest.TestCase):
                 self.assertTrue(uapi._charge(config, "/random/image", "user"))
                 uapi.reset_state_for_test()
 
-    def test_missing_key_warning_is_rate_limited_per_endpoint(self):
+    def test_missing_key_uses_visitor_quota_and_rate_limits_log(self):
         from bot import uapi
+
+        class Response:
+            status = 200
+            headers = {"Uapi-Credits-Charged": "0"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def json(self, content_type=None):
+                return {"answer": "ok"}
+
+        class Session:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, url, **kwargs):
+                self.calls.append(kwargs)
+                return Response()
+
+        class Client:
+            session = Session()
 
         class Stub:
             config = {}
+            client = Client()
 
         uapi.reset_state_for_test()
-        with patch.object(uapi.log, "warning") as warning, \
+        with patch.object(uapi.log, "info") as info, \
                 patch.object(uapi.log, "debug") as debug:
-            asyncio.run(uapi.uapi_get(Stub(), "/misc/weather"))
-            asyncio.run(uapi.uapi_get(Stub(), "/misc/weather"))
-            asyncio.run(uapi.uapi_get(Stub(), "/misc/hotboard"))
-        self.assertEqual(warning.call_count, 2)
+            asyncio.run(uapi.uapi_get(Stub(), "/answerbook/ask"))
+            asyncio.run(uapi.uapi_get(Stub(), "/answerbook/ask"))
+            asyncio.run(uapi.uapi_get(Stub(), "/image/bing-daily"))
+        self.assertEqual(info.call_count, 2)
         debug.assert_called_once()
+        self.assertEqual([call["headers"] for call in Stub.client.session.calls], [{}, {}, {}])
         uapi.reset_state_for_test()
+
+    def test_refresh_official_quota_uses_free_header_endpoint(self):
+        from bot import uapi
+
+        class Stub:
+            config = self._config()
+
+        async def fake_request(dispatcher, method, path, **kwargs):
+            self.assertIs(dispatcher, stub)
+            self.assertEqual(method, "GET")
+            self.assertEqual(path, "/saying")
+            self.assertEqual(kwargs["kind"], "user")
+            return {"text": "ok"}
+
+        stub = Stub()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(uapi, "_STATE_PATH", os.path.join(tmp, "s.json")), \
+                    patch.object(uapi, "_json_request", side_effect=fake_request) as request:
+                uapi.reset_state_for_test()
+                info = asyncio.run(uapi.refresh_official_quota(stub))
+        request.assert_awaited_once()
+        self.assertIsNone(info["official_month_remaining"])
+        uapi.reset_state_for_test()
+
+    def test_response_headers_are_authoritative_for_charge_and_quota(self):
+        from bot import uapi
+
+        class Response:
+            status = 200
+            headers = {
+                "Uapi-Credits-Charged": "1",
+                "Ratelimit": '"billing-key-rate";r=6,"billing-quota";r=3490;uapi-unit="credits"',
+                "Ratelimit-Policy": '"billing-key-rate";q=7,"billing-quota";q=3500;uapi-unit="credits"',
+            }
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def json(self, content_type=None):
+                return {"list": []}
+
+        class Session:
+            def request(self, method, url, **kwargs):
+                return Response()
+
+        class Client:
+            session = Session()
+
+        class Stub:
+            config = self._config()
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(uapi, "_STATE_PATH", os.path.join(tmp, "s.json")):
+                uapi.reset_state_for_test()
+                asyncio.run(uapi.uapi_get(Stub(), "/misc/hotboard"))
+                info = uapi.credits_remaining(Stub.config)
+        self.assertEqual(info["day_used"], 1)
+        self.assertEqual(info["official_month_remaining"], 3490)
+        self.assertEqual(info["official_month_limit"], 3500)
+        uapi.reset_state_for_test()
+
+
+class ShortVoiceReplyTests(unittest.IsolatedAsyncioTestCase):
+    def _stub(self, client, probability=1.0, enabled=True):
+        class Stub:
+            config = {
+                "voice_reply": {
+                    "enabled": True,
+                    "probability": probability,
+                    "min_chars": 5,
+                    "max_chars": 45,
+                    "cooldown_seconds": 3600,
+                    "daily_limit": 2,
+                    "character_id": "lucy-voice-xueling",
+                },
+                "group_defaults": {"features": {"voice_reply": enabled}},
+                "groups": {"100": {"enabled": True, "features": {}}},
+            }
+        stub = Stub()
+        stub.client = client
+        return stub
+
+    async def test_short_voice_success_obeys_cooldown(self):
+        from bot.services import voice_reply
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def send_group_ai_record(self, group_id, character, text):
+                self.calls.append((group_id, character, text))
+                return {"status": "ok", "retcode": 0}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "voice.json")
+            client = Client()
+            stub = self._stub(client)
+            with patch.object(voice_reply, "_STATE_PATH", path), \
+                    patch.object(voice_reply.random, "random", return_value=0):
+                voice_reply.reset_state_for_test()
+                self.assertTrue(await voice_reply.maybe_send_short_voice(
+                    stub, 100, "????????"))
+                self.assertFalse(await voice_reply.maybe_send_short_voice(
+                    stub, 100, "????????"))
+                state = voice_reply._load_state()
+            self.assertEqual(len(client.calls), 1)
+            self.assertEqual(client.calls[0][1], "lucy-voice-xueling")
+            self.assertEqual(state["groups"]["100"]["count"], 1)
+            voice_reply.reset_state_for_test()
+
+    async def test_voice_rejects_links_long_text_and_disabled_group(self):
+        from bot.services import voice_reply
+
+        class Client:
+            async def send_group_ai_record(self, group_id, character, text):
+                raise AssertionError("ineligible text must not call NapCat")
+
+        voice_reply.reset_state_for_test()
+        stub = self._stub(Client())
+        self.assertFalse(await voice_reply.maybe_send_short_voice(
+            stub, 100, "?? https://example.com"))
+        self.assertFalse(await voice_reply.maybe_send_short_voice(
+            stub, 100, "??" * 30))
+        disabled = self._stub(Client(), enabled=False)
+        self.assertFalse(await voice_reply.maybe_send_short_voice(
+            disabled, 100, "????????"))
+        voice_reply.reset_state_for_test()
 
 
 class InteractionQuotaTests(unittest.IsolatedAsyncioTestCase):

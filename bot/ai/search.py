@@ -62,7 +62,8 @@ async def search_web(dispatcher, query):
 async def _search_web_uapi(dispatcher, query):
     """Primary search path: uapis.cn aggregate search via the credit channel."""
     from bot import uapi
-    if not uapi.credits_available(dispatcher.config, "user"):
+    if not uapi.credits_available(
+            dispatcher.config, "user", path="/search/aggregate"):
         log.debug("uapi search skipped: credit budget exhausted")
         return ""
     data = await uapi.uapi_post(dispatcher, "/search/aggregate",

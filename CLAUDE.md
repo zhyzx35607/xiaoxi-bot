@@ -98,7 +98,7 @@ The owner can issue cross-group commands from private chat by prefixing with a g
 
 ## uapis.cn credit budget
 
-`bot/uapi.py` gates every uapis.cn call. Config section `uapi`: `daily_limit` (100) split into user bucket (`daily_limit - reserve` = 70) and auto bucket (`reserve` = 30, for scheduled/background tasks), plus `month_limit` (3400, free quota resets on the 1st). State lives in `data/uapi_state.json` with day/month rollover. Budget exhaustion is silent (log only) — commands pre-check `credits_available()` to reply "额度用完". Free endpoints (cost 0, e.g. `/random/image`) are never blocked.
+`bot/uapi.py` applies local command/automation protection buckets while recording actual UApiS debits from `Uapi-Credits-Charged`. Official monthly remaining quota is parsed from rate-limit response headers and persisted in `data/uapi_state.json`. Requests without a key use visitor quota; free endpoints retry without authentication if a configured key is rejected.
 
 ## Bilibili integration
 

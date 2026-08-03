@@ -24,10 +24,10 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 async def cmd_saying(d, group_id, user_id, args, role, sender_card, message):
     """/一言 — random quote via uapis.cn."""
     from .. import uapi as _uapi
-    if not _uapi.credits_available(d.config, "user"):
+    if not _uapi.credits_available(d.config, "user", path="/saying"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
-    data = await _uapi.uapi_get(d, "/saying/random", kind="user")
+    data = await _uapi.uapi_get(d, "/saying", kind="user")
     if not data:
         await d._reply(group_id, user_id, "没取到一言，等会再试")
         return
@@ -39,7 +39,7 @@ async def cmd_saying(d, group_id, user_id, args, role, sender_card, message):
 async def cmd_answerbook(d, group_id, user_id, args, role, sender_card, message):
     """/答案之书 [问题] — answer book via uapis.cn."""
     from .. import uapi as _uapi
-    if not _uapi.credits_available(d.config, "user"):
+    if not _uapi.credits_available(d.config, "user", path="/answerbook/ask"):
         await d._reply(group_id, user_id, "今日积分额度用完了，明天再来")
         return
     question = args.strip()[:60] or "今天会发生什么"

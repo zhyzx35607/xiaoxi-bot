@@ -202,6 +202,9 @@ class OneBotClient:
                                         log.warning("Message queue full while closing reader")
 
                         reader_task = asyncio.create_task(ws_reader())
+                        probe_task = asyncio.create_task(self._probe_core_capabilities())
+                        self._event_tasks.add(probe_task)
+                        probe_task.add_done_callback(self._event_tasks.discard)
 
                         while self._running:
                             item = await msg_queue.get()
@@ -333,6 +336,52 @@ class OneBotClient:
 
     async def group_poke(self, group_id, user_id):
         return await self.call("group_poke", {"group_id": group_id, "user_id": user_id})
+
+    async def _probe_core_capabilities(self):
+        """Probe a small read-only capability set after each connection."""
+        actions = (
+            ("get_status", self.get_status),
+            ("get_version_info", self.get_version_info),
+            ("get_login_info", self.get_login_info),
+            ("can_send_image", self.can_send_image),
+            ("can_send_record", self.can_send_record),
+            ("get_robot_uin_range", self.get_robot_uin_range),
+        )
+        results = {}
+        for action, handler in actions:
+            if not self.is_connected:
+                return
+            try:
+                results[action] = await handler()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                log.info("NapCat capability probe %s failed: %s", action, error)
+        version_data = (results.get("get_version_info") or {}).get("data") or {}
+        status_data = (results.get("get_status") or {}).get("data") or {}
+        log.info(
+            "NapCat probe: version=%s protocol=%s online=%s image=%s record=%s",
+            version_data.get("app_version") or "unknown",
+            version_data.get("protocol_version") or "unknown",
+            status_data.get("online"),
+            ((results.get("can_send_image") or {}).get("data") or {}).get("yes"),
+            ((results.get("can_send_record") or {}).get("data") or {}).get("yes"),
+        )
+
+    async def get_status(self):
+        return await self.call("get_status", {})
+
+    async def get_version_info(self):
+        return await self.call("get_version_info", {})
+
+    async def get_login_info(self):
+        return await self.call("get_login_info", {})
+
+    async def can_send_image(self):
+        return await self.call("can_send_image", {})
+
+    async def can_send_record(self):
+        return await self.call("can_send_record", {})
 
     async def api_status(self):
         """Return registry status without probing every API on a low-memory host."""

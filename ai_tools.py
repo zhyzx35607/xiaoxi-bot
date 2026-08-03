@@ -120,7 +120,7 @@ async def get_at_all_remain(dispatcher, group_id):
 
 async def uapi_weather(dispatcher, city):
     from bot import uapi
-    if not uapi.credits_available(dispatcher.config, "user"):
+    if not uapi.credits_available(dispatcher.config, "user", path="/misc/weather"):
         return {"ok": False, "error": "credit_budget_exhausted"}
     data = await uapi.uapi_get(dispatcher, "/misc/weather",
                                params={"city": str(city)[:20]}, kind="user")
@@ -137,7 +137,7 @@ async def uapi_weather(dispatcher, city):
 async def uapi_hotboard(dispatcher, type="weibo"):
     from bot import uapi
     board = str(type or "weibo")[:20]
-    if not uapi.credits_available(dispatcher.config, "user"):
+    if not uapi.credits_available(dispatcher.config, "user", path="/misc/hotboard"):
         return {"ok": False, "error": "credit_budget_exhausted"}
     data = await uapi.uapi_get(dispatcher, "/misc/hotboard",
                                params={"type": board}, kind="user")
@@ -153,9 +153,9 @@ async def uapi_hotboard(dispatcher, type="weibo"):
 
 async def uapi_saying(dispatcher):
     from bot import uapi
-    if not uapi.credits_available(dispatcher.config, "user"):
+    if not uapi.credits_available(dispatcher.config, "user", path="/saying"):
         return {"ok": False, "error": "credit_budget_exhausted"}
-    data = await uapi.uapi_get(dispatcher, "/saying/random", kind="user")
+    data = await uapi.uapi_get(dispatcher, "/saying", kind="user")
     if not data:
         return {"ok": False, "error": "uapi_failed"}
     return {"ok": True, "data": {
@@ -166,7 +166,7 @@ async def uapi_saying(dispatcher):
 
 async def uapi_answerbook(dispatcher, question=""):
     from bot import uapi
-    if not uapi.credits_available(dispatcher.config, "user"):
+    if not uapi.credits_available(dispatcher.config, "user", path="/answerbook/ask"):
         return {"ok": False, "error": "credit_budget_exhausted"}
     data = await uapi.uapi_get(dispatcher, "/answerbook/ask",
                                params={"question": str(question)[:60] or "今天会发生什么"},
@@ -178,7 +178,7 @@ async def uapi_answerbook(dispatcher, question=""):
 
 async def uapi_epic_free(dispatcher):
     from bot import uapi
-    if not uapi.credits_available(dispatcher.config, "user"):
+    if not uapi.credits_available(dispatcher.config, "user", path="/game/epic-free"):
         return {"ok": False, "error": "credit_budget_exhausted"}
     data = await uapi.uapi_get(dispatcher, "/game/epic-free", kind="user")
     games = (data or {}).get("data") if isinstance(data, dict) else None
@@ -398,7 +398,7 @@ async def get_recent_contact(dispatcher, count=10):
 
 async def uapi_search(dispatcher, query):
     from bot import uapi
-    if not uapi.credits_available(dispatcher.config, "user"):
+    if not uapi.credits_available(dispatcher.config, "user", path="/search/aggregate"):
         return {"ok": False, "error": "credit_budget_exhausted"}
     data = await uapi.uapi_post(dispatcher, "/search/aggregate",
                                 json_body={"query": str(query)[:80]}, kind="user")
@@ -409,7 +409,7 @@ async def uapi_search(dispatcher, query):
 
 async def uapi_translate(dispatcher, text):
     from bot import uapi
-    if not uapi.credits_available(dispatcher.config, "user"):
+    if not uapi.credits_available(dispatcher.config, "user", path="/translate/text"):
         return {"ok": False, "error": "credit_budget_exhausted"}
     data = await uapi.uapi_post(dispatcher, "/translate/text",
                                 json_body={"text": str(text)[:300]}, kind="user")
