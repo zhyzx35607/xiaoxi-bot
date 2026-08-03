@@ -1,0 +1,27 @@
+{
+  "source": "NapNeko/NapCatDocs",
+  "inspected_on": "2026-08-03",
+  "files": {
+    "onebot_index.md": {
+      "bytes": 679,
+      "sha256": "470444b139e1d4a819a92ec6a0d41a5d17aedee7b3ef8c158b7737c624b0ae52"
+    },
+    "onebot_api.md": {
+      "bytes": 11414,
+      "sha256": "b3cc2f87464d58663d4b3d7db4fc5f8fc1b643cb3b2edb0cb8795ceeeda9aed1"
+    },
+    "onebot_event.md": {
+      "bytes": 14814,
+      "sha256": "23cf4fcb213f9475a2c85a0b0eeb09ddd5150b6b76b5424ad272fef1899e3aa0"
+    },
+    "onebot_segment.md": {
+      "bytes": 7157,
+      "sha256": "bc3792f208837edd38245e5573e7089afc272206158d684bc866beee8d71d1a9"
+    },
+    "onebot_basic_event.md": {
+      "bytes": 11027,
+      "sha256": "468b51c4b0e14878a4c7c140b30ef6b3f457a80b8f5c78fd64a5449c9d2824e4"
+    }
+  },
+  "note": "Run scripts/sync_napcat_docs.py to refresh from the official split API index."
+}

@@ -14,6 +14,35 @@ from .context import (_cq_unescape, _event_scope_allowed, _log_chat_message, _re
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_FRIEND_CACHE_PATH = os.path.join(_ROOT, "data", "friend_cache.json")
+
+
+def _load_persisted_friend_cache(max_age=86400):
+    if os.getenv("QQBOT_DISABLE_PERSISTENT_FRIEND_CACHE"):
+        return set(), 0
+    try:
+        with open(_FRIEND_CACHE_PATH, encoding="utf-8") as handle:
+            data = json.load(handle)
+        timestamp = float(data.get("timestamp", 0) or 0)
+        if time.time() - timestamp > max_age:
+            return set(), 0
+        friends = {int(value) for value in data.get("friends", []) if int(value or 0)}
+        return friends, timestamp
+    except Exception:
+        return set(), 0
+
+
+def _save_persisted_friend_cache(friends, timestamp):
+    if os.getenv("QQBOT_DISABLE_PERSISTENT_FRIEND_CACHE"):
+        return
+    try:
+        atomic_write_json(_FRIEND_CACHE_PATH, {
+            "timestamp": float(timestamp),
+            "friends": sorted(int(value) for value in friends),
+        }, indent=2)
+    except Exception as error:
+        log.warning("Friend cache save failed: %s", error)
+
 
 class GroupMessageMixin:
     async def _handle_self_message(self, event):
@@ -787,16 +816,10 @@ class PrivateMessageMixin:
             await self._reply(None, user_id, "未知命令，输入 /help 查看可用命令")
 
     async def _is_friend(self, user_id):
-        """Check if user is a friend of the bot (lazy-load, no periodic refresh).
-
-        Cache populated on first private message only. Never proactively
-        refreshes — on low-spec servers with 800+ friends, periodic
-        get_friend_list is wasteful.
-        """
+        """Check friendship with retries and a 24-hour persisted fallback."""
         now = time.time()
         if not hasattr(self, "_friend_cache"):
-            self._friend_cache = set()
-            self._friend_cache_ts = 0
+            self._friend_cache, self._friend_cache_ts = _load_persisted_friend_cache()
         if self._friend_cache and now - self._friend_cache_ts < 3600:
             return user_id in self._friend_cache
         if now < self._friend_retry_after:
@@ -808,29 +831,33 @@ class PrivateMessageMixin:
                 return user_id in self._friend_cache
             if now < self._friend_retry_after:
                 return user_id in self._friend_cache
-            try:
-                result = await self.client.call("get_friend_list", {})
-                if result.get("status") == "ok":
-                    friends = {
-                        int(item.get("user_id", 0))
-                        for item in result.get("data", [])
-                        if item.get("user_id")
-                    }
-                    self._friend_cache = friends
-                    self._friend_cache_ts = now
-                    self._friend_retry_after = 0.0
-                    log.info("Friend cache loaded on demand: %d friends", len(friends))
-                    return user_id in friends
-                log.warning("get_friend_list returned %s", result.get("status", "?"))
-            except Exception as e:
-                log.warning("get_friend_list failed: %s", e)
-
-            self._friend_retry_after = now + 60
+            last_status = "failed"
+            for attempt in range(3):
+                try:
+                    result = await self.client.call("get_friend_list", {})
+                    last_status = result.get("status", "?") if isinstance(result, dict) else str(result)
+                    if isinstance(result, dict) and result.get("status") == "ok":
+                        friends = {
+                            int(item.get("user_id", 0))
+                            for item in result.get("data", [])
+                            if item.get("user_id")
+                        }
+                        self._friend_cache = friends
+                        self._friend_cache_ts = time.time()
+                        self._friend_retry_after = 0.0
+                        _save_persisted_friend_cache(friends, self._friend_cache_ts)
+                        log.info("Friend cache loaded on demand: %d friends", len(friends))
+                        return user_id in friends
+                except Exception as error:
+                    last_status = str(error)
+                if attempt < 2:
+                    await asyncio.sleep(attempt + 1)
+            log.warning("get_friend_list failed after retries: %s", last_status)
+            self._friend_retry_after = time.time() + 60
             if self._friend_cache:
-                self._friend_cache_ts = now
-                log.debug("Friend API failed, using stale cache (%d entries)", len(self._friend_cache))
+                log.info("Friend API failed, using persisted/stale cache (%d entries)", len(self._friend_cache))
                 return user_id in self._friend_cache
-            log.warning("Friend list never loaded, rejecting user %s until retry", user_id)
+            log.warning("Friend list unavailable, rejecting user %s until retry", user_id)
             return False
 
     async def _handle_private_ai_chat(self, user_id, message, raw, sender, message_id):

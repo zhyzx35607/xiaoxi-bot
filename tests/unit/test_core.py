@@ -2,8 +2,10 @@
 
 import unittest
 import asyncio
+import json
 import os
 import tempfile
+import time
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
@@ -178,7 +180,7 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = Dispatcher({"runtime": {}}, client)
         self.assertFalse(await dispatcher._is_friend(999))
         self.assertFalse(await dispatcher._is_friend(999))
-        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.calls, 3)
 
     async def test_deepseek_request_uses_bounded_timeout(self):
         class Response:
@@ -1150,10 +1152,32 @@ class SchedulerJobTests(unittest.TestCase):
                 "hotboard_push": {"enabled": True, "times": [9, 21]},
             }
 
-        jobs = dict(scheduler._scheduled_jobs(Stub()))
-        self.assertIn("checkin", jobs)
-        self.assertIn("acg", jobs)
-        self.assertIn("hotboard", jobs)
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
+                jobs = scheduler._scheduled_jobs(Stub())
+        names = {job[0] for job in jobs}
+        self.assertIn("checkin", names)
+        self.assertIn("acg", names)
+        self.assertIn("hotboard", names)
+
+    def test_random_schedule_is_persisted(self):
+        class Stub:
+            config = {
+                "runtime": {"scheduler_timezone": "Asia/Shanghai"},
+                "acg_images": {"enabled": True},
+                "hotboard_push": {"enabled": True},
+            }
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
+                scheduler._scheduled_jobs(Stub())
+                first = scheduler._load_acg_state()["schedule"]
+                scheduler._scheduled_jobs(Stub())
+                second = scheduler._load_acg_state()["schedule"]
+        self.assertEqual(first, second)
+        self.assertEqual(len(first["acg"]), 4)
+        self.assertEqual(len(first["hotboard"]), 2)
 
     def test_format_hotboard(self):
         text = scheduler.format_hotboard(
@@ -1608,8 +1632,7 @@ class HotboardFormatTests(unittest.TestCase):
             summary="今天都在聊大新闻",
         )
         self.assertEqual(len(nodes), 3)
-        self.assertEqual(nodes[0]["data"]["content"],
-                         "【微博热榜】\n今天都在聊大新闻")
+        self.assertEqual(nodes[0]["data"]["content"], '【微博热榜】\n今天都在聊大新闻')
         self.assertEqual(nodes[0]["data"]["uin"], "3127014580")
         self.assertIn("1. 大新闻（123）", nodes[1]["data"]["content"])
         self.assertIn("https://example.com/1", nodes[1]["data"]["content"])
@@ -1646,12 +1669,13 @@ class HotboardPushTests(unittest.IsolatedAsyncioTestCase):
                 {"title": "热点二", "url": "https://example.com/2"},
             ]}
 
-        async def fake_summary(dispatcher, board, items):
-            return "热点概况"
+        async def fake_digest(dispatcher, board, items):
+            return {"summary": '热点概况', "details": ['细节一', '细节二'],
+                    "items": items}
 
         with patch("bot.uapi.credits_available", return_value=True), \
                 patch("bot.uapi.uapi_get", fake_uapi_get), \
-                patch.object(scheduler, "ai_hotboard_summary", fake_summary), \
+                patch.object(scheduler, "build_detailed_hotboard", fake_digest), \
                 patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
             await scheduler._daily_hotboard_push(Stub())
 
@@ -1659,137 +1683,124 @@ class HotboardPushTests(unittest.IsolatedAsyncioTestCase):
         group_id, nodes = sent[0]
         self.assertEqual(group_id, 100)
         self.assertEqual(len(nodes), 3)
-        self.assertEqual(nodes[0]["data"]["content"], "【微博热榜】\n热点概况")
+        self.assertEqual(nodes[0]["data"]["content"], '【微博热榜】\n热点概况')
         self.assertIn("热点一（999）", nodes[1]["data"]["content"])
 
 
-class AcgPushTests(unittest.IsolatedAsyncioTestCase):
-    async def test_history_roundtrip_and_forward_dedup(self):
-        from bot import scheduler
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "acg.json")
-            with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
-                scheduler._save_acg_history(["u1", "u2"])
-                self.assertEqual(scheduler._load_acg_history(), ["u1", "u2"])
-
-                sent = []
-
-                class Client:
-                    _running = True
-
-                    async def send_group_forward_msg(self, group_id, nodes):
-                        sent.append((group_id, nodes))
-                        return {"status": "ok", "retcode": 0}
-
-                class Stub:
-                    config = {
-                        "bot_qq": 222,
-                        "uapi_api_key": "test",
-                        "acg_images": {"enabled": True, "count": 3},
-                        "groups": {"100": {"enabled": True, "features": {}}},
-                    }
-                    client = Client()
-
-                async def fake_resolve(dispatcher, path, params=None):
-                    fake_resolve.n += 1
-                    # u1 already in history: must be skipped
-                    return ["u1", "u3", "u4", "u5"][fake_resolve.n % 4]
-                fake_resolve.n = -1
-
-                with patch("bot.uapi.uapi_resolve_image_url", fake_resolve):
-                    await scheduler._daily_acg_push(Stub())
-                self.assertEqual(len(sent), 1)
-                gid, nodes = sent[0]
-                self.assertEqual(gid, 100)
-                urls = [n["data"]["content"][0]["data"]["file"] for n in nodes]
-                self.assertNotIn("u1", urls)
-                self.assertEqual(len(nodes), 3)
-                self.assertIn("u3", scheduler._load_acg_history())
-
-    async def test_large_push_is_split_into_batches(self):
-        from bot import scheduler
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "acg.json")
-            batches = []
-
-            class Client:
-                async def send_group_forward_msg(self, group_id, nodes):
-                    batches.append(len(nodes))
-                    return {"status": "ok", "retcode": 0}
-
-            class Stub:
-                config = {
-                    "bot_qq": 222,
-                    "uapi_api_key": "test",
-                    "acg_images": {"enabled": True, "count": 12,
-                                   "batch_size": 5},
-                    "groups": {"100": {"enabled": True, "features": {}}},
-                }
-                client = Client()
-
-            async def fake_resolve(dispatcher, path, params=None):
-                fake_resolve.value += 1
-                return "u{}".format(fake_resolve.value)
-            fake_resolve.value = 0
-
-            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
-                    patch("bot.uapi.uapi_resolve_image_url", fake_resolve), \
-                    patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
-                await scheduler._daily_acg_push(Stub())
-            self.assertEqual(batches, [5, 5, 2])
-
-    async def test_failed_batch_is_retried_next_run(self):
-        from bot import scheduler
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "acg.json")
-
-            class Client:
-                def __init__(self):
-                    self.calls = 0
-                    self.sent_urls = []
-
-                async def send_group_forward_msg(self, group_id, nodes):
-                    self.calls += 1
-                    urls = [node["data"]["content"][0]["data"]["file"]
-                            for node in nodes]
-                    self.sent_urls.append(urls)
-                    if self.calls == 2:
-                        return {"status": "timeout", "error_kind": "timeout"}
-                    return {"status": "ok", "retcode": 0}
-
+class HotboardDigestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ai_digest_uses_enriched_evidence(self):
+        from bot.services import hotboard_digest
+        class Client:
+            session = object()
+        class Stub:
+            config = {}
             client = Client()
+        enriched = [{"title": "topic", "hot_value": "1", "url": "https://example.com",
+                     "evidence": "verified details", "sources": ["https://example.com"]}]
+        response = json.dumps({"overview": "overview", "items": ["detail"]})
+        with patch.object(hotboard_digest, "enrich_hotboard_items", new=AsyncMock(return_value=enriched)), \
+                patch("bot.ai._call_deepseek", new=AsyncMock(return_value=response)):
+            result = await hotboard_digest.build_hotboard_digest(Stub(), "weibo", "board", enriched)
+        self.assertEqual(result["summary"], "overview")
+        self.assertEqual(result["details"], ["detail"])
+        self.assertEqual(result["items"][0]["evidence"], "verified details")
 
-            class Stub:
-                config = {
-                    "bot_qq": 222,
-                    "uapi_api_key": "test",
-                    "acg_images": {"enabled": True, "count": 6,
-                                   "batch_size": 3},
-                    "groups": {"100": {"enabled": True, "features": {}}},
-                }
 
-            stub = Stub()
-            stub.client = client
+class AcgPushTests(unittest.IsolatedAsyncioTestCase):
+    def _stub(self, client):
+        class Stub:
+            config = {
+                "bot_qq": 222,
+                "uapi_api_key": "test",
+                "acg_images": {"enabled": True, "send_count": 20, "dedupe_days": 7},
+                "groups": {"100": {"enabled": True, "features": {}}},
+            }
+        stub = Stub()
+        stub.client = client
+        return stub
 
-            async def first_resolve(dispatcher, path, params=None):
-                first_resolve.value += 1
-                return "u{}".format(first_resolve.value)
-            first_resolve.value = 0
+    async def test_does_not_send_below_twenty(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+            sent = []
+            class Client:
+                async def send_group_forward_msg(self, group_id, nodes):
+                    sent.append(nodes)
+                    return {"status": "ok"}
+            stub = self._stub(Client())
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
+                state = scheduler._new_acg_state()
+                state["pool"] = ["u{}".format(index) for index in range(19)]
+                state["pending_due"] = True
+                scheduler._save_acg_state(state)
+                await scheduler._try_send_acg_delivery(stub)
+            self.assertEqual(sent, [])
 
-            async def no_new_urls(dispatcher, path, params=None):
-                return None
-
+    async def test_sends_exactly_twenty_and_keeps_surplus(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+            sent = []
+            class Client:
+                async def send_group_forward_msg(self, group_id, nodes):
+                    sent.append((group_id, nodes))
+                    return {"status": "ok"}
+            stub = self._stub(Client())
             with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
-                    patch("bot.uapi.uapi_resolve_image_url", first_resolve), \
                     patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
-                await scheduler._daily_acg_push(stub)
+                state = scheduler._new_acg_state()
+                state["pool"] = ["u{}".format(index) for index in range(25)]
+                state["pending_due"] = True
+                scheduler._save_acg_state(state)
+                await scheduler._try_send_acg_delivery(stub)
                 state = scheduler._load_acg_state()
-                self.assertEqual(state["pending"]["100"], ["u4", "u5", "u6"])
-                with patch("bot.uapi.uapi_resolve_image_url", no_new_urls):
-                    await scheduler._daily_acg_push(stub)
+            self.assertEqual(len(sent), 1)
+            image_nodes = [node for node in sent[0][1]
+                           if isinstance(node["data"]["content"], list)]
+            self.assertEqual(len(image_nodes), 20)
+            self.assertEqual(len(state["pool"]), 5)
+            self.assertFalse(state["pending_due"])
+            self.assertIsNone(state["delivery"])
+
+    async def test_seven_day_dedupe_allows_expired_url(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+            class Client:
+                is_connected = True
+            stub = self._stub(Client())
+            async def same_url(dispatcher, path, params=None):
+                return "u1"
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch("bot.uapi.uapi_resolve_image_url", same_url):
+                state = scheduler._new_acg_state()
+                state["recent"] = {"u1": time.time()}
+                scheduler._save_acg_state(state)
+                self.assertFalse(await scheduler._collect_one_acg_image(stub))
+                state["recent"] = {"u1": time.time() - 8 * 86400}
+                scheduler._save_acg_state(state)
+                self.assertTrue(await scheduler._collect_one_acg_image(stub))
+                self.assertEqual(scheduler._load_acg_state()["pool"], ["u1"])
+
+    async def test_failed_delivery_is_persisted_for_retry(self):
+        from bot import scheduler
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "acg.json")
+            class Client:
+                async def send_group_forward_msg(self, group_id, nodes):
+                    return {"status": "failed"}
+            stub = self._stub(Client())
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+                state = scheduler._new_acg_state()
+                state["pool"] = ["u{}".format(index) for index in range(20)]
+                state["pending_due"] = True
+                scheduler._save_acg_state(state)
+                await scheduler._try_send_acg_delivery(stub)
                 state = scheduler._load_acg_state()
-            self.assertNotIn("100", state["pending"])
-            self.assertEqual(client.sent_urls[-1], ["u4", "u5", "u6"])
+            self.assertEqual(state["delivery"]["remaining_groups"], ["100"])
+            self.assertGreater(state["delivery"]["next_retry_at"], time.time())
 
 
 class DelayedQueueWorkerTests(unittest.IsolatedAsyncioTestCase):

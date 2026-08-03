@@ -23,7 +23,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
     """/热榜 [平台] — real hot board via uapis.cn."""
-    from ..scheduler import BOARD_NAMES, format_hotboard, ai_hotboard_summary
+    from ..scheduler import BOARD_NAMES, build_detailed_hotboard, build_hotboard_forward_nodes, format_hotboard
     alias = {v: k for k, v in BOARD_NAMES.items()}
     board = (args.strip().lower() or "weibo")
     board = alias.get(board, board)
@@ -37,8 +37,21 @@ async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id,
                        "没查到，支持的平台：" + "、".join(BOARD_NAMES.values()))
         return
-    summary = await ai_hotboard_summary(d, board, items)
-    await d._reply(group_id, user_id, format_hotboard(board, items, summary=summary))
+    digest = await build_detailed_hotboard(d, board, items)
+    if group_id:
+        nodes = build_hotboard_forward_nodes(
+            board, digest["items"], d.config.get("bot_qq", 0),
+            limit=len(digest["items"]), summary=digest["summary"], details=digest["details"],
+        )
+        result = await d.client.send_group_forward_msg(int(group_id), nodes)
+        status = (result or {}).get("status") if isinstance(result, dict) else result
+        if status == "ok":
+            return
+    await d._reply(
+        group_id, user_id,
+        format_hotboard(board, digest["items"], limit=len(digest["items"]),
+                        summary=digest["summary"], details=digest["details"]),
+    )
 
 async def _send_uapi_image(d, group_id, user_id, path, params, label):
     """Download a uapis.cn image endpoint to tmp and send it (bounded)."""
