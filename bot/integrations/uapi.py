@@ -54,8 +54,8 @@ _MISSING_KEY_LOG_INTERVAL = 3600
 def _log_missing_key(path):
     """Rate-limit the informational visitor-quota message."""
     now = time.monotonic()
-    last_logged = _missing_key_log_ts.get(path, 0)
-    if now - last_logged >= _MISSING_KEY_LOG_INTERVAL:
+    last_logged = _missing_key_log_ts.get(path)
+    if last_logged is None or now - last_logged >= _MISSING_KEY_LOG_INTERVAL:
         _missing_key_log_ts[path] = now
         log.info("uapi: no api key configured, using visitor quota for %s", path)
     else:
