@@ -1,4 +1,4 @@
-﻿"""Configuration loading, recovery, migration, and environment overrides."""
+"""Configuration loading, recovery, migration, and environment overrides."""
 
 import json
 import logging
@@ -366,4 +366,50 @@ def migrate_config(config):
         if key not in automation:
             automation[key] = value
             migrated = True
+    agent_defaults = {
+        "enabled": True,
+        "group_enabled": True,
+        "private_enabled": True,
+        "proactive_enabled": True,
+        "owner_daily_limit": 6,
+        "group_daily_limit": 3,
+        "topic_cooldown_seconds": 1800,
+        "rejection_mute_seconds": 43200,
+        "quiet_start": 23,
+        "quiet_end": 9,
+        "member_passive_only": True,
+        "observation_only": True,
+        "primary_router": False,
+        "owner_autonomy_enabled": False,
+        "owner_max_rounds": 6,
+        "owner_tool_budget": 12,
+        "group_max_rounds": 3,
+        "group_tool_budget": 5,
+        "planner_max_tokens": 1400,
+        "tool_timeout_seconds": 15,
+        "background_tasks_enabled": True,
+        "background_task_max_attempts": 3,
+        "owner_goal_check_interval_seconds": 7200,
+        "group_review_interval_seconds": 10800,
+        "worker_enabled": True,
+        "worker_interval_seconds": 30,
+    }
+    agent = config.setdefault("agent", {})
+    for key, value in agent_defaults.items():
+        if key not in agent:
+            agent[key] = value
+            migrated = True
+    if int(agent.get("schema_version", 0) or 0) < 2:
+        agent["schema_version"] = 2
+        agent["worker_enabled"] = True
+        agent["worker_interval_seconds"] = 30
+        migrated = True
+    if int(agent.get("schema_version", 0) or 0) < 3:
+        agent["schema_version"] = 3
+        agent.setdefault("group_max_rounds", 3)
+        agent.setdefault("group_tool_budget", 5)
+        agent.setdefault("planner_max_tokens", 1400)
+        agent.setdefault("group_review_interval_seconds", 10800)
+        agent.setdefault("rejection_mute_seconds", 43200)
+        migrated = True
     return config, migrated

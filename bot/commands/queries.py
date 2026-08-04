@@ -15,6 +15,7 @@ from ..permission import (
     add_master, remove_master, list_masters,
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
 )
+from ..storage.runtime_paths import create_runtime_temp_file
 from ..utils import atomic_write_json
 from .common import CONFIG_PATH, _load, _save
 
@@ -65,11 +66,9 @@ async def _send_uapi_image(d, group_id, user_id, path, params, label):
         return
     payload, ctype = result
     ext = ".png" if "png" in ctype else ".jpg"
-    tmp_dir = os.path.join(_ROOT, "tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
-    tmp_path = os.path.join(tmp_dir, "uapi_{}{}".format(int(time.time() * 1000), ext))
+    fd, tmp_path = create_runtime_temp_file("uapi_", ext)
     try:
-        with open(tmp_path, "wb") as f:
+        with os.fdopen(fd, "wb") as f:
             f.write(payload)
         segments = [{"type": "image", "data": {"file": "file://" + tmp_path}}]
         if group_id:

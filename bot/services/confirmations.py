@@ -49,6 +49,17 @@ def create_confirmation(group_id, user_id, action, params, description):
     return code
 
 
+def create_agent_confirmation(group_id, user_id, event, plan, description):
+    return create_confirmation(
+        group_id, user_id, "__agent_plan__",
+        {
+            "event": event if isinstance(event, dict) else {},
+            "plan": plan if isinstance(plan, dict) else {},
+        },
+        description,
+    )
+
+
 def cancel_confirmation(code, user_id):
     data = _load()
     _prune(data)
@@ -78,6 +89,12 @@ async def execute_confirmation(dispatcher, code, user_id, group_id, role):
     params = item.get("params") or {}
     data.pop(str(code), None)
     _save(data)
+    if action == "__agent_plan__":
+        result = await dispatcher.agent_runtime.execute_confirmed_plan(
+            dispatcher, params.get("event") or {}, params.get("plan") or {}, role=role)
+        if result.get("success"):
+            return True, str(result.get("message") or "Agent 方案已确认并执行")[:3500]
+        return False, "Agent 方案执行失败：" + str(result.get("reason") or "未知原因")[:500]
     result = await dispatcher.client.call(action, params)
     if isinstance(result, dict) and result.get("status") == "ok":
         return True, "执行好了：" + str(item.get("description") or action)

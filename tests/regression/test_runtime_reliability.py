@@ -95,6 +95,24 @@ class NapCatWatchdogTests(unittest.TestCase):
         self.assertEqual(url, "ws://127.0.0.1:3001?access_token=bot%20token")
 
 
+
+class RuntimeTemporaryFileTests(unittest.TestCase):
+    def test_runtime_temp_file_uses_configured_writable_directory(self):
+        from bot.storage.runtime_paths import create_runtime_temp_file, runtime_temp_dir
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"QQBOT_TMP_DIR": directory}):
+                self.assertEqual(runtime_temp_dir(), directory)
+                fd, path = create_runtime_temp_file("test_", ".bin")
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(b"safe")
+                self.assertTrue(path.startswith(directory))
+                self.assertEqual(Path(path).read_bytes(), b"safe")
+                if os.name != "nt":
+                    self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
+                    self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+                os.remove(path)
+
 class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_acg_without_key_skips_resolution(self):
         class Client:

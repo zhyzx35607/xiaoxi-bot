@@ -54,15 +54,21 @@ class HealthServiceMixin:
     def _start_rss_thread_watch(self):
         """Daemon-thread RSS sampler: survives a blocked event loop and dumps
         all thread stacks + asyncio task list the moment memory spikes."""
-        import threading, faulthandler
+        import faulthandler
+        import threading
+        existing = getattr(self, "_rss_watch_thread", None)
+        if existing and existing.is_alive():
+            return
         try:
             self._rss_watch_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._rss_watch_loop = None
+        stop_event = threading.Event()
+        self._rss_watch_stop = stop_event
         def _watch():
             last = 0.0
-            while True:
-                time.sleep(1)
+            last_error = 0.0
+            while not stop_event.wait(1):
                 try:
                     kb = self._read_rss_kb()
                     if not kb:
@@ -86,12 +92,19 @@ class HealthServiceMixin:
                                             task.get_name()))
                                 except Exception as e:
                                     f.write("task enum failed: %s\n" % e)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    now = time.time()
+                    if now - last_error >= 60:
+                        last_error = now
+                        log.warning("RSS thread-watch failed: %s", exc, exc_info=True)
         t = threading.Thread(target=_watch, daemon=True, name="rss-watch")
+        self._rss_watch_thread = t
         t.start()
 
     async def stop_rss_guard(self):
+        stop_event = getattr(self, "_rss_watch_stop", None)
+        if stop_event:
+            stop_event.set()
         if self._rss_guard_task and not self._rss_guard_task.done():
             self._rss_guard_task.cancel()
             try:

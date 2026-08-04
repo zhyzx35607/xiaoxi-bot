@@ -61,6 +61,7 @@ async def amain():
     dispatcher.start_scheduler()
     dispatcher.start_bili_push()
     dispatcher.start_rss_guard()
+    dispatcher.agent_worker.start()
 
     stop_task = asyncio.create_task(stop_event.wait())
     done, pending = await asyncio.wait(
@@ -77,6 +78,7 @@ async def amain():
     await dispatcher.stop_scheduler()
     await dispatcher.stop_bili_push()
     await dispatcher.stop_rss_guard()
+    await dispatcher.agent_worker.stop()
     await client.stop()
     await dispatcher.stop_background_tasks()
     try:

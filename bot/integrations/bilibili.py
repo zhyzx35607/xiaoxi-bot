@@ -21,11 +21,11 @@ import urllib.parse
 import aiohttp
 
 from . import uapi
+from ..storage.runtime_paths import create_runtime_temp_file
 from ..utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-_TMP_DIR = os.path.join(_ROOT, "tmp")
 _PUSH_STATE_PATH = os.path.join(_ROOT, "data", "bili_push.json")
 
 BV_RE = re.compile(r"BV1[0-9A-Za-z]{9}")
@@ -446,8 +446,7 @@ async def get_playurl_mp4(dispatcher, bvid, cid):
 
 async def download_mp4(dispatcher, url, bvid, max_bytes, timeout=120):
     """Stream-download to tmp dir with hard size cap. Returns path or None."""
-    os.makedirs(_TMP_DIR, exist_ok=True)
-    path = os.path.join(_TMP_DIR, "bili_{}_{}.mp4".format(bvid, int(time.time())))
+    path = ""
     referer = "https://www.bilibili.com/video/" + bvid
     try:
         session = dispatcher.client.session
@@ -461,7 +460,8 @@ async def download_mp4(dispatcher, url, bvid, max_bytes, timeout=120):
                 log.info("bili download too large: %d > %d", length, max_bytes)
                 return None
             total = 0
-            with open(path, "wb") as f:
+            fd, path = create_runtime_temp_file("bili_{}_".format(bvid), ".mp4")
+            with os.fdopen(fd, "wb") as f:
                 async for chunk in resp.content.iter_chunked(262144):
                     total += len(chunk)
                     if total > max_bytes:

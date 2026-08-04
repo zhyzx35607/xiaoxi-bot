@@ -16,6 +16,7 @@ Environment=QQBOT_CONSOLE_LOG=1
 Environment=QQBOT_CONFIG_PATH=/var/lib/qqbot/config.json
 Environment=QQBOT_LOG_DIR=/var/log/qqbot
 Environment=QQBOT_PID_FILE=/run/qqbot/bot.pid
+Environment=QQBOT_TMP_DIR=/opt/qqbot/data/tmp
 Environment=TZ=Asia/Shanghai
 EnvironmentFile=-/etc/qqbot.env
 ExecStart=/opt/qqbot/venv/bin/python /opt/qqbot/main.py
@@ -50,6 +51,8 @@ MemoryMax=1G
 MemorySwapMax=1G
 CPUQuota=150%
 Nice=10
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
 StandardOutput=journal
 StandardError=journal
 

@@ -1,6 +1,7 @@
 """Command registration and compatibility entrypoint."""
 
 from .admin import *  # noqa: F401,F403
+from .agent import *  # noqa: F401,F403
 from .capabilities import *  # noqa: F401,F403
 from .fun import *  # noqa: F401,F403
 from .media import *  # noqa: F401,F403
@@ -10,6 +11,7 @@ from .system import *  # noqa: F401,F403
 from .uapi_extra import *  # noqa: F401,F403
 
 def register_all(d):
+    d.register("agent", cmd_agent, "查看/管理 Agent 状态", owner_only=True)
     d.register("功能", cmd_feature_center, "按分类开关 NapCat 扩展功能 /功能 分类 on/off", bot_owner=True)
     d.register("消息", cmd_message_center, "消息扩展：表情详情、语音转文字、闪传")
     d.register("群管", cmd_group_management_center, "群管扩展：群详情、打卡列表、群备注、批量踢",

@@ -25,6 +25,8 @@ from .events.router import RouterMixin
 from .services.delayed_reply import DelayedReplyServiceMixin
 from .services.health import HealthServiceMixin
 from .services.member_cache import MemberCacheMixin
+from .agent.runtime import AgentRuntime
+from .agent.worker_service import AgentWorker
 
 log = logging.getLogger("qqbot")
 chat_log = logging.getLogger("qqbot.chat")
@@ -57,6 +59,8 @@ class Dispatcher(
     def __init__(self, config, client, config_path=None):
         self.config = config
         self.client = client
+        self.agent_runtime = AgentRuntime(config, _ROOT)
+        self.agent_worker = AgentWorker(self)
         self._config_path = config_path or os.path.join(_ROOT, "config.json")
         self.commands = {}
         self._lock = asyncio.Lock()

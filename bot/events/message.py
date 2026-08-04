@@ -135,6 +135,12 @@ class GroupMessageMixin:
         if not _event_scope_allowed(self, event):
             return
 
+        # Agent observes permitted events while the primary router is disabled.
+        if not self.agent_runtime.primary_router_enabled(event):
+            try:
+                self.agent_runtime.observe(event)
+            except Exception:
+                log.exception("Agent observation failed")
         message = event.get("message", [])
         raw = event.get("raw_message", "") or ""
         sender = event.get("sender", {})
@@ -252,9 +258,16 @@ class GroupMessageMixin:
                 if await self._check_repeat(group_id, raw, user_id):
                     return
 
+            # Optional Agent primary router; disabled by default for safe rollout.
+            if not is_self_msg and raw and not raw.lstrip().startswith(prefix):
+                agent_event_input = dict(event)
+                agent_event_input["raw_message"] = raw
+                explicit_agent = await self._is_directed_at_bot(message, raw)
+                if await self.agent_runtime.handle_event(self, agent_event_input, explicit=explicit_agent):
+                    return
+
             # Route to handler (skip for self-messages)
-            if not is_self_msg:
-                await self._handle_group_message(
+            if not is_self_msg:                await self._handle_group_message(
                     group_id, user_id, message, raw, sender, sender_role, sender_card, message_id
                 )
             else:
@@ -272,10 +285,13 @@ class GroupMessageMixin:
                 self, "PRIVATE_IN", raw,
                 user_id=user_id, sender_name=sender_card,
             )
-            if user_id == self.config.get("bot_owner"):
+            if user_id == self.config.get("bot_owner") and not raw.startswith(prefix):
+                if await self.agent_runtime.handle_event(self, event, explicit=True):
+                    return
                 await self._handle_owner_private(user_id, message, raw, sender, message_id)
-            else:
-                # Non-owner private chat → AI auto-reply (no @ trigger needed)
+            elif user_id == self.config.get("bot_owner"):
+                await self._handle_owner_private(user_id, message, raw, sender, message_id)
+            else:                # Non-owner private chat → AI auto-reply (no @ trigger needed)
                 await self._handle_private_ai_chat(user_id, message, raw, sender, message_id)
 
     def _check_name_mention(self, raw_message):
@@ -845,6 +861,11 @@ class PrivateMessageMixin:
                 _os2.remove(f)
                 removed_user_files += 1
             await self._reply(None, user_id, f"群 {gid} 的数据清掉了，包括记忆、表情包、黑名单和用户记忆")
+
+        elif cmd in self.commands:
+            await self._run_command(
+                cmd, args, None, user_id, "member", sender_name, message,
+            )
 
         else:
             # Unknown command → just say so, don't trigger AI
