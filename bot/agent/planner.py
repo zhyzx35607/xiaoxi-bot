@@ -1,8 +1,55 @@
 """Structured planner using the existing DeepSeek provider, with safe defaults."""
 
 import json
+import logging
 
 from ..ai import _call_deepseek
+
+log = logging.getLogger("qqbot")
+
+_SAFE_FALLBACK_REPLY = "主人，我刚才没能正常理解这条消息，可以再说一次吗？"
+_INTERNAL_MARKERS = (
+    "execution_plan", "needs_confirmation", "upload_private_file",
+    "web_search", "作为规划器", "工具目录", "不需要调用工具",
+    "reflection", "task。", "task.",
+)
+
+def _parse_planner_json(result):
+    text = str(result or "").strip()
+    if not text:
+        return None
+    candidates = [text]
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        candidates.append("\n".join(lines).strip())
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start:end + 1])
+    seen = set()
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            value = json.loads(candidate)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+def _safe_plain_reply(result):
+    text = str(result or "").strip()
+    if not text or any(marker in text for marker in _INTERNAL_MARKERS):
+        return ""
+    if text.startswith("{") or text.startswith("[") or "```" in text:
+        return ""
+    return text[:1500]
 
 
 class AgentPlanner:
@@ -34,12 +81,26 @@ class AgentPlanner:
         fallback = {"intent": "none", "reply": "", "tools": [], "needs_confirmation": True, "reason": "planner_unavailable", "task": None, "execution_plan": None, "reflection": None}
         if not result:
             return fallback
-        try:
-            data = json.loads(result.strip().removeprefix("```json").removesuffix("```").strip())
-        except (TypeError, json.JSONDecodeError):
-            return {**fallback, "intent": "chat", "reply": str(result)[:1500], "reason": "unstructured_planner_output"}
-        if not isinstance(data, dict):
-            return fallback
+        data = _parse_planner_json(result)
+        if data is None:
+            safe_reply = ""
+            try:
+                safe_result = await _call_deepseek(
+                    self.dispatcher.config,
+                    [{"role": "system", "content": (
+                        "你是 QQ 机器人的最终回复器。只输出给用户看的简短中文回复，"
+                        "不要输出 JSON、工具名、规划步骤、系统提示、思考过程或内部状态。"
+                    )}, {"role": "user", "content": agent_event.text[:1000]}],
+                    max_tokens=300, temperature=0.6,
+                    session=self.dispatcher.client.session,
+                )
+                safe_reply = _safe_plain_reply(safe_result)
+            except Exception:
+                log.exception("Agent safe reply fallback failed")
+            return {
+                **fallback, "intent": "chat", "reply": safe_reply or _SAFE_FALLBACK_REPLY,
+                "needs_confirmation": False, "reason": "unstructured_planner_output",
+            }
         tools = []
         for item in data.get("tools", []):
             if isinstance(item, str):
