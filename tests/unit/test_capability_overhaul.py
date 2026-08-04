@@ -69,6 +69,30 @@ class LongOutputTests(unittest.IsolatedAsyncioTestCase):
         model.assert_not_awaited()
 
 
+class GroupHelpCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_help_renders_for_super_owner(self):
+        from bot.commands.system import cmd_help
+        from bot.permission import LEVEL_SUPER
+
+        replies = []
+        dispatcher = type("Dispatcher", (), {})()
+        dispatcher.commands = {
+            "help": {"help": "查看可用命令"},
+        }
+        dispatcher.config = {"bot_owner": 100, "bot_qq": 200}
+
+        async def reply(*args, **kwargs):
+            replies.append((args, kwargs))
+
+        dispatcher._reply = reply
+        with patch("bot.commands.system.get_user_level", new=AsyncMock(return_value=(LEVEL_SUPER, "super"))),              patch("bot.commands.system.get_bot_role", new=AsyncMock(return_value=("owner", "owner"))):
+            await cmd_help(dispatcher, 776292505, 100, "", "owner", "主人", [])
+
+        self.assertEqual(len(replies), 1)
+        self.assertTrue(replies[0][1]["force_forward"])
+        self.assertIn("help", replies[0][0][2])
+
+
 class OwnerReplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_owner_name_call_bypasses_disabled_group_and_rate_limits(self):
         client = _OutputClient()
