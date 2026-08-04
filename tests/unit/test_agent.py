@@ -152,6 +152,31 @@ class AgentCommandPermissionTests(unittest.IsolatedAsyncioTestCase):
         allowed, error = await check_permission(dispatcher, 300, 102, "owner", {"owner_only": True})
         self.assertTrue(allowed)
 
+    async def test_owner_private_agent_command_uses_registered_router(self):
+        from bot.events.message import PrivateMessageMixin
+
+        calls = []
+
+        class Dispatcher(PrivateMessageMixin):
+            config = {"bot_owner": 100}
+            commands = {"agent": {"handler": object()}}
+
+            async def _run_command(self, *args):
+                calls.append(args)
+
+            async def _reply(self, *args):
+                raise AssertionError("registered command must not be reported as unknown")
+
+        message = [{"type": "text", "data": {"text": "/agent"}}]
+        await Dispatcher()._handle_owner_command(
+            "agent", "", 100, {"nickname": "owner"}, message, "/agent",
+        )
+
+        self.assertEqual(calls[0][0], "agent")
+        self.assertEqual(calls[0][2], None)
+        self.assertEqual(calls[0][3], 100)
+
+
 class AgentResponsePolicyTests(unittest.TestCase):
     def test_observation_mode_never_autosends(self):
         from bot.agent.response import can_autosend

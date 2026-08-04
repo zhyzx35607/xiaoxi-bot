@@ -862,6 +862,11 @@ class PrivateMessageMixin:
                 removed_user_files += 1
             await self._reply(None, user_id, f"群 {gid} 的数据清掉了，包括记忆、表情包、黑名单和用户记忆")
 
+        elif cmd in self.commands:
+            await self._run_command(
+                cmd, args, None, user_id, "member", sender_name, message,
+            )
+
         else:
             # Unknown command → just say so, don't trigger AI
             await self._reply(None, user_id, "未知命令，输入 /help 查看可用命令")
