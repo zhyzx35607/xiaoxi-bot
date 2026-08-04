@@ -576,6 +576,51 @@ def _wrap_read(fn):
 
 TOOL_REGISTRY = {}
 
+_GROUP_SCOPED_TOOLS = {
+    "get_group_info", "get_member_info", "get_recent_messages", "get_group_files",
+    "get_file_url", "get_group_notice", "get_group_honor", "get_shut_list",
+    "get_essence_list", "get_group_info_ex", "get_group_at_all_remain",
+    "get_group_msg_history", "playful_ban",
+}
+_GLOBAL_OWNER_TOOLS = {"get_friend_list", "get_recent_contact"}
+_TOOL_FEATURES = {
+    "get_group_files": "file", "get_file_url": "file",
+    "playful_ban": "management",
+    "set_msg_emoji_like": "interaction", "send_like": "interaction",
+    "send_music_card": "interaction",
+}
+
+
+def _feature_is_enabled(dispatcher, group_id, category, level):
+    if not category or level >= 5:
+        return True
+    from bot.permission import get_group_config
+    if group_id:
+        config = get_group_config(dispatcher, group_id).get("ai_tools", {})
+    else:
+        config = dispatcher.config.get("ai_tools", {})
+    return bool(config.get(category, False))
+
+
+def _tool_visible(name, entry, *, explicit, actor_level=None, group_id=0,
+                  dispatcher=None, bot_role="member"):
+    if entry["tier"] != "read" and not explicit:
+        return False
+    if actor_level is None:
+        return True
+    if name in _GLOBAL_OWNER_TOOLS and actor_level < 5:
+        return False
+    if name in _GROUP_SCOPED_TOOLS and not group_id:
+        return False
+    if entry["tier"] == "playful":
+        if actor_level < 2 or bot_role not in ("admin", "owner"):
+            return False
+    category = _TOOL_FEATURES.get(name)
+    if dispatcher is not None and not _feature_is_enabled(
+            dispatcher, group_id, category, actor_level):
+        return False
+    return True
+
 
 def _register(name, handler, tier, description, parameters):
     TOOL_REGISTRY[name] = {"handler": handler, "tier": tier,
@@ -657,12 +702,15 @@ for _name, _fn, _desc, _params in _PLAYFUL_TOOLS:
     _register(_name, _fn, "playful", _desc, _params)
 
 
-def build_tool_schemas(explicit=False):
-    """OpenAI-compatible tools list. Explicit scenes get all three tiers,
-    interjection scenes get the read tier only."""
+def build_tool_schemas(explicit=False, *, actor_level=None, group_id=0,
+                       dispatcher=None, bot_role="member"):
+    """Build only tools available to the verified actor and current scene."""
     tools = []
     for name, entry in TOOL_REGISTRY.items():
-        if entry["tier"] != "read" and not explicit:
+        if not _tool_visible(
+                name, entry, explicit=explicit, actor_level=actor_level,
+                group_id=int(group_id or 0), dispatcher=dispatcher,
+                bot_role=bot_role):
             continue
         tools.append({
             "type": "function",
@@ -677,22 +725,40 @@ def build_tool_schemas(explicit=False):
 
 async def execute_ai_tool(dispatcher, name, arguments, group_id=0, user_id=0,
                           message_id=0, interaction_allowed=False):
-    """Unified tiered executor for native function calling."""
+    """Execute a tool after real-time identity, feature and scope validation."""
     entry = TOOL_REGISTRY.get(name)
     if not entry:
         return {"ok": False, "error": "tool_not_allowed", "tool": name}
     tier = entry.get("tier", "read")
     if tier != "read" and not interaction_allowed:
         return {"ok": False, "error": "tool_not_in_scene", "tool": name}
+
+    from bot.permission import get_bot_role, get_user_level
+    context_group = int(group_id or 0)
+    context_user = int(user_id or 0)
+    level, _ = await get_user_level(
+        dispatcher, context_group or None, context_user, "member")
+    bot_role = "member"
+    if context_group and tier == "playful":
+        bot_role, _ = await get_bot_role(dispatcher, context_group)
+    if not _tool_visible(
+            name, entry, explicit=interaction_allowed, actor_level=level,
+            group_id=context_group, dispatcher=dispatcher, bot_role=bot_role):
+        return {"ok": False, "error": "permission_denied", "tool": name}
+
     args = dict(arguments) if isinstance(arguments, dict) else {}
-    ctx = {"group_id": int(group_id or 0), "user_id": int(user_id or 0),
-           "message_id": int(message_id or 0)}
-    if tier == "read":
-        if ctx["group_id"]:
-            args.setdefault("group_id", ctx["group_id"])
-        if name == "get_member_info" and not args.get("user_id"):
-            args["user_id"] = ctx["user_id"]
-    if tier == "interaction" and interaction_quota_left(ctx["group_id"]) <= 0:
+    ctx = {"group_id": context_group, "user_id": context_user,
+           "message_id": int(message_id or 0), "actor_level": level,
+           "bot_role": bot_role}
+    if name in _GROUP_SCOPED_TOOLS:
+        if not context_group:
+            return {"ok": False, "error": "group_context_required", "tool": name}
+        args["group_id"] = context_group
+    elif "group_id" in args:
+        args.pop("group_id", None)
+    if name == "get_member_info" and not args.get("user_id"):
+        args["user_id"] = context_user
+    if tier == "interaction" and interaction_quota_left(context_group) <= 0:
         return {"ok": False, "error": "interaction_quota_exhausted", "tool": name}
     try:
         result = await entry["handler"](dispatcher, args, ctx)
@@ -701,9 +767,9 @@ async def execute_ai_tool(dispatcher, name, arguments, group_id=0, user_id=0,
         return {"ok": False, "error": "tool_failed", "tool": name,
                 "message": _clip(exc, 200)}
     if tier == "interaction":
-        _record_interaction_usage(ctx["group_id"])
-        log.info("INTERACTION_TOOL group=%s user=%s tool=%s", ctx["group_id"],
-                 ctx["user_id"], name)
+        _record_interaction_usage(context_group)
+        log.info("INTERACTION_TOOL group=%s user=%s tool=%s", context_group,
+                 context_user, name)
     if isinstance(result, dict):
         result.setdefault("tool", name)
     return result

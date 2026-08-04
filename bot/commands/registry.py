@@ -1,14 +1,35 @@
 """Command registration and compatibility entrypoint."""
 
 from .admin import *  # noqa: F401,F403
+from .agent import *  # noqa: F401,F403
+from .capabilities import *  # noqa: F401,F403
 from .fun import *  # noqa: F401,F403
 from .media import *  # noqa: F401,F403
 from .moderation import *  # noqa: F401,F403
 from .queries import *  # noqa: F401,F403
 from .system import *  # noqa: F401,F403
+from .uapi_extra import *  # noqa: F401,F403
 
 def register_all(d):
+    d.register("agent", cmd_agent, "查看/管理 Agent 状态", owner_only=True)
+    d.register("功能", cmd_feature_center, "按分类开关 NapCat 扩展功能 /功能 分类 on/off", bot_owner=True)
+    d.register("消息", cmd_message_center, "消息扩展：表情详情、语音转文字、闪传")
+    d.register("群管", cmd_group_management_center, "群管扩展：群详情、打卡列表、群备注、批量踢",
+               admin_only=True, bot_admin_required=True)
+    d.register("待办", cmd_todo_center, "群待办：回复消息添加、完成或取消")
+    d.register("相册", cmd_album_center, "群相册：列表、内容、上传、评论、点赞、删除")
+    d.register("文件", cmd_file_center, "文件中心：群文件和在线文件")
+    d.register("好友", cmd_friend_center, "好友管理：单向好友、备注、删除、可疑申请",
+               bot_owner_only=True)
+    d.register("账号", cmd_account_center, "账号资料、在线状态和自定义表情",
+               bot_owner_only=True)
+    d.register("互动", cmd_interaction_center, "分享、闪传等互动能力")
+    d.register("自动化", cmd_automation_center, "本群自动化开关", admin_only=True)
+    d.register("实验", cmd_experimental_center, "实验性 NapCat 能力", bot_owner_only=True)
+    d.register("确认", cmd_confirm_action, "确认一分钟内的高风险操作", admin_only=True)
+    d.register("取消确认", cmd_cancel_confirmation, "取消待确认的高风险操作", admin_only=True)
     d.register("api", cmd_api_status, "查看 NapCat/OneBot API 能力状态")
+    d.register("群", cmd_target_group_help, "私聊查看目标群帮助 /群 群号 帮助")
     d.register("群信息", cmd_group_info, "查看群信息")
     d.register("成员", cmd_member_info, "查看群成员信息 /成员 QQ号")
     d.register("成员列表", cmd_member_list, "查看群成员列表 /成员列表 [关键词]")
@@ -111,6 +132,17 @@ def register_all(d):
     d.register("每日新闻", cmd_daily_news, "每日新闻图")
     d.register("必应壁纸", cmd_bing_wallpaper, "每日必应壁纸")
     d.register("epic免费", cmd_epic_free, "Epic免费游戏")
+    d.register("二维码", cmd_qrcode, "生成二维码 /二维码 内容")
+    d.register("节假日", cmd_holiday, "节假日与万年历 /节假日 [日期|月份|年份]")
+    d.register("每日单词", cmd_daily_word, "每日单词 /每日单词 [词库] [数量]")
+    d.register("github", cmd_github_lookup, "查询GitHub用户或仓库")
+    d.register("网址状态", cmd_url_status, "检查公开网址状态")
+    d.register("敏感词", cmd_sensitive_analyze, "分析敏感词 /敏感词 词1,词2")
+    d.register("b站直播", cmd_bili_live, "查询B站直播间")
+    d.register("b站用户", cmd_bili_user, "查询B站用户")
+    d.register("b站评论", cmd_bili_replies, "查询B站评论")
+    d.register("云ocr", cmd_cloud_ocr, "UApiS云端OCR /云OCR 图片URL")
+    d.register("图片审核", cmd_nsfw_check, "图片NSFW安全检测")
     # admin commands
     d.register("全体", cmd_at_all, "@全体成员 /全体 内容",
                admin_only=True, bot_admin_required=True)

@@ -9,7 +9,7 @@ from ..permission import is_group_enabled
 from ..utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _PENDING_PATH = os.path.join(_ROOT, "data", "pending_requests.json")
 
 

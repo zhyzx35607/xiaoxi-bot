@@ -1,0 +1,30 @@
+"""Bounded execution of structured Agent tool plans."""
+
+import asyncio
+
+from .policy import tool_allowed
+
+
+class AgentExecutor:
+    def __init__(self, gateway, config):
+        self.gateway = gateway
+        self.config = config
+
+    async def execute(self, agent_event, tool_calls, *, remaining_budget):
+        results = []
+        timeout = max(3, min(int(self.config.get("agent", {}).get("tool_timeout_seconds", 15)), 60))
+        for item in tool_calls[:remaining_budget]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")[:80]
+            arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
+            if not name or not tool_allowed(self.config, agent_event, name):
+                results.append({"name": name, "ok": False, "error": "tool_denied_by_agent_policy"})
+                continue
+            try:
+                result = await asyncio.wait_for(
+                    self.gateway.execute(agent_event, name, **arguments), timeout=timeout)
+            except asyncio.TimeoutError:
+                result = {"ok": False, "error": "tool_timeout"}
+            results.append({"name": name, "arguments": arguments, "result": result})
+        return results

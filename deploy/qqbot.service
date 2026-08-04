@@ -7,10 +7,16 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=root
+User=qqbot
+Group=qqbot
 WorkingDirectory=/opt/qqbot
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=QQBOT_CONSOLE_LOG=1
+Environment=QQBOT_CONFIG_PATH=/var/lib/qqbot/config.json
+Environment=QQBOT_LOG_DIR=/var/log/qqbot
+Environment=QQBOT_PID_FILE=/run/qqbot/bot.pid
+Environment=QQBOT_TMP_DIR=/opt/qqbot/data/tmp
 Environment=TZ=Asia/Shanghai
 EnvironmentFile=-/etc/qqbot.env
 ExecStart=/opt/qqbot/venv/bin/python /opt/qqbot/main.py
@@ -20,10 +26,33 @@ TimeoutStopSec=20
 KillSignal=SIGTERM
 KillMode=control-group
 UMask=0077
+StateDirectory=qqbot
+StateDirectoryMode=0700
+LogsDirectory=qqbot
+LogsDirectoryMode=0700
+RuntimeDirectory=qqbot
+RuntimeDirectoryMode=0700
+ReadWritePaths=/opt/qqbot/data
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
 MemoryMax=1G
 MemorySwapMax=1G
 CPUQuota=150%
 Nice=10
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=1000
 StandardOutput=journal
 StandardError=journal
 

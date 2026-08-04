@@ -1141,8 +1141,8 @@ class UapiBudgetTests(unittest.TestCase):
             client = Client()
 
         uapi.reset_state_for_test()
-        with patch.object(uapi.log, "info") as info, \
-                patch.object(uapi.log, "debug") as debug:
+        with patch("bot.integrations.uapi.log.info") as info, \
+                patch("bot.integrations.uapi.log.debug") as debug:
             asyncio.run(uapi.uapi_get(Stub(), "/answerbook/ask"))
             asyncio.run(uapi.uapi_get(Stub(), "/answerbook/ask"))
             asyncio.run(uapi.uapi_get(Stub(), "/image/bing-daily"))
@@ -2636,3 +2636,103 @@ class TouchGalBehaviorTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertFalse(result["handled"])
         self.assertEqual(result["text"], "")
+
+class RuntimeConcurrencyRegressionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queue_discard_updates_byte_accounting(self):
+        client = OneBotClient({
+            "ws_url": "ws://127.0.0.1:3001",
+            "token": "",
+            "bot_qq": 1,
+            "runtime": {},
+        })
+        queue = asyncio.Queue(maxsize=1)
+        queue.put_nowait(({"post_type": "message"}, 128))
+        client._queue_bytes = 128
+        self.assertTrue(client._discard_oldest_queued_event(queue))
+        self.assertEqual(client._queue_bytes, 0)
+        self.assertTrue(queue.empty())
+
+    async def test_voice_quota_check_is_serialized(self):
+        from bot.services import voice_reply
+
+        class Client:
+            def __init__(self):
+                self.calls = 0
+                self.active = 0
+                self.max_active = 0
+
+            async def send_group_ai_record(self, group_id, character, text):
+                self.calls += 1
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                await asyncio.sleep(0)
+                self.active -= 1
+                return {"status": "ok", "retcode": 0}
+
+        class Stub:
+            config = {
+                "voice_reply": {
+                    "enabled": True,
+                    "probability": 1.0,
+                    "min_chars": 1,
+                    "max_chars": 45,
+                    "cooldown_seconds": 3600,
+                    "daily_limit": 1,
+                    "character_id": "voice",
+                },
+                "group_defaults": {"features": {"voice_reply": True}},
+                "groups": {"100": {"enabled": True, "features": {}}},
+            }
+
+        stub = Stub()
+        stub.client = Client()
+        with tempfile.TemporaryDirectory() as directory,                 patch.object(voice_reply, "_STATE_PATH", os.path.join(directory, "voice.json")),                 patch.object(voice_reply.random, "random", return_value=0):
+            voice_reply.reset_state_for_test()
+            results = await asyncio.gather(
+                voice_reply.maybe_send_short_voice(stub, 100, "hello"),
+                voice_reply.maybe_send_short_voice(stub, 100, "hello"),
+            )
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(stub.client.calls, 1)
+        self.assertEqual(stub.client.max_active, 1)
+        voice_reply.reset_state_for_test()
+
+    async def test_uapi_requests_use_bounded_concurrency(self):
+        from bot.integrations import uapi
+
+        class Stub:
+            config = {}
+            client = type("Client", (), {"session": object()})()
+
+        active = 0
+        max_active = 0
+
+        async def fake_request(*args, **kwargs):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {"ok": True}
+
+        stub = Stub()
+        with patch.object(uapi, "_json_request_unlocked", new=fake_request):
+            await asyncio.gather(
+                uapi._json_request(stub, "GET", "/saying"),
+                uapi._json_request(stub, "GET", "/saying"),
+            )
+        self.assertEqual(max_active, 2)
+
+    async def test_failed_scheduled_job_is_not_marked_done(self):
+        dispatcher = object()
+        with patch.object(scheduler, "_execute_scheduled_job", new=AsyncMock(return_value=False)),                 patch.object(scheduler, "_mark_scheduled_job_done") as mark_done:
+            self.assertFalse(await scheduler._run_due_scheduled_job(
+                dispatcher, "hotboard", 2))
+        mark_done.assert_not_called()
+
+    async def test_successful_scheduled_job_is_marked_done(self):
+        dispatcher = object()
+        with patch.object(scheduler, "_execute_scheduled_job", new=AsyncMock(return_value=True)),                 patch.object(scheduler, "_mark_scheduled_job_done") as mark_done:
+            self.assertTrue(await scheduler._run_due_scheduled_job(
+                dispatcher, "hotboard", 2))
+        mark_done.assert_called_once_with(dispatcher, "hotboard", 2)

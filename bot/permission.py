@@ -24,6 +24,18 @@ def get_group_config(dispatcher, group_id):
         "welcome_msg": {**defaults.get("welcome_msg", {}), **group_cfg.get("welcome_msg", {})},
         "bad_words": {**defaults.get("bad_words", {}), **group_cfg.get("bad_words", {})},
         "features": {**defaults.get("features", {}), **group_cfg.get("features", {})},
+        "napcat_features": {
+            **dispatcher.config.get("napcat_features", {}),
+            **group_cfg.get("napcat_features", {}),
+        },
+        "ai_tools": {
+            **dispatcher.config.get("ai_tools", {}),
+            **group_cfg.get("ai_tools", {}),
+        },
+        "automation": {
+            **dispatcher.config.get("automation", {}),
+            **group_cfg.get("automation", {}),
+        },
     }
     # Merge bad_words as union of default and group-specific lists
     default_words = set(defaults.get("bad_words", {}).get("words", []))
@@ -119,6 +131,9 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
     # Bot owner (446697984) bypasses ALL checks
     if user_id == owner:
         return True, None
+    # Group-owner commands are scoped to the current group; super owners bypass above.
+    if cmd_info.get("owner_only") and caller_level < LEVEL_GOWNER:
+        return False, "需要群主或最高主人权限"
     # /master command: only bot owner can use (already handled above, this is for safety)
     if cmd_info.get("bot_owner_only"):
         if user_id == bot_qq:

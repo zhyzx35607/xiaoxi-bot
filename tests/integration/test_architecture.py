@@ -63,6 +63,17 @@ class ArchitectureRegressionTests(unittest.TestCase):
         with open(os.path.join(ROOT, "deploy", "qqbot.service"), encoding="utf-8") as handle:
             self.assertIn("/opt/qqbot/main.py", handle.read())
 
+    def test_runtime_temp_files_stay_out_of_code_tree(self):
+        for relative_path in ("bot/integrations/bilibili.py", "bot/commands/queries.py"):
+            path = os.path.join(ROOT, *relative_path.split("/"))
+            with open(path, encoding="utf-8") as handle:
+                source = handle.read()
+            self.assertNotIn('os.path.join(_ROOT, "tmp")', source)
+        with open(os.path.join(ROOT, "deploy", "qqbot.service"), encoding="utf-8") as handle:
+            service = handle.read()
+        self.assertIn("QQBOT_TMP_DIR=/opt/qqbot/data/tmp", service)
+        with open(os.path.join(ROOT, "deploy", "qqbot-journald.conf"), encoding="utf-8") as handle:
+            self.assertIn("SystemMaxUse=256M", handle.read())
     def test_no_dependency_was_added_for_refactor(self):
         with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as handle:
             requirements = {line.strip() for line in handle if line.strip()}

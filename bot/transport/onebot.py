@@ -10,8 +10,8 @@ from api_registry import REGISTRY
 
 log = logging.getLogger("qqbot")
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PID_FILE = os.path.join(_ROOT, "bot.pid")
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PID_FILE = os.getenv("QQBOT_PID_FILE") or os.path.join(_ROOT, "bot.pid")
 class OneBotClient:
     def __init__(self, config):
         self.config = config
@@ -115,6 +115,15 @@ class OneBotClient:
         except asyncio.TimeoutError:
             log.warning("Timed out waiting for %d event tasks to stop", len(tasks))
 
+    def _discard_oldest_queued_event(self, msg_queue):
+        try:
+            dropped = msg_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return False
+        if dropped is not None:
+            self._queue_bytes = max(0, self._queue_bytes - dropped[1])
+        return True
+
     async def run(self):
         if not self._acquire_pid():
             return
@@ -192,10 +201,7 @@ class OneBotClient:
                                 try:
                                     msg_queue.put_nowait(None)
                                 except asyncio.QueueFull:
-                                    try:
-                                        msg_queue.get_nowait()
-                                    except asyncio.QueueEmpty:
-                                        pass
+                                    self._discard_oldest_queued_event(msg_queue)
                                     try:
                                         msg_queue.put_nowait(None)
                                     except asyncio.QueueFull:
@@ -251,6 +257,7 @@ class OneBotClient:
                 finally:
                     self._connected_event.clear()
                     self._ws = None
+                    self._queue_bytes = 0
                     for echo, fut in list(self._pending.items()):
                         if not fut.done():
                             fut.set_result({"status": "disconnected"})
@@ -632,12 +639,12 @@ class OneBotClient:
             "busid": busid,
         })
 
-    async def move_group_file(self, group_id, file_id, parent_directory, target_directory):
+    async def move_group_file(self, group_id, file_id, current_parent_directory, target_parent_directory):
         return await self.call("move_group_file", {
             "group_id": group_id,
             "file_id": file_id,
-            "parent_directory": parent_directory,
-            "target_directory": target_directory,
+            "current_parent_directory": current_parent_directory,
+            "target_parent_directory": target_parent_directory,
         })
 
     async def trans_group_file(self, group_id, file_id, current_parent_directory, target_group_id, target_directory):
@@ -747,13 +754,26 @@ class OneBotClient:
             self._member_cache[cache_key] = {"data": result, "ts": time.time()}
         return result
 
-    async def get_group_msg_history(self, group_id, count=20):
-        return await self.call("get_group_msg_history", {"group_id": group_id, "count": count})
+    async def get_group_msg_history(self, group_id, count=20, message_seq="0",
+                                    reverse_order=False, disable_get_url=True,
+                                    parse_mult_msg=False, quick_reply=False):
+        return await self.call("get_group_msg_history", {
+            "group_id": group_id, "message_seq": str(message_seq),
+            "count": max(1, min(int(count), 20)),
+            "reverse_order": bool(reverse_order), "reverseOrder": bool(reverse_order),
+            "disable_get_url": bool(disable_get_url),
+            "parse_mult_msg": bool(parse_mult_msg), "quick_reply": bool(quick_reply),
+        })
 
-    async def get_friend_msg_history(self, user_id, message_seq="0", count=20, reverse_order=False):
+    async def get_friend_msg_history(self, user_id, message_seq="0", count=20,
+                                     reverse_order=False, disable_get_url=True,
+                                     parse_mult_msg=False, quick_reply=False):
         return await self.call("get_friend_msg_history", {
             "user_id": user_id, "message_seq": str(message_seq),
-            "count": max(1, min(int(count), 20)), "reverseOrder": bool(reverse_order),
+            "count": max(1, min(int(count), 20)),
+            "reverse_order": bool(reverse_order), "reverseOrder": bool(reverse_order),
+            "disable_get_url": bool(disable_get_url),
+            "parse_mult_msg": bool(parse_mult_msg), "quick_reply": bool(quick_reply),
         })
 
     async def get_recent_contact(self, count=10):
@@ -791,11 +811,15 @@ class OneBotClient:
     async def fetch_custom_face(self, count=48):
         return await self.call("fetch_custom_face", {"count": max(1, min(int(count), 48))})
 
-    async def create_collection(self, messages):
-        return await self.call("create_collection", {"messages": messages or []})
+    async def create_collection(self, raw_data, brief):
+        return await self.call("create_collection", {
+            "rawData": str(raw_data), "brief": str(brief),
+        })
 
-    async def get_collection_list(self):
-        return await self.call("get_collection_list", {})
+    async def get_collection_list(self, category="0", count="20"):
+        return await self.call("get_collection_list", {
+            "category": str(category), "count": str(count),
+        })
 
     async def ark_share_group(self, group_id):
         return await self.call("ArkShareGroup", {"group_id": group_id})
@@ -818,7 +842,8 @@ class OneBotClient:
 
     async def translate_en2zh(self, text):
         """Native NapCat English-to-Chinese translation (free, no API cost)."""
-        return await self.call("translate_en2zh", {"text": text})
+        words = text if isinstance(text, list) else [str(text)]
+        return await self.call("translate_en2zh", {"words": words})
 
     async def get_stranger_info(self, user_id, no_cache=False):
         return await self.call("get_stranger_info", {"user_id": user_id, "no_cache": no_cache})
@@ -830,6 +855,143 @@ class OneBotClient:
         return await self.call("forward_group_single_msg", {
             "group_id": group_id, "message_id": str(message_id)
         })
+
+
+    async def fetch_emoji_like(self, message_id, emoji_id, emoji_type="1", count=20, cookie=""):
+        return await self.call("fetch_emoji_like", {"message_id": message_id, "emojiId": str(emoji_id), "emojiType": str(emoji_type), "count": int(count), "cookie": str(cookie)})
+
+    async def get_emoji_likes(self, message_id, emoji_id, group_id=None, emoji_type="1", count=20):
+        params = {"message_id": str(message_id), "emoji_id": str(emoji_id), "emoji_type": str(emoji_type), "count": int(count)}
+        if group_id:
+            params["group_id"] = str(group_id)
+        return await self.call("get_emoji_likes", params)
+
+    async def send_flash_msg(self, fileset_id, group_id=None, user_id=None):
+        params = {"fileset_id": str(fileset_id)}
+        if group_id:
+            params["group_id"] = str(group_id)
+        if user_id:
+            params["user_id"] = str(user_id)
+        return await self.call("send_flash_msg", params)
+
+    async def _group_todo(self, action, group_id, message_id=None, message_seq=None):
+        params = {"group_id": str(group_id)}
+        if message_id is not None:
+            params["message_id"] = str(message_id)
+        if message_seq is not None:
+            params["message_seq"] = str(message_seq)
+        return await self.call(action, params)
+
+    async def set_group_todo(self, group_id, message_id=None, message_seq=None):
+        return await self._group_todo("set_group_todo", group_id, message_id, message_seq)
+
+    async def cancel_group_todo(self, group_id, message_id=None, message_seq=None):
+        return await self._group_todo("cancel_group_todo", group_id, message_id, message_seq)
+
+    async def complete_group_todo(self, group_id, message_id=None, message_seq=None):
+        return await self._group_todo("complete_group_todo", group_id, message_id, message_seq)
+
+    async def get_group_album_list(self, group_id, attach_info=""):
+        return await self.call("get_qun_album_list", {"group_id": str(group_id), "attach_info": str(attach_info)})
+
+    async def get_group_album_media_list(self, group_id, album_id, attach_info=""):
+        return await self.call("get_group_album_media_list", {"group_id": str(group_id), "album_id": str(album_id), "attach_info": str(attach_info)})
+
+    async def upload_group_album_image(self, group_id, album_id, album_name, file):
+        return await self.call("upload_image_to_qun_album", {"group_id": str(group_id), "album_id": str(album_id), "album_name": str(album_name), "file": str(file)}, timeout=max(self._api_timeout, 120))
+
+    async def delete_group_album_media(self, group_id, album_id, lloc):
+        return await self.call("del_group_album_media", {"group_id": str(group_id), "album_id": str(album_id), "lloc": str(lloc)})
+
+    async def comment_group_album_media(self, group_id, album_id, lloc, content):
+        return await self.call("do_group_album_comment", {"group_id": str(group_id), "album_id": str(album_id), "lloc": str(lloc), "content": str(content)})
+
+    async def set_group_album_media_like(self, group_id, album_id, batch_id, lloc="", cancel=False):
+        action = "cancel_group_album_media_like" if cancel else "set_group_album_media_like"
+        return await self.call(action, {"group_id": str(group_id), "album_id": str(album_id), "batch_id": str(batch_id), "lloc": str(lloc)})
+
+    async def get_group_detail_info(self, group_id):
+        return await self.call("get_group_detail_info", {"group_id": str(group_id)})
+
+    async def get_group_signed_list(self, group_id):
+        return await self.call("get_group_signed_list", {"group_id": str(group_id)})
+
+    async def get_online_file_msg(self, user_id):
+        return await self.call("get_online_file_msg", {"user_id": str(user_id)})
+
+    async def send_online_file(self, user_id, file_path, file_name=""):
+        return await self.call("send_online_file", {"user_id": str(user_id), "file_path": str(file_path), "file_name": str(file_name)}, timeout=max(self._api_timeout, 120))
+
+    async def send_online_folder(self, user_id, folder_path, folder_name=""):
+        return await self.call("send_online_folder", {"user_id": str(user_id), "folder_path": str(folder_path), "folder_name": str(folder_name)}, timeout=max(self._api_timeout, 120))
+
+    async def cancel_online_file(self, user_id, msg_id):
+        return await self.call("cancel_online_file", {"user_id": str(user_id), "msg_id": str(msg_id)})
+
+    async def receive_online_file(self, user_id, msg_id, element_id, approve=True):
+        action = "receive_online_file" if approve else "refuse_online_file"
+        return await self.call(action, {"user_id": str(user_id), "msg_id": str(msg_id), "element_id": str(element_id)})
+
+    async def set_friend_remark(self, user_id, remark):
+        return await self.call("set_friend_remark", {"user_id": str(user_id), "remark": str(remark)})
+
+    async def delete_friend(self, user_id, block=False, both=False):
+        return await self.call("delete_friend", {"user_id": str(user_id), "temp_block": bool(block), "temp_both_del": bool(both)})
+
+    async def get_unidirectional_friend_list(self):
+        return await self.call("get_unidirectional_friend_list", {})
+
+    async def set_qq_profile(self, nickname, personal_note="", sex=0):
+        return await self.call("set_qq_profile", {"nickname": str(nickname), "personal_note": str(personal_note), "sex": int(sex)})
+
+    async def set_diy_online_status(self, face_id, face_type, wording):
+        return await self.call("set_diy_online_status", {"face_id": int(face_id), "face_type": int(face_type), "wording": str(wording)})
+
+    async def add_custom_face(self, file):
+        return await self.call("add_custom_face", {"file": str(file)}, timeout=max(self._api_timeout, 60))
+
+    async def delete_custom_face(self, res_id="", emoji_id="", md5=""):
+        params = {}
+        if res_id:
+            params["res_id"] = str(res_id)
+        if emoji_id:
+            params["id"] = str(emoji_id)
+        if md5:
+            params["md5"] = str(md5)
+        return await self.call("delete_custom_face", params)
+
+    async def set_custom_face_desc(self, emoji_id, res_id, md5, desc):
+        return await self.call("set_custom_face_desc", {"emoji_id": str(emoji_id), "res_id": str(res_id), "md5": str(md5), "desc": str(desc)})
+
+    async def fetch_custom_face_detail(self, count=20):
+        return await self.call("fetch_custom_face_detail", {"count": int(count)})
+
+    async def set_group_remark(self, group_id, remark):
+        return await self.call("set_group_remark", {"group_id": str(group_id), "remark": str(remark)})
+
+    async def set_group_add_option(self, group_id, add_type, question="", answer=""):
+        return await self.call("set_group_add_option", {"group_id": str(group_id), "add_type": int(add_type), "group_question": str(question), "group_answer": str(answer)})
+
+    async def set_group_robot_add_option(self, group_id, enabled, examine=True):
+        return await self.call("set_group_robot_add_option", {"group_id": str(group_id), "robot_member_switch": int(bool(enabled)), "robot_member_examine": int(bool(examine))})
+
+    async def set_group_kick_members(self, group_id, user_ids, reject_add=False):
+        return await self.call("set_group_kick_members", {"group_id": str(group_id), "user_id": [str(uid) for uid in list(user_ids)[:20]], "reject_add_request": bool(reject_add)})
+
+    async def get_group_ignored_notifies(self):
+        return await self.call("get_group_ignored_notifies", {})
+
+    async def get_group_ignore_add_request(self):
+        return await self.call("get_group_ignore_add_request", {})
+
+    async def get_doubt_friends_add_request(self, count=20):
+        return await self.call("get_doubt_friends_add_request", {"count": int(count)})
+
+    async def set_doubt_friends_add_request(self, flag, approve=True):
+        return await self.call("set_doubt_friends_add_request", {"flag": str(flag), "approve": bool(approve)})
+
+    async def fetch_ptt_text(self, message_id):
+        return await self.call("fetch_ptt_text", {"message_id": message_id})
 
     @property
     def session(self):

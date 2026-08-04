@@ -9,12 +9,14 @@ sys.path.insert(0, _BASE_DIR)
 
 from app.bootstrap import amain
 from app.config import apply_env_overrides, load_config, migrate_config
-from app.logging_setup import setup_logging
+from app.logging_setup import get_application_loggers, setup_logging
 
-log, chat_log = setup_logging(_BASE_DIR)
+log, chat_log = get_application_loggers()
 
 
 def main():
+    global log, chat_log
+    log, chat_log = setup_logging(_BASE_DIR)
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:

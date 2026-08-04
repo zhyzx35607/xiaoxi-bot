@@ -1,4 +1,4 @@
-# bot/dispatcher.py - Fast message dispatcher with permission system
+﻿# bot/dispatcher.py - Fast message dispatcher with permission system
 import asyncio, heapq, json, logging, os, random, re, time
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -25,6 +25,8 @@ from .events.router import RouterMixin
 from .services.delayed_reply import DelayedReplyServiceMixin
 from .services.health import HealthServiceMixin
 from .services.member_cache import MemberCacheMixin
+from .agent.runtime import AgentRuntime
+from .agent.worker_service import AgentWorker
 
 log = logging.getLogger("qqbot")
 chat_log = logging.getLogger("qqbot.chat")
@@ -57,6 +59,8 @@ class Dispatcher(
     def __init__(self, config, client, config_path=None):
         self.config = config
         self.client = client
+        self.agent_runtime = AgentRuntime(config, _ROOT)
+        self.agent_worker = AgentWorker(self)
         self._config_path = config_path or os.path.join(_ROOT, "config.json")
         self.commands = {}
         self._lock = asyncio.Lock()
@@ -603,36 +607,17 @@ class Dispatcher(
                     targets.append(int(qq))
         return targets
 
-    async def _reply(self, group_id, user_id, text):
-        # QQ message limit ~4500 chars; split long messages to avoid silent truncation
-        max_len = 4000
-        if len(text) <= max_len:
-            if group_id:
-                await self.client.send_group_msg(group_id, text)
-            else:
-                await self.client.send_private_msg(user_id, text)
-            return
-        # Split at sentence boundaries when possible
-        chunks = []
-        remaining = text
-        while len(remaining) > max_len:
-            split_at = remaining.rfind("\n", 0, max_len)
-            if split_at < max_len // 2:
-                split_at = remaining.rfind("。", 0, max_len)
-            if split_at < max_len // 2:
-                split_at = remaining.rfind("；", 0, max_len)
-            if split_at < max_len // 2:
-                split_at = max_len
-            chunks.append(remaining[:split_at + 1])
-            remaining = remaining[split_at + 1:].lstrip()
-        if remaining:
-            chunks.append(remaining)
-        for chunk in chunks:
-            if group_id:
-                await self.client.send_group_msg(group_id, chunk)
-            else:
-                await self.client.send_private_msg(user_id, chunk)
-            await asyncio.sleep(0.5)  # Small delay between chunks to avoid rate limits
+    async def _reply(self, group_id, user_id, text, *, force_forward=False,
+                     kind="generic", title="小汐整理的内容", sections=None,
+                     role_hint=""):
+        from .events.router import _command_message_id
+        from .transport.output import send_text_response
+        return await send_text_response(
+            self, group_id, user_id, text,
+            force_forward=force_forward, kind=kind, title=title,
+            sections=sections, role_hint=role_hint,
+            request_message_id=_command_message_id.get(),
+        )
 
     def _get_config_path(self):
         return self._config_path

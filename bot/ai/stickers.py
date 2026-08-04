@@ -12,7 +12,7 @@ from ..utils import atomic_write_json
 from .providers import _call_vision_api, _get_semaphore, _get_vision_api_key
 
 log = logging.getLogger("qqbot")
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 STICKER_DIR = os.path.join(_ROOT, "data", "stickers")
 os.makedirs(STICKER_DIR, exist_ok=True)
 

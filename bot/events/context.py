@@ -23,9 +23,10 @@ def _disabled_group_activation_allowed(dispatcher, event):
     """Allow only the owner/bot account to recover a disabled group in place."""
     if event.get("post_type") != "message" or event.get("message_type") != "group":
         return False
-    if event.get("user_id") not in {
-        dispatcher.config.get("bot_owner"), dispatcher.config.get("bot_qq")
-    }:
+    user_id = event.get("user_id")
+    if user_id == dispatcher.config.get("bot_owner"):
+        return True
+    if user_id != dispatcher.config.get("bot_qq"):
         return False
     prefix = dispatcher.config.get("command_prefix", "/")
     return str(event.get("raw_message") or "").strip().lower() == prefix + "enable"

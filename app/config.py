@@ -93,7 +93,7 @@ def migrate_config(config):
             "bad_words": config.pop("bad_words", {"enabled": True, "auto_delete": True, "warn_msg": "@{user} 注意一下发言", "words": []}),
             "features": {
                 "ai_chat": True, "interject": True, "repeat": True, "music": True,
-                "fortune": True, "admin_cmds": True, "voice_reply": True,
+                "fortune": True, "admin_cmds": True, "voice_reply": False,
                 "auto_poke": True, "auto_essence": False
             }
         }
@@ -185,6 +185,7 @@ def migrate_config(config):
         migrated = True
 
     uapi_defaults = {
+        "concurrency": 3,
         "daily_limit": 100,
         "reserve": 30,
         "month_limit": 3400,
@@ -196,7 +197,7 @@ def migrate_config(config):
             migrated = True
 
     voice_reply_defaults = {
-        "enabled": True,
+        "enabled": False,
         "probability": 0.08,
         "min_chars": 5,
         "max_chars": 45,
@@ -211,7 +212,7 @@ def migrate_config(config):
             migrated = True
 
     acg_defaults = {
-        "enabled": True,
+        "enabled": False,
         "send_count": 20,
         "minimum_count": 20,
         "dedupe_days": 7,
@@ -232,7 +233,7 @@ def migrate_config(config):
             migrated = True
 
     hotboard_defaults = {
-        "enabled": True,
+        "enabled": False,
         "types": ["weibo"],
         "detail_count": 10,
         "windows": [["10:00", "13:00"], ["19:00", "22:00"]],
@@ -281,10 +282,10 @@ def migrate_config(config):
     # Merge new per-group feature defaults into existing group_defaults
     feature_defaults = {
         "bili_parse": True,
-        "acg_images": True,
-        "hotboard_push": True,
+        "acg_images": False,
+        "hotboard_push": False,
         "galgame_resource": True,
-        "voice_reply": True,
+        "voice_reply": False,
     }
     feats = config.setdefault("group_defaults", {}).setdefault("features", {})
     for key, value in feature_defaults.items():
@@ -305,4 +306,97 @@ def migrate_config(config):
             security[key] = value
             migrated = True
 
+    message_output_defaults = {
+        "forward_threshold_chars": 200,
+        "forward_node_target_chars": 800,
+        "help_always_forward": True,
+        "ai_summary_enabled": True,
+        "ai_summary_max_chars": 80,
+        "ai_summary_timeout_seconds": 4,
+        "reply_to_forward": True,
+    }
+    message_output = config.setdefault("message_output", {})
+    for key, value in message_output_defaults.items():
+        if key not in message_output:
+            message_output[key] = value
+            migrated = True
+
+    persona_defaults = {
+        "role_awareness_enabled": True,
+        "super_owner_name": "主人",
+        "master_name": "主人",
+        "gowner_name": "群主",
+        "admin_name": "管理",
+    }
+    persona = config.setdefault("persona", {})
+    for key, value in persona_defaults.items():
+        if key not in persona:
+            persona[key] = value
+            migrated = True
+
+    category_defaults = {
+        "message": False,
+        "management": False,
+        "todo": False,
+        "album": False,
+        "file": False,
+        "friend": False,
+        "account": False,
+        "interaction": False,
+        "experimental": False,
+    }
+    napcat_features = config.setdefault("napcat_features", {})
+    ai_tools = config.setdefault("ai_tools", {})
+    for key, value in category_defaults.items():
+        if key not in napcat_features:
+            napcat_features[key] = value
+            migrated = True
+        if key not in ai_tools:
+            ai_tools[key] = value
+            migrated = True
+
+    automation_defaults = {
+        "enabled": False,
+        "allow_light_management": False,
+        "max_rules": 20,
+        "max_daily_actions": 30,
+    }
+    automation = config.setdefault("automation", {})
+    for key, value in automation_defaults.items():
+        if key not in automation:
+            automation[key] = value
+            migrated = True
+    agent_defaults = {
+        "enabled": True,
+        "group_enabled": True,
+        "private_enabled": True,
+        "proactive_enabled": True,
+        "owner_daily_limit": 6,
+        "group_daily_limit": 3,
+        "topic_cooldown_seconds": 1800,
+        "quiet_start": 23,
+        "quiet_end": 9,
+        "member_passive_only": True,
+        "observation_only": True,
+        "primary_router": False,
+        "owner_autonomy_enabled": False,
+        "owner_max_rounds": 6,
+        "owner_tool_budget": 12,
+        "tool_timeout_seconds": 15,
+        "background_tasks_enabled": True,
+        "background_task_max_attempts": 3,
+        "owner_goal_check_interval_seconds": 7200,
+        "worker_enabled": True,
+        "worker_interval_seconds": 30,
+    }
+    agent = config.setdefault("agent", {})
+    for key, value in agent_defaults.items():
+        if key not in agent:
+            agent[key] = value
+            migrated = True
+    if int(agent.get("schema_version", 0) or 0) < 2:
+        agent["schema_version"] = 2
+        agent["worker_enabled"] = True
+        agent["worker_interval_seconds"] = 30
+        migrated = True
     return config, migrated
