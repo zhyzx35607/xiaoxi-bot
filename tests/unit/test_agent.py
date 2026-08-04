@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from bot.agent.identity import resolve_identity, resolve_scope
 from bot.agent.models import IdentityLevel
@@ -41,6 +41,58 @@ class AgentPolicyTests(unittest.TestCase):
         event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
         self.assertFalse(tool_allowed({}, event, "get_cookies"))
         self.assertTrue(tool_allowed({}, event, "get_group_info"))
+
+class AgentPlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unstructured_planner_output_never_leaks_internal_text(self):
+        from bot.agent.planner import AgentPlanner
+
+        runtime = AgentRuntime({"bot_owner": 100, "agent": {}}, tempfile.mkdtemp())
+        class Client:
+            session = None
+        dispatcher = type("Dispatcher", (), {
+            "config": runtime.config, "client": Client(),
+        })()
+        event = runtime.build_event({
+            "user_id": 100, "message_type": "private",
+            "raw_message": "过来，让我摸摸头",
+        })
+        internal = (
+            "- upload_private_file: NapCat 只读能力\n"
+            "作为规划器，我需要判断意图，不需要调用工具。"
+        )
+        with patch(
+            "bot.agent.planner._call_deepseek",
+            new=AsyncMock(side_effect=[internal, "主人，我在呢。"]),
+        ):
+            plan = await AgentPlanner(dispatcher).plan(event)
+
+        self.assertEqual(plan["reply"], "主人，我在呢。")
+        self.assertNotIn("upload_private_file", plan["reply"])
+        self.assertFalse(plan["needs_confirmation"])
+        self.assertEqual(plan["reason"], "unstructured_planner_output")
+
+    async def test_failed_safe_fallback_uses_fixed_reply(self):
+        from bot.agent.planner import AgentPlanner
+
+        runtime = AgentRuntime({"bot_owner": 100, "agent": {}}, tempfile.mkdtemp())
+        class Client:
+            session = None
+        dispatcher = type("Dispatcher", (), {
+            "config": runtime.config, "client": Client(),
+        })()
+        event = runtime.build_event({
+            "user_id": 100, "message_type": "private",
+            "raw_message": "你好",
+        })
+        with patch(
+            "bot.agent.planner._call_deepseek",
+            new=AsyncMock(side_effect=["内部规划文本", "execution_plan 不应泄漏"]),
+        ):
+            plan = await AgentPlanner(dispatcher).plan(event)
+
+        self.assertEqual(plan["reply"], "主人，我刚才没能正常理解这条消息，可以再说一次吗？")
+        self.assertNotIn("execution_plan", plan["reply"])
+
 
 class AgentPersistenceTests(unittest.TestCase):
     def test_private_and_group_memory_are_isolated(self):
