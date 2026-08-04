@@ -13,7 +13,8 @@ import aiohttp
 from ..permission import (
     get_user_level, get_bot_role, get_group_config,
     add_master, remove_master, list_masters,
-    save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
+    save_group_config, can_moderate_target, LEVEL_SUPER, LEVEL_MASTER,
+    LEVEL_GOWNER, LEVEL_ADMIN, LEVEL_MEMBER,
 )
 from ..utils import atomic_write_json
 from .common import CONFIG_PATH, _load, _save
