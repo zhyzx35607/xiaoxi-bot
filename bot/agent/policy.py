@@ -26,6 +26,20 @@ def decide_event(config, event: AgentEvent, *, explicit=False):
     if is_quiet_hours(settings) and not event.identity.is_super_owner: return AgentDecision(False, "quiet_hours")
     return AgentDecision(True, "privileged_proactive_candidate")
 
+def primary_router_enabled(config, event: AgentEvent):
+    settings = agent_config(config)
+    if not settings["enabled"]:
+        return False
+    if event.scope.is_private:
+        return bool(
+            settings.get("primary_router", False)
+            and not settings.get("observation_only", True)
+            and settings.get("owner_autonomy_enabled", False)
+            and event.identity.is_super_owner)
+    group = config.get("groups", {}).get(str(event.scope.group_id), {})
+    group_agent = group.get("agent", {}) if isinstance(group, dict) else {}
+    return bool(group_agent.get("primary_router", False))
+
 def tool_allowed(config, event: AgentEvent, tool_name):
     forbidden = {"get_clientkey", "get_cookies", "get_credentials", "get_csrf_token", "get_rkey", "get_rkey_server", "nc_get_rkey", "send_packet", "send_raw_packet", "test_action"}
     if tool_name in forbidden: return False

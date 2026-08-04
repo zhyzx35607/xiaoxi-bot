@@ -119,6 +119,124 @@ async def _task_command(dispatcher, group_id, user_id, rest):
     await dispatcher._reply(group_id, user_id, "\n".join(lines))
 
 
+async def _plan_command(dispatcher, group_id, user_id, rest):
+    scope = _scope_key(group_id, user_id)
+    parts = rest.split(maxsplit=1)
+    action = parts[0].lower() if parts else "list"
+    value = parts[1].strip() if len(parts) > 1 else ""
+    if action in {"cancel", "取消"}:
+        item = dispatcher.agent_runtime.plans.cancel(scope, value)
+        await dispatcher._reply(group_id, user_id, "计划已取消" if item else "没有找到可取消的计划")
+        return
+    if action not in {"list", "列表"}:
+        plan = dispatcher.agent_runtime.plans.get(scope, action)
+        if plan:
+            lines = ["计划 {} [{}]：{}".format(plan.get("id"), plan.get("status"), plan.get("title", ""))]
+            if plan.get("success_criteria"):
+                lines.append("成功标准：{}".format(plan["success_criteria"][:500]))
+            for step in plan.get("steps", []):
+                line = "- {} [{}] {}".format(step.get("id"), step.get("status"), step.get("title", ""))
+                if step.get("evidence"):
+                    line += "；证据：{}".format(step["evidence"][:300])
+                lines.append(line)
+            await dispatcher._reply(group_id, user_id, "\n".join(lines))
+            return
+    plans = dispatcher.agent_runtime.plans.list(scope)
+    if not plans:
+        await dispatcher._reply(group_id, user_id, "当前没有执行计划")
+        return
+    lines = ["Agent 执行计划："]
+    for plan in plans[:15]:
+        done = sum(1 for step in plan.get("steps", []) if step.get("status") == "done")
+        lines.append("{} [{}] {}/{} {}".format(
+            plan.get("id"), plan.get("status"), done, len(plan.get("steps", [])), plan.get("title", "")[:100]))
+    await dispatcher._reply(group_id, user_id, "\n".join(lines))
+
+
+async def _skill_command(dispatcher, group_id, user_id, rest):
+    scope = _scope_key(group_id, user_id)
+    parts = rest.split(maxsplit=1)
+    action = parts[0].lower() if parts else "list"
+    value = parts[1].strip() if len(parts) > 1 else ""
+    if action in {"add", "添加", "新建"}:
+        fields = [item.strip() for item in value.split("|")]
+        if len(fields) < 2 or not fields[0] or not fields[-1]:
+            await dispatcher._reply(group_id, user_id, "用法：/agent 技能 add 名称 | 触发词1,触发词2 | SOP 指令")
+            return
+        triggers = [item.strip() for item in re.split(r"[,，、]", fields[1]) if item.strip()] if len(fields) >= 3 else []
+        instructions = fields[-1]
+        item = dispatcher.agent_runtime.skills.create(scope, user_id, fields[0], instructions, triggers=triggers)
+        await dispatcher._reply(group_id, user_id, "技能已建立 {}：{}".format(item["id"], item["name"]))
+        return
+    if action in {"on", "off", "启用", "停用"}:
+        enabled = action in {"on", "启用"}
+        item = dispatcher.agent_runtime.skills.set_enabled(scope, value, enabled)
+        await dispatcher._reply(group_id, user_id, "技能已{}".format("启用" if enabled else "停用") if item else "技能未找到")
+        return
+    skills = dispatcher.agent_runtime.skills.list(scope, enabled_only=False)
+    if not skills:
+        await dispatcher._reply(group_id, user_id, "当前没有自定义技能/SOP")
+        return
+    lines = ["Agent 技能/SOP："]
+    lines.extend("{} [{}] {}（触发：{}）".format(
+        item.get("id"), "on" if item.get("enabled", True) else "off", item.get("name", ""),
+        "、".join(item.get("triggers", [])) or "通用") for item in skills[:20])
+    await dispatcher._reply(group_id, user_id, "\n".join(lines))
+
+
+async def _profile_command(dispatcher, group_id, user_id, rest):
+    scope = _scope_key(group_id, user_id)
+    parts = rest.split(maxsplit=1)
+    action = parts[0].lower() if parts else "show"
+    value = parts[1].strip() if len(parts) > 1 else ""
+    if action in {"人设", "persona"}:
+        profile = dispatcher.agent_runtime.profiles.update(scope, persona=value)
+        await dispatcher._reply(group_id, user_id, "当前作用域 Agent 人设已更新" if profile else "更新失败")
+        return
+    if action in {"规则", "习惯", "customs"}:
+        profile = dispatcher.agent_runtime.profiles.update(scope, customs=value)
+        await dispatcher._reply(group_id, user_id, "当前作用域习惯与规则已更新" if profile else "更新失败")
+        return
+    if action in {"主题", "topics"}:
+        topics = [item.strip() for item in re.split(r"[,，、]", value) if item.strip()]
+        dispatcher.agent_runtime.profiles.update(scope, proactive_topics=topics)
+        await dispatcher._reply(group_id, user_id, "当前作用域主动关注主题已更新")
+        return
+    profile = dispatcher.agent_runtime.profiles.get(scope)
+    if not profile:
+        await dispatcher._reply(group_id, user_id, "当前作用域还没有专属画像")
+        return
+    await dispatcher._reply(group_id, user_id, "Agent 画像：\n人设：{}\n规则：{}\n主动主题：{}".format(
+        profile.get("persona") or "未设置", profile.get("customs") or "未设置",
+        "、".join(profile.get("proactive_topics", [])) or "未设置"))
+
+
+async def _timeline_command(dispatcher, group_id, user_id):
+    scope = _scope_key(group_id, user_id)
+    records = dispatcher.agent_runtime.timeline.list(scope, limit=20)
+    if not records:
+        await dispatcher._reply(group_id, user_id, "当前没有 Agent 行动记录")
+        return
+    lines = ["Agent 最近行动："]
+    lines.extend("{} [{}] {}".format(
+        time.strftime("%m-%d %H:%M", time.localtime(item.get("timestamp", 0))),
+        item.get("kind", ""), item.get("summary", "")[:120]) for item in records)
+    await dispatcher._reply(group_id, user_id, "\n".join(lines))
+
+
+async def _insight_command(dispatcher, group_id, user_id):
+    scope = _scope_key(group_id, user_id)
+    records = dispatcher.agent_runtime.insights.list(scope, limit=20)
+    if not records:
+        await dispatcher._reply(group_id, user_id, "当前没有已沉淀洞察")
+        return
+    lines = ["Agent 洞察："]
+    lines.extend("{} [{:.2f}] {}".format(
+        item.get("category", "reflection"), float(item.get("confidence", 0)),
+        item.get("content", "")[:140]) for item in records)
+    await dispatcher._reply(group_id, user_id, "\n".join(lines))
+
+
 async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, message):
     parts = args.strip().split(maxsplit=1)
     action = parts[0].lower() if parts else "status"
@@ -162,6 +280,18 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
         save_group_config(dispatcher)
         await dispatcher._reply(group_id, user_id, "\u672c\u7fa4\u4e3b\u52a8 Agent \u5df2{}".format("\u5f00\u542f" if enabled else "\u5173\u95ed"))
         return
+    if action in {"静默", "mute"}:
+        seconds = _duration_seconds(value) if value else 43200
+        if seconds is None:
+            await dispatcher._reply(group_id, user_id, "用法：/agent 静默 12小时")
+            return
+        dispatcher.agent_runtime.proactive.mute(_scope_key(group_id, user_id), seconds=seconds)
+        await dispatcher._reply(group_id, user_id, "当前作用域主动消息已静默约 {}".format(value or "12小时"))
+        return
+    if action in {"恢复主动", "unmute", "resume"}:
+        dispatcher.agent_runtime.proactive.unmute(_scope_key(group_id, user_id))
+        await dispatcher._reply(group_id, user_id, "当前作用域主动消息已恢复")
+        return
     if action in {"\u76ee\u6807", "goal", "goals"}:
         await _goal_command(dispatcher, group_id, user_id, value)
         return
@@ -174,16 +304,35 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
     if action in {"\u4efb\u52a1", "task", "tasks"}:
         await _task_command(dispatcher, group_id, user_id, value)
         return
+    if action in {"计划", "plan", "plans"}:
+        await _plan_command(dispatcher, group_id, user_id, value)
+        return
+    if action in {"技能", "skill", "skills", "sop"}:
+        await _skill_command(dispatcher, group_id, user_id, value)
+        return
+    if action in {"画像", "profile"}:
+        await _profile_command(dispatcher, group_id, user_id, value)
+        return
+    if action in {"时间线", "timeline", "history"}:
+        await _timeline_command(dispatcher, group_id, user_id)
+        return
+    if action in {"洞察", "insight", "insights"}:
+        await _insight_command(dispatcher, group_id, user_id)
+        return
     scope = _scope_key(group_id, user_id)
     pending = dispatcher.agent_runtime.memory.list_records(scope, confirmed=False)
     goals = dispatcher.agent_runtime.goals.list(scope)
     reminders = dispatcher.agent_runtime.reminders.list(scope)
     tasks = dispatcher.agent_runtime.tasks.list(scope, statuses={"queued", "running"})
+    plans = dispatcher.agent_runtime.plans.list(scope, statuses={"active", "running"})
+    skills = dispatcher.agent_runtime.skills.list(scope)
+    insights = dispatcher.agent_runtime.insights.list(scope, limit=100)
     settings = dispatcher.config.get("agent", {})
     lines = [
         "Agent \u72b6\u6001\uff1a{}".format("\u5f00\u542f" if settings.get("enabled", True) else "\u5173\u95ed"),
         "\u8fd0\u884c\u9636\u6bb5\uff1a{}".format("\u89c2\u5bdf\u6a21\u5f0f" if settings.get("observation_only", True) else "\u81ea\u6cbb\u89c4\u5212\u6a21\u5f0f"),
-        "\u76ee\u6807\uff1a{}\uff1b\u63d0\u9192\uff1a{}\uff1b\u540e\u53f0\u4efb\u52a1\uff1a{}\uff1b\u5f85\u786e\u8ba4\u8bb0\u5fc6\uff1a{}".format(len(goals), len(reminders), len(tasks), len(pending)),
-        "\u547d\u4ee4\uff1a/agent \u76ee\u6807 | \u63d0\u9192 | \u8bb0\u5fc6 | \u4efb\u52a1 | \u81ea\u6cbb on/off | \u4e3b\u52a8 on/off",
+        "目标：{}；计划：{}；提醒：{}；后台任务：{}；技能：{}；洞察：{}；待确认记忆：{}".format(
+            len(goals), len(plans), len(reminders), len(tasks), len(skills), len(insights), len(pending)),
+        "命令：/agent 目标 | 计划 | 提醒 | 任务 | 记忆 | 技能 | 画像 | 时间线 | 洞察 | 自治 on/off | 主动 on/off",
     ]
     await dispatcher._reply(group_id, user_id, "\n".join(lines))

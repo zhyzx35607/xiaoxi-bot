@@ -3,8 +3,8 @@
 import inspect
 
 from ..policy import tool_allowed
-from .napcat import SAFE_ACTIONS, napcat_read
-from .native import NATIVE_TOOL_DESCRIPTIONS, execute_native
+from .napcat import SAFE_ACTIONS, action_description, napcat_read
+from .native import NATIVE_TOOL_DESCRIPTIONS, WRITE_TOOLS, execute_native
 
 
 class AgentToolGateway:
@@ -29,9 +29,12 @@ class AgentToolGateway:
 
     def catalog(self):
         catalog = {name: "\u5df2\u6ce8\u518c\u7684\u53ea\u8bfb\u67e5\u8be2\u5de5\u5177" for name in self._load()}
-        catalog.update({name: "NapCat \u767d\u540d\u5355\u53ea\u8bfb\u80fd\u529b" for name in SAFE_ACTIONS})
+        catalog.update({name: action_description(name) for name in SAFE_ACTIONS})
         catalog.update(NATIVE_TOOL_DESCRIPTIONS)
         return catalog
+
+    def is_read_only(self, tool_name):
+        return tool_name not in WRITE_TOOLS
 
     async def execute(self, agent_event, tool_name, **arguments):
         if not tool_allowed(self.dispatcher.config, agent_event, tool_name):
@@ -40,7 +43,7 @@ class AgentToolGateway:
             return await execute_native(
                 self.dispatcher.agent_runtime, agent_event, tool_name, arguments)
         if tool_name in SAFE_ACTIONS:
-            return await napcat_read(self.dispatcher, tool_name, **arguments)
+            return await napcat_read(self.dispatcher, agent_event, tool_name, **arguments)
         tool = self._load().get(tool_name)
         if tool is None or not callable(tool):
             return {"ok": False, "error": "unknown_agent_tool", "tool": tool_name}

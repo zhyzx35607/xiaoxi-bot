@@ -53,6 +53,7 @@ class MemoryCandidate:
     confidence: float
     requires_confirmation: bool = True
     source_event_id: str = ""
+    category: str = "fact"
 
 @dataclass(frozen=True)
 class AgentDecision:

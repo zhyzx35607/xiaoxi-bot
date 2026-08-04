@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 from bot.agent.identity import resolve_identity, resolve_scope
 from bot.agent.models import IdentityLevel
@@ -49,8 +50,25 @@ class AgentPersistenceTests(unittest.TestCase):
         runtime.memory.add_candidate(runtime.extract_memory_candidate(private))
         runtime.memory.add_candidate(runtime.extract_memory_candidate(group))
         self.assertEqual(len(runtime.memory.list_records(private.scope.key, confirmed=True)), 1)
-        self.assertEqual(len(runtime.memory.list_records(group.scope.key, confirmed=True)), 1)
+        self.assertEqual(len(runtime.memory.list_records(group.scope.key, confirmed=False)), 1)
         self.assertNotEqual(private.scope.key, group.scope.key)
+
+    def test_memory_rejects_secrets_and_deduplicates(self):
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        secret = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "记住我的 API key 是 sk-secret"})
+        self.assertIsNone(runtime.extract_memory_candidate(secret))
+        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "我偏好简短回答"})
+        candidate = runtime.extract_memory_candidate(event)
+        runtime.memory.add_candidate(candidate)
+        runtime.memory.add_candidate(candidate)
+        self.assertEqual(len(runtime.memory.list_records("owner:100", confirmed=True)), 1)
+
+    def test_group_rule_is_confirmed_but_member_preference_is_pending(self):
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        rule = runtime.build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "本群以后默认用简短播报", "sender": {"role": "owner"}})
+        preference = runtime.build_event({"user_id": 102, "group_id": 300, "message_type": "group", "raw_message": "我喜欢长文", "sender": {"role": "member"}})
+        self.assertFalse(runtime.extract_memory_candidate(rule).requires_confirmation)
+        self.assertTrue(runtime.extract_memory_candidate(preference).requires_confirmation)
 
     def test_proactive_budget_and_mute(self):
         runtime = AgentRuntime({"agent": {"quiet_start": 0, "quiet_end": 0}}, tempfile.mkdtemp())
@@ -61,6 +79,18 @@ class AgentPersistenceTests(unittest.TestCase):
         self.assertEqual(runtime.proactive.allowed(runtime.config, "group:300", topic="daily", now=1100)[1], "topic_cooldown")
         runtime.proactive.mute("group:300", seconds=1000, now=1000)
         self.assertEqual(runtime.proactive.allowed(runtime.config, "group:300", now=1100)[1], "muted")
+
+    def test_owner_rejection_mutes_scope_and_resume_clears_it(self):
+        runtime = AgentRuntime({"bot_owner": 100, "agent": {"rejection_mute_seconds": 43200}}, tempfile.mkdtemp())
+        runtime.observe({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "别主动了，安静点", "time": 1000, "sender": {"role": "owner"}})
+        self.assertGreater(runtime.proactive.muted_until("group:300"), 1000)
+        runtime.observe({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "恢复主动", "time": 1100, "sender": {"role": "owner"}})
+        self.assertEqual(runtime.proactive.muted_until("group:300"), 0)
+
+    def test_member_rejection_does_not_mute_group_agent(self):
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        runtime.observe({"user_id": 102, "group_id": 300, "message_type": "group", "raw_message": "别主动了", "time": 1000, "sender": {"role": "member"}})
+        self.assertEqual(runtime.proactive.muted_until("group:300"), 0)
 
 
 class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
@@ -84,6 +114,33 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         result = await AgentToolGateway(dispatcher).execute(event, "nc_get_user_status", user_id="123")
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"]["params"]["user_id"], 123)
+
+    async def test_registry_read_tool_forces_current_group_scope(self):
+        from bot.agent.tools.gateway import AgentToolGateway
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        class Client:
+            def __init__(self): self.calls = []
+            async def get_group_info(self, group_id):
+                self.calls.append(group_id); return {"status": "ok", "data": {"group_id": group_id}}
+        client = Client()
+        dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime, "client": client})()
+        event = runtime.build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
+        result = await AgentToolGateway(dispatcher).execute(event, "get_group_info", group_id=999)
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.calls, [300])
+
+    async def test_owner_private_group_read_requires_explicit_target(self):
+        from bot.agent.tools.gateway import AgentToolGateway
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        class Client:
+            async def get_group_info(self, group_id):
+                return {"status": "ok", "data": {"group_id": group_id}}
+        dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime, "client": Client()})()
+        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
+        denied = await AgentToolGateway(dispatcher).execute(event, "get_group_info")
+        allowed = await AgentToolGateway(dispatcher).execute(event, "get_group_info", group_id=300)
+        self.assertFalse(denied["ok"])
+        self.assertEqual(allowed["data"]["group_id"], 300)
 
 class AgentCommandPermissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_command_is_group_owner_scoped(self):
@@ -175,6 +232,45 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
         handled = await runtime.handle_event(type("D", (), {})(), {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "hi", "sender": {"role": "owner"}}, explicit=True)
         self.assertFalse(handled)
 
+    async def test_group_router_can_run_while_owner_router_is_in_observation_mode(self):
+        config = {
+            "bot_owner": 100,
+            "agent": {"primary_router": False, "observation_only": True, "owner_autonomy_enabled": False},
+            "groups": {"300": {"agent": {"primary_router": True}}},
+        }
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        calls = []
+        class Planner:
+            async def plan(self, agent_event, context):
+                return {"reply": "群域回复", "tools": [], "needs_confirmation": False, "intent": "group", "task": None}
+        runtime.planner = Planner()
+        runtime.tools = type("Tools", (), {"catalog": lambda self: {}})()
+        runtime.executor = object()
+        runtime.verifier = object()
+        async def run(*args, **kwargs):
+            calls.append(True)
+            return {"reply": "群域回复", "tools": [], "needs_confirmation": False, "intent": "group"}, []
+        runtime.run_autonomous = run
+        class Client:
+            def __init__(self): self.sent = []
+            async def send_group_msg_with_at(self, group_id, text, users):
+                self.sent.append((group_id, text, users)); return {"status": "ok"}
+        dispatcher = type("D", (), {"config": config, "client": Client()})()
+        event = {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "推进群目标", "sender": {"role": "owner"}}
+        self.assertTrue(runtime.primary_router_enabled(event))
+        self.assertTrue(await runtime.handle_event(dispatcher, event, explicit=True))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(dispatcher.client.sent[0][0], 300)
+
+    def test_private_owner_router_remains_independently_disabled(self):
+        config = {
+            "bot_owner": 100,
+            "agent": {"primary_router": False, "observation_only": True, "owner_autonomy_enabled": False},
+            "groups": {"300": {"agent": {"primary_router": True}}},
+        }
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        self.assertFalse(runtime.primary_router_enabled({"user_id": 100, "message_type": "private", "raw_message": "x"}))
+
     async def test_background_worker_marks_verified_task_done(self):
         from bot.agent.worker_service import AgentWorker
         runtime = AgentRuntime({"bot_owner": 100, "agent": {"owner_autonomy_enabled": True, "background_tasks_enabled": True}}, tempfile.mkdtemp())
@@ -201,7 +297,7 @@ class AgentGoalReviewTests(unittest.IsolatedAsyncioTestCase):
         runtime = AgentRuntime(config, tempfile.mkdtemp())
         goal = runtime.goals.create("owner:100", 100, "持续完善机器人")
         calls = []
-        async def run(dispatcher, event, task_context="", allow_background_queue=True):
+        async def run(dispatcher, event, task_context="", allow_background_queue=True, **kwargs):
             calls.append((event.text, task_context))
             return {"reply": "下一步补观测指标", "intent": "goal-review", "tools": [], "needs_confirmation": False}, []
         runtime.run_autonomous = run
@@ -260,3 +356,198 @@ class AgentNativeToolTests(unittest.IsolatedAsyncioTestCase):
         catalog = gateway.catalog()
         self.assertIn("agent_create_goal", catalog)
         self.assertIn("agent_create_reminder", catalog)
+
+
+class AgentPlanStateTests(unittest.TestCase):
+    def test_plan_steps_drive_terminal_status_and_require_real_step(self):
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        plan = runtime.plans.create(
+            "owner:100", 100, "完善机器人",
+            [{"title": "检查", "success_criteria": "有报告"}, {"title": "修复"}])
+        self.assertIsNone(runtime.plans.update_step("owner:100", plan["id"], "missing", "done"))
+        runtime.plans.update_step("owner:100", plan["id"], "s1", "done", evidence="报告")
+        current = runtime.plans.get("owner:100", plan["id"])
+        self.assertEqual(current["status"], "active")
+        runtime.plans.update_step("owner:100", plan["id"], "s2", "done", evidence="测试通过")
+        self.assertEqual(runtime.plans.get("owner:100", plan["id"])["status"], "done")
+
+    def test_profile_skill_insight_and_timeline_are_scope_isolated(self):
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        runtime.profiles.update("group:1", persona="活泼的群助手", proactive_topics=["新番"])
+        runtime.skills.create("group:1", 101, "新番播报", "先查证再总结", triggers=["新番"])
+        runtime.insights.add("group:1", "群友偏好简短播报", evidence="三次反馈")
+        runtime.timeline.add("group:1", "test", "完成一次播报")
+        event = runtime.build_event({"user_id": 101, "group_id": 1, "message_type": "group", "raw_message": "聊聊新番", "sender": {"role": "owner"}})
+        context = runtime.context.build(event)
+        self.assertIn("活泼的群助手", context)
+        self.assertIn("先查证再总结", context)
+        self.assertIn("群友偏好简短播报", context)
+        self.assertEqual(runtime.profiles.get("group:2"), {})
+        self.assertEqual(runtime.skills.list("group:2"), [])
+
+
+class AgentAdvancedNativeToolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_member_cannot_use_native_write_tools(self):
+        from bot.agent.tools.gateway import AgentToolGateway
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime})()
+        event = runtime.build_event({"user_id": 200, "group_id": 1, "message_type": "group", "raw_message": "x", "sender": {"role": "member"}})
+        result = await AgentToolGateway(dispatcher).execute(event, "agent_create_plan", title="越权", steps=["一步"])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "agent_write_requires_owner")
+        self.assertEqual(runtime.plans.list("group:1"), [])
+
+    async def test_owner_can_create_plan_and_update_bound_step(self):
+        from bot.agent.tools.gateway import AgentToolGateway
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime})()
+        event = runtime.build_event({"user_id": 101, "group_id": 1, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
+        gateway = AgentToolGateway(dispatcher)
+        created = await gateway.execute(event, "agent_create_plan", title="群计划", steps=["检查", "汇报"])
+        plan_id = created["data"]["id"]
+        updated = await gateway.execute(event, "agent_update_plan_step", plan_id=plan_id, step_id="s1", status="done", evidence="已检查")
+        self.assertTrue(updated["ok"])
+        self.assertEqual(runtime.plans.get("group:1", plan_id)["steps"][0]["status"], "done")
+
+
+class AgentExecutionEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_autonomous_plan_persists_tool_evidence_and_reflection(self):
+        runtime = AgentRuntime({"bot_owner": 100, "agent": {"owner_max_rounds": 1, "owner_tool_budget": 2}}, tempfile.mkdtemp())
+        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "检查状态"})
+        class Planner:
+            async def plan(self, agent_event, context):
+                return {
+                    "intent": "audit", "reply": "检查完成", "needs_confirmation": False,
+                    "tools": [{"name": "fake_read", "arguments": {}, "step_id": "s1"}],
+                    "execution_plan": {"title": "状态检查", "success_criteria": "有证据", "steps": [{"title": "读取状态"}]},
+                    "reflection": {"content": "状态正常", "category": "health", "confidence": 0.9, "evidence": "工具返回 ok"},
+                    "task": None,
+                }
+        class Executor:
+            async def execute(self, agent_event, calls, remaining_budget):
+                return [{"name": "fake_read", "step_id": "s1", "arguments": {}, "result": {"ok": True, "data": "healthy"}}]
+        runtime.planner = Planner()
+        runtime.tools = type("Tools", (), {"catalog": lambda self: {"fake_read": "read"}})()
+        runtime.executor = Executor()
+        dispatcher = type("D", (), {})()
+        plan, results = await runtime.run_autonomous(dispatcher, event)
+        saved = runtime.plans.get("owner:100", plan["plan_id"])
+        self.assertEqual(saved["steps"][0]["status"], "done")
+        self.assertIn("fake_read", saved["steps"][0]["evidence"])
+        self.assertEqual(runtime.insights.list("owner:100")[0]["content"], "状态正常")
+        self.assertTrue(any(item["kind"] == "tool_result" for item in runtime.timeline.list("owner:100")))
+
+    async def test_group_confirmation_does_not_execute_tools_before_approval(self):
+        config = {
+            "bot_owner": 100,
+            "agent": {"primary_router": False, "observation_only": True},
+            "groups": {"300": {"agent": {"primary_router": True}}},
+        }
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        executions = []
+        class Planner:
+            async def plan(self, agent_event, context):
+                return {
+                    "intent": "sensitive", "reply": "准备执行", "needs_confirmation": True,
+                    "reason": "需要群主确认", "tools": [{"name": "fake_write", "arguments": {}}],
+                    "task": None, "execution_plan": None, "reflection": None,
+                }
+        class Executor:
+            async def execute(self, *args, **kwargs):
+                executions.append(True)
+                return []
+        runtime.planner = Planner()
+        runtime.tools = type("Tools", (), {"catalog": lambda self: {"fake_write": "write"}})()
+        runtime.executor = Executor()
+        class Client:
+            def __init__(self): self.sent = []
+            async def send_group_msg_with_at(self, group_id, text, users):
+                self.sent.append((group_id, text, users)); return {"status": "ok"}
+        dispatcher = type("D", (), {"client": Client()})()
+        event = {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "执行方案", "sender": {"role": "owner"}}
+        with patch("bot.services.confirmations.create_agent_confirmation", return_value="abc123"):
+            self.assertTrue(await runtime.handle_event(dispatcher, event, explicit=True))
+        self.assertEqual(executions, [])
+        self.assertIn("/确认 abc123", dispatcher.client.sent[0][1])
+
+    async def test_confirmed_plan_executes_only_frozen_tool_set(self):
+        config = {"bot_owner": 100, "agent": {"group_max_rounds": 2, "group_tool_budget": 5}, "groups": {"300": {"agent": {"primary_router": True}}}}
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        executed = []
+        class Planner:
+            async def plan(self, agent_event, context):
+                return {"intent": "summary", "reply": "执行完成", "needs_confirmation": False, "tools": [{"name": "new_unapproved", "arguments": {}}], "task": None}
+        class Executor:
+            async def execute(self, agent_event, calls, remaining_budget):
+                executed.extend(item["name"] for item in calls)
+                return [{"name": item["name"], "result": {"ok": True}} for item in calls]
+        runtime.planner = Planner()
+        runtime.tools = type("Tools", (), {"catalog": lambda self: {}})()
+        runtime.executor = Executor()
+        class Client:
+            def __init__(self): self.sent = []
+            async def send_group_msg_with_at(self, group_id, text, users):
+                self.sent.append((group_id, text, users)); return {"status": "ok"}
+        dispatcher = type("D", (), {"client": Client()})()
+        frozen = {"intent": "approved", "reply": "", "needs_confirmation": True, "tools": [{"name": "approved_tool", "arguments": {}}], "task": None}
+        result = await runtime.execute_confirmed_plan(dispatcher, {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}}, frozen, role="owner")
+        self.assertTrue(result["success"])
+        self.assertEqual(executed, ["approved_tool"])
+
+
+class AgentGroupProactiveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_read_only_autonomy_filters_native_write_tools(self):
+        runtime = AgentRuntime({"bot_owner": 100, "agent": {"group_max_rounds": 1, "group_tool_budget": 5}}, tempfile.mkdtemp())
+        event = runtime.build_event({"user_id": 100, "group_id": 300, "message_type": "group", "raw_message": "主动复盘", "sender": {"role": "owner"}})
+        class Planner:
+            async def plan(self, agent_event, context):
+                return {"reply": "只读完成", "needs_confirmation": False, "intent": "review", "task": None, "tools": [
+                    {"name": "agent_create_goal", "arguments": {"title": "不应创建"}},
+                    {"name": "get_group_info", "arguments": {}},
+                ]}
+        class Tools:
+            def catalog(self): return {}
+            def is_read_only(self, name): return name != "agent_create_goal"
+        captured = []
+        class Executor:
+            async def execute(self, agent_event, calls, remaining_budget):
+                captured.extend(item["name"] for item in calls)
+                return []
+        runtime.planner = Planner()
+        runtime.tools = Tools()
+        runtime.executor = Executor()
+        runtime.verifier = object()
+        await runtime.run_autonomous(type("D", (), {})(), event, read_only_tools=True)
+        self.assertEqual(captured, ["get_group_info"])
+
+    async def test_group_review_requires_opt_in_and_uses_group_scope(self):
+        from bot.agent.worker_service import AgentWorker
+        config = {
+            "bot_owner": 100,
+            "agent": {"proactive_enabled": True, "quiet_start": 0, "quiet_end": 0, "topic_cooldown_seconds": 1800, "group_review_interval_seconds": 1800},
+            "groups": {"300": {"agent": {"proactive_enabled": True}}},
+        }
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        runtime.profiles.update("group:300", persona="群助手", proactive_topics=["新番"])
+        calls = []
+        async def run(dispatcher, event, task_context="", allow_background_queue=True, **kwargs):
+            calls.append((event.scope.key, task_context))
+            return {"reply": "今天可以一起整理新番表", "tools": [], "needs_confirmation": False}, []
+        runtime.run_autonomous = run
+        class Client:
+            def __init__(self): self.sent = []
+            async def send_group_msg(self, group_id, text): self.sent.append((group_id, text)); return {"status": "ok"}
+        dispatcher = type("D", (), {"config": config, "agent_runtime": runtime, "client": Client()})()
+        worker = AgentWorker(dispatcher)
+        self.assertEqual(await worker._review_group_scope(), "sent")
+        self.assertEqual(calls[0][0], "group:300")
+        self.assertEqual(dispatcher.client.sent[0][0], 300)
+        self.assertEqual(await worker._review_group_scope(), "idle")
+
+    async def test_group_review_stays_disabled_without_group_authorization(self):
+        from bot.agent.worker_service import AgentWorker
+        config = {"bot_owner": 100, "agent": {"proactive_enabled": True, "quiet_start": 0, "quiet_end": 0}, "groups": {"300": {"agent": {"proactive_enabled": False}}}}
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        runtime.goals.create("group:300", 101, "不应主动")
+        dispatcher = type("D", (), {"config": config, "agent_runtime": runtime, "client": object()})()
+        self.assertEqual(await AgentWorker(dispatcher)._review_group_scope(), "idle")

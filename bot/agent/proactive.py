@@ -46,3 +46,11 @@ class ProactiveBudget:
     def mute(self, scope_key, seconds=43200, now=None):
         state = self._state(scope_key); state["muted_until"] = (now or time.time()) + seconds
         self.store.write(self._path(scope_key), state)
+
+    def unmute(self, scope_key):
+        state = self._state(scope_key)
+        state["muted_until"] = 0
+        self.store.write(self._path(scope_key), state)
+
+    def muted_until(self, scope_key):
+        return float(self._state(scope_key).get("muted_until", 0) or 0)

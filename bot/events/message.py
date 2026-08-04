@@ -136,7 +136,7 @@ class GroupMessageMixin:
             return
 
         # Agent observes permitted events while the primary router is disabled.
-        if not self.config.get("agent", {}).get("primary_router", False):
+        if not self.agent_runtime.primary_router_enabled(event):
             try:
                 self.agent_runtime.observe(event)
             except Exception:

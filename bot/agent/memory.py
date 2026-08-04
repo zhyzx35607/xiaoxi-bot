@@ -13,13 +13,26 @@ class AgentMemory:
 
     def add_candidate(self, candidate: MemoryCandidate):
         bucket = "pending" if candidate.requires_confirmation else "confirmed"
-        return self.store.append_bounded(self._path(candidate.scope_key, bucket), {
+        path = self._path(candidate.scope_key, bucket)
+        records = self.store.read(path, [])
+        if not isinstance(records, list):
+            records = []
+        normalized = " ".join(candidate.content.lower().split())
+        for item in records:
+            if (int(item.get("subject_id") or 0) == int(candidate.subject_id or 0)
+                    and " ".join(str(item.get("content", "")).lower().split()) == normalized):
+                return item
+        item = {
             "scope_key": candidate.scope_key,
             "subject_id": candidate.subject_id,
             "content": candidate.content,
             "confidence": candidate.confidence,
             "source_event_id": candidate.source_event_id,
-        }, limit=100)
+            "category": candidate.category,
+        }
+        records.append(item)
+        self.store.write(path, records[-100:])
+        return item
 
     def list_records(self, scope_key, confirmed=True):
         return self.store.read(self._path(scope_key, "confirmed" if confirmed else "pending"), [])

@@ -17,14 +17,15 @@ class AgentExecutor:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "")[:80]
+            step_id = str(item.get("step_id") or "")[:30]
             arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
             if not name or not tool_allowed(self.config, agent_event, name):
-                results.append({"name": name, "ok": False, "error": "tool_denied_by_agent_policy"})
+                results.append({"name": name, "step_id": step_id, "ok": False, "error": "tool_denied_by_agent_policy"})
                 continue
             try:
                 result = await asyncio.wait_for(
                     self.gateway.execute(agent_event, name, **arguments), timeout=timeout)
             except asyncio.TimeoutError:
                 result = {"ok": False, "error": "tool_timeout"}
-            results.append({"name": name, "arguments": arguments, "result": result})
+            results.append({"name": name, "step_id": step_id, "arguments": arguments, "result": result})
         return results

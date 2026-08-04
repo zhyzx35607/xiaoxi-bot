@@ -12,13 +12,14 @@ class AgentTaskStore:
         records = self.store.read("tasks/index.json", [])
         return records if isinstance(records, list) else []
 
-    def create(self, scope_key, owner_id, goal, *, success_criteria="", status="queued"):
+    def create(self, scope_key, owner_id, goal, *, success_criteria="", status="queued", plan_id=""):
         task = {
             "id": uuid.uuid4().hex[:16],
             "scope_key": scope_key,
             "owner_id": int(owner_id),
             "goal": str(goal)[:1000],
             "success_criteria": str(success_criteria)[:1000],
+            "plan_id": str(plan_id)[:20],
             "status": status,
             "attempts": 0,
             "created_at": time.time(),

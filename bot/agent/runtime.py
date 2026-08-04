@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import time
 
 from .context import AgentContextBuilder
@@ -11,12 +12,17 @@ from .goals import AgentGoalStore
 from .identity import resolve_identity, resolve_scope
 from .memory import AgentMemory
 from .models import AgentEvent
+from .insights import AgentInsightStore
+from .plans import AgentPlanStore
 from .planner import AgentPlanner
-from .policy import decide_event
+from .policy import decide_event, primary_router_enabled
+from .profiles import AgentProfileStore
 from .proactive import ProactiveBudget
 from .reminders import AgentReminderStore
 from .response import can_autosend
+from .skills import AgentSkillStore
 from .storage.json_store import AgentJsonStore
+from .timeline import AgentTimeline
 from .tools.gateway import AgentToolGateway
 from .workers import AgentTaskStore
 from .verifier import AgentVerifier
@@ -28,8 +34,13 @@ class AgentRuntime:
         self.root = os.path.join(root, "data", "agent")
         self.store = AgentJsonStore(self.root)
         self.memory = AgentMemory(self.store)
+        self.insights = AgentInsightStore(self.store)
         self.goals = AgentGoalStore(self.store)
+        self.plans = AgentPlanStore(self.store)
+        self.profiles = AgentProfileStore(self.store)
         self.reminders = AgentReminderStore(self.store)
+        self.skills = AgentSkillStore(self.store)
+        self.timeline = AgentTimeline(self.store)
         self.proactive = ProactiveBudget(self.store)
         self.tasks = AgentTaskStore(self.store)
         self.context = AgentContextBuilder(self)
@@ -56,6 +67,11 @@ class AgentRuntime:
             "level": int(agent_event.identity.level), "text": agent_event.text[:1000],
             "timestamp": agent_event.timestamp, "decision": decision.reason,
         }, limit=200)
+        self.timeline.add(
+            agent_event.scope.key, "message", agent_event.text[:1000],
+            actor_id=agent_event.identity.user_id,
+            metadata={"event_id": agent_event.event_id, "decision": decision.reason},
+        )
         candidate = self.extract_memory_candidate(agent_event)
         if candidate:
             self.memory.add_candidate(candidate)
@@ -64,22 +80,65 @@ class AgentRuntime:
         agent_event = self.build_event(event)
         decision = decide_event(self.config, agent_event, explicit=explicit)
         self._record_event(agent_event, decision)
+        self._apply_proactive_feedback(agent_event)
         return agent_event, decision
+
+    def _apply_proactive_feedback(self, agent_event):
+        if not agent_event.identity.can_manage_agent:
+            return
+        text = re.sub(r"[，。！？!?,.\s]", "", agent_event.text.lower())
+        reject_markers = ("别主动", "不要主动", "别再发", "不用提醒", "安静点", "别打扰", "停止主动")
+        resume_markers = ("恢复主动", "可以主动", "继续主动")
+        if any(marker in text for marker in reject_markers):
+            seconds = max(3600, int(self.config.get("agent", {}).get("rejection_mute_seconds", 43200)))
+            self.proactive.mute(agent_event.scope.key, seconds=seconds, now=agent_event.timestamp)
+            self.timeline.add(
+                agent_event.scope.key, "proactive_muted", "收到明确拒绝，暂停主动消息",
+                actor_id=agent_event.identity.user_id, metadata={"seconds": seconds})
+        elif any(marker in text for marker in resume_markers):
+            self.proactive.unmute(agent_event.scope.key)
+            self.timeline.add(
+                agent_event.scope.key, "proactive_resumed", "收到恢复主动指令",
+                actor_id=agent_event.identity.user_id)
 
     def extract_memory_candidate(self, agent_event):
         text = agent_event.text.strip()
-        markers = ("我喜欢", "我不喜欢", "我叫", "我的生日", "记住", "以后都")
-        if len(text) < 4 or not text.startswith(markers):
+        if len(text) < 4 or len(text) > 500:
             return None
-        sensitive = any(word in text for word in ("生日", "住址", "密码", "隐私"))
+        secret_markers = (
+            "密码", "口令", "token", "api key", "apikey", "密钥", "cookie",
+            "authorization", "clientkey", "client_key", "csrf", "rkey",
+        )
+        lowered = text.lower()
+        if any(marker in lowered for marker in secret_markers):
+            return None
+        patterns = (
+            ("preference", r"^(?:我|本人)(?:最)?(?:喜欢|偏好|常用|不喜欢|讨厌|希望).+"),
+            ("identity", r"^(?:我叫|叫我|我的昵称是|我的称呼是).+"),
+            ("commitment", r"^(?:记住|以后(?:都|请)|下次(?:要|请)|长期).+"),
+            ("correction", r"^(?:不是.+而是|纠正一下|更正一下|你记错了).+"),
+            ("group_rule", r"^(?:本群|这个群|群里)(?:以后|规则|习惯|默认|不要|应该).+"),
+        )
+        category = next((name for name, pattern in patterns if re.match(pattern, text, re.I)), "")
+        if not category:
+            return None
+        sensitive = any(word in text for word in ("生日", "住址", "地址", "电话", "手机号", "身份证", "隐私"))
+        group_personal = not agent_event.scope.is_private and category != "group_rule"
+        requires_confirmation = sensitive or group_personal
+        confidence = 0.95 if category in {"correction", "group_rule"} else 0.8
         from .models import MemoryCandidate
-        return MemoryCandidate(agent_event.scope.key, agent_event.identity.user_id, text[:500], 0.8, sensitive, agent_event.event_id)
+        return MemoryCandidate(
+            agent_event.scope.key, agent_event.identity.user_id, text[:500], confidence,
+            requires_confirmation, agent_event.event_id, category)
 
     def _group_agent_enabled(self, agent_event):
         if agent_event.scope.is_private:
             return True
         group = self.config.get("groups", {}).get(str(agent_event.scope.group_id), {})
         return group.get("agent", {}).get("enabled", True)
+
+    def primary_router_enabled(self, event):
+        return primary_router_enabled(self.config, self.build_event(event))
 
     def _ensure_execution(self, dispatcher):
         if self.planner is None:
@@ -90,15 +149,8 @@ class AgentRuntime:
             self.executor = AgentExecutor(self.tools, self.config)
         if self.verifier is None:
             self.verifier = AgentVerifier(dispatcher)
-    async def run_autonomous(self, dispatcher, agent_event, *, task_context="", allow_background_queue=True):
-        """Bounded plan/tool/replan loop, strongest only in super-owner private scope."""
-        self._ensure_execution(dispatcher)
-        settings = self.config.get("agent", {})
-        owner_private = agent_event.identity.is_super_owner and agent_event.scope.is_private
-        max_rounds = int(settings.get("owner_max_rounds", 6 if owner_private else 2))
-        tool_budget = int(settings.get("owner_tool_budget", 12 if owner_private else 3))
-        max_rounds = max(1, min(max_rounds, 10))
-        tool_budget = max(0, min(tool_budget, 24))
+
+    def _planning_context(self, agent_event, task_context=""):
         context = self.context.build(agent_event)
         catalog_method = getattr(self.tools, "catalog", None)
         tool_catalog = catalog_method() if callable(catalog_method) else {}
@@ -108,18 +160,75 @@ class AgentRuntime:
                 for name, description in sorted(tool_catalog.items()))[:5000]
         if task_context:
             context += "\n后台任务上下文：" + task_context[:3000]
+        return context
+
+    async def run_autonomous(self, dispatcher, agent_event, *, task_context="", allow_background_queue=True, initial_plan=None, allow_replanned_tools=True, read_only_tools=False):
+        """Bounded plan/tool/replan loop, strongest only in super-owner private scope."""
+        self._ensure_execution(dispatcher)
+        settings = self.config.get("agent", {})
+        owner_private = agent_event.identity.is_super_owner and agent_event.scope.is_private
+        max_rounds = int(settings.get(
+            "owner_max_rounds" if owner_private else "group_max_rounds",
+            6 if owner_private else 3))
+        tool_budget = int(settings.get(
+            "owner_tool_budget" if owner_private else "group_tool_budget",
+            12 if owner_private else 5))
+        max_rounds = max(1, min(max_rounds, 10))
+        tool_budget = max(0, min(tool_budget, 24))
+        context = self._planning_context(agent_event, task_context)
         transcript = []
         last_plan = None
+        persisted_plan = None
         for round_index in range(max_rounds):
             round_context = context
             if transcript:
                 round_context += "\n已执行结果：\n" + json.dumps(transcript[-6:], ensure_ascii=False)[:5000]
-            plan = await self.planner.plan(agent_event, round_context)
+            plan = initial_plan if round_index == 0 and initial_plan is not None else await self.planner.plan(agent_event, round_context)
             last_plan = plan
+            if persisted_plan is None and plan.get("execution_plan"):
+                specification = plan["execution_plan"]
+                persisted_plan = self.plans.create(
+                    agent_event.scope.key, agent_event.identity.user_id,
+                    specification.get("title", agent_event.text),
+                    specification.get("steps", []),
+                    success_criteria=specification.get("success_criteria", ""),
+                    source_event_id=agent_event.event_id,
+                )
+                plan["plan_id"] = persisted_plan["id"]
+                self.timeline.add(
+                    agent_event.scope.key, "plan_created", persisted_plan["title"],
+                    actor_id=agent_event.identity.user_id,
+                    metadata={"plan_id": persisted_plan["id"], "steps": len(persisted_plan["steps"])},
+                )
+            elif persisted_plan:
+                plan["plan_id"] = persisted_plan["id"]
             tool_calls = plan.get("tools", [])
+            if round_index > 0 and not allow_replanned_tools:
+                tool_calls = []
+            if read_only_tools:
+                is_read_only = getattr(self.tools, "is_read_only", lambda name: False)
+                tool_calls = [item for item in tool_calls if is_read_only(str(item.get("name") or ""))]
             if tool_calls and tool_budget > 0:
                 results = await self.executor.execute(agent_event, tool_calls, remaining_budget=tool_budget)
                 transcript.extend(results)
+                for result in results:
+                    payload = result.get("result") if isinstance(result, dict) else {}
+                    ok = bool(isinstance(payload, dict) and payload.get("ok", payload.get("status") in {None, "ok"}))
+                    step_id = result.get("step_id", "")
+                    if persisted_plan and step_id:
+                        self.plans.update_step(
+                            agent_event.scope.key, persisted_plan["id"], step_id,
+                            "done" if ok else "failed",
+                            evidence=json.dumps(result, ensure_ascii=False)[:2000],
+                            result=str(payload)[:2000],
+                        )
+                    self.timeline.add(
+                        agent_event.scope.key, "tool_result",
+                        "{} {}".format(result.get("name", "tool"), "成功" if ok else "失败"),
+                        actor_id=agent_event.identity.user_id,
+                        evidence=json.dumps(result, ensure_ascii=False)[:2000],
+                        metadata={"event_id": agent_event.event_id, "plan_id": plan.get("plan_id", "")},
+                    )
                 tool_budget -= len(results)
                 if results and round_index + 1 < max_rounds:
                     continue
@@ -127,10 +236,45 @@ class AgentRuntime:
             if allow_background_queue and owner_private and task and task.get("goal"):
                 queued = self.tasks.create(
                     agent_event.scope.key, agent_event.identity.user_id,
-                    task["goal"], success_criteria=task.get("success_criteria", ""))
+                    task["goal"], success_criteria=task.get("success_criteria", ""),
+                    plan_id=persisted_plan["id"] if persisted_plan else "")
                 plan["reply"] = (plan.get("reply") or "") + "\n已转为后台任务：{}".format(queued["id"])
+            reflection = plan.get("reflection")
+            if reflection and (reflection.get("evidence") or transcript):
+                self.insights.add(
+                    agent_event.scope.key, reflection.get("content", ""),
+                    category=reflection.get("category", "reflection"),
+                    confidence=reflection.get("confidence", 0.5),
+                    evidence=reflection.get("evidence") or json.dumps(transcript[-3:], ensure_ascii=False),
+                    source_id=agent_event.event_id,
+                )
+            self.timeline.add(
+                agent_event.scope.key, "agent_reply", plan.get("reply", "")[:1000],
+                actor_id=agent_event.identity.user_id,
+                metadata={"event_id": agent_event.event_id, "plan_id": plan.get("plan_id", "")},
+            )
             return plan, transcript
         return last_plan or {"reply": "暂时没规划好，稍后再继续。", "needs_confirmation": False}, transcript
+
+    async def execute_confirmed_plan(self, dispatcher, event, plan, *, role="owner"):
+        event = dict(event or {})
+        event.setdefault("sender", {})
+        event["sender"]["role"] = role or event["sender"].get("role") or "owner"
+        agent_event = self.build_event(event)
+        if agent_event.scope.is_private or not agent_event.identity.can_manage_agent:
+            return {"success": False, "reason": "confirmed_scope_denied"}
+        frozen_plan = dict(plan or {})
+        frozen_plan["needs_confirmation"] = False
+        final_plan, results = await self.run_autonomous(
+            dispatcher, agent_event, allow_background_queue=False,
+            initial_plan=frozen_plan, allow_replanned_tools=False)
+        reply = str(final_plan.get("reply") or "").strip()
+        self.timeline.add(
+            agent_event.scope.key, "confirmed_plan_executed", reply or frozen_plan.get("intent", "Agent 方案"),
+            actor_id=agent_event.identity.user_id,
+            evidence=json.dumps(results, ensure_ascii=False)[:2000],
+            metadata={"event_id": agent_event.event_id})
+        return {"success": True, "message": reply or "Agent 方案已执行", "tool_results": results}
 
     async def execute_background_task(self, dispatcher, task):
         """Execute one owner-private queued task and verify its result."""
@@ -163,21 +307,44 @@ class AgentRuntime:
         }
     async def handle_event(self, dispatcher, event, *, explicit=False):
         agent_event, decision = self.observe(event, explicit=explicit)
-        settings = self.config.get("agent", {})
-        if not settings.get("primary_router", False) or settings.get("observation_only", True):
+        if not primary_router_enabled(self.config, agent_event):
             return False
-        if agent_event.scope.is_private and agent_event.identity.is_super_owner:
-            if not settings.get("owner_autonomy_enabled", False):
-                return False
-        elif not agent_event.scope.is_private:
-            group = self.config.get("groups", {}).get(str(agent_event.scope.group_id), {})
-            if not group.get("agent", {}).get("primary_router", False):
-                return False
         if not decision.should_reply or not self._group_agent_enabled(agent_event):
             return False
         if not agent_event.identity.is_super_owner and not agent_event.identity.can_manage_agent:
             return False
-        plan, results = await self.run_autonomous(dispatcher, agent_event)
+        initial_plan = None
+        if not agent_event.identity.is_super_owner:
+            self._ensure_execution(dispatcher)
+            initial_plan = await self.planner.plan(
+                agent_event, self._planning_context(agent_event))
+            if initial_plan.get("needs_confirmation", True):
+                from ..services.confirmations import create_agent_confirmation
+                frozen_event = {
+                    "user_id": agent_event.identity.user_id,
+                    "group_id": agent_event.scope.group_id,
+                    "message_type": "group",
+                    "raw_message": agent_event.text,
+                    "message_id": agent_event.message_id,
+                    "time": agent_event.timestamp,
+                    "sender": {"role": agent_event.identity.role},
+                }
+                code = create_agent_confirmation(
+                    agent_event.scope.group_id, agent_event.identity.user_id,
+                    frozen_event, initial_plan,
+                    initial_plan.get("reason") or initial_plan.get("intent") or "Agent 方案")
+                await dispatcher.client.send_group_msg_with_at(
+                    agent_event.scope.group_id,
+                    "这个 Agent 方案需要你确认。发送 /确认 {}，一分钟内有效。".format(code),
+                    [agent_event.identity.user_id])
+                self.timeline.add(
+                    agent_event.scope.key, "confirmation_requested",
+                    initial_plan.get("reason") or initial_plan.get("intent") or "Agent 方案",
+                    actor_id=agent_event.identity.user_id,
+                    metadata={"event_id": agent_event.event_id, "confirmation_code": code})
+                return True
+        plan, results = await self.run_autonomous(
+            dispatcher, agent_event, initial_plan=initial_plan)
         allowed, reason = can_autosend(self.config, agent_event, plan)
         if not allowed:
             self.store.append_bounded("plans/rejected.json", {"event_id": agent_event.event_id, "reason": reason, "plan": plan}, limit=200)

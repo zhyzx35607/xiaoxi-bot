@@ -82,13 +82,22 @@ class AgentWorker:
         if not task:
             return "idle"
         self.dispatcher.agent_runtime.tasks.update(task["id"], "running")
+        runtime = self.dispatcher.agent_runtime
+        runtime.timeline.add(
+            task.get("scope_key", ""), "task_started", task.get("goal", ""),
+            actor_id=task.get("owner_id", 0), metadata={"task_id": task.get("id", ""), "plan_id": task.get("plan_id", "")})
         try:
             result = await self.dispatcher.agent_runtime.execute_background_task(
                 self.dispatcher, task)
             attempts = int(task.get("attempts", 0)) + 1
             if result.get("success"):
-                self.dispatcher.agent_runtime.tasks.update(
+                runtime.tasks.update(
                     task["id"], "done", json.dumps(result, ensure_ascii=False))
+                self._update_linked_plan(task, "done", result)
+                runtime.timeline.add(
+                    task.get("scope_key", ""), "task_done", task.get("goal", ""),
+                    actor_id=task.get("owner_id", 0), evidence=result.get("evidence", ""),
+                    metadata={"task_id": task.get("id", ""), "plan_id": task.get("plan_id", "")})
                 summary = "\u540e\u53f0\u4efb\u52a1 {} \u5df2\u5b8c\u6210\n{}".format(
                     task["id"], result.get("reply") or result.get("evidence") or "\u5df2\u901a\u8fc7\u9a8c\u6536")
                 await self.dispatcher.client.send_private_msg(
@@ -96,10 +105,15 @@ class AgentWorker:
                 return "done"
             max_attempts = int(settings.get("background_task_max_attempts", 3))
             status = "failed" if attempts >= max_attempts else "queued"
-            self.dispatcher.agent_runtime.tasks.update(
+            runtime.tasks.update(
                 task["id"], status, json.dumps(result, ensure_ascii=False),
                 result.get("reason", ""))
             if status == "failed":
+                self._update_linked_plan(task, "failed", result)
+                runtime.timeline.add(
+                    task.get("scope_key", ""), "task_failed", task.get("goal", ""),
+                    actor_id=task.get("owner_id", 0), evidence=result.get("reason", ""),
+                    metadata={"task_id": task.get("id", ""), "plan_id": task.get("plan_id", "")})
                 await self.dispatcher.client.send_private_msg(
                     int(task["owner_id"]),
                     "\u540e\u53f0\u4efb\u52a1 {} \u8fde\u7eed\u5931\u8d25\uff0c\u5df2\u505c\u6b62\uff1a{}".format(
@@ -109,10 +123,33 @@ class AgentWorker:
             attempts = int(task.get("attempts", 0)) + 1
             max_attempts = int(settings.get("background_task_max_attempts", 3))
             status = "failed" if attempts >= max_attempts else "queued"
-            self.dispatcher.agent_runtime.tasks.update(
+            runtime.tasks.update(
                 task["id"], status, error=str(error))
+            if status == "failed":
+                self._update_linked_plan(task, "failed", {"reason": str(error)})
+                runtime.timeline.add(
+                    task.get("scope_key", ""), "task_failed", task.get("goal", ""),
+                    actor_id=task.get("owner_id", 0), evidence=str(error),
+                    metadata={"task_id": task.get("id", ""), "plan_id": task.get("plan_id", "")})
             log.exception("Agent background task failed id=%s", task.get("id"))
             return status
+
+    def _update_linked_plan(self, task, status, result):
+        plan_id = str(task.get("plan_id") or "")
+        scope_key = str(task.get("scope_key") or "")
+        if not plan_id or not scope_key:
+            return None
+        plan = self.dispatcher.agent_runtime.plans.get(scope_key, plan_id)
+        if not plan:
+            return None
+        step = next((item for item in plan.get("steps", []) if item.get("status") not in {"done", "failed", "cancelled", "skipped"}), None)
+        if not step:
+            return plan
+        return self.dispatcher.agent_runtime.plans.update_step(
+            scope_key, plan_id, step.get("id"), status,
+            evidence=result.get("evidence") or result.get("reason") or "",
+            result=result.get("reply") or "",
+        )
 
     async def _review_owner_goal(self):
         settings = self.dispatcher.config.get("agent", {})
@@ -164,10 +201,77 @@ class AgentWorker:
             })
         return "sent"
 
+    async def _review_group_scope(self):
+        settings = self.dispatcher.config.get("agent", {})
+        if not settings.get("proactive_enabled", True):
+            return "disabled"
+        groups = self.dispatcher.config.get("groups", {})
+        runtime = self.dispatcher.agent_runtime
+        now = time.time()
+        interval = max(1800, int(settings.get("group_review_interval_seconds", 10800)))
+        state = runtime.store.read("worker/group_reviews.json", {})
+        if not isinstance(state, dict):
+            state = {}
+        for group_id, group_config in groups.items():
+            agent = group_config.get("agent", {}) if isinstance(group_config, dict) else {}
+            if not agent.get("proactive_enabled", False):
+                continue
+            scope_key = "group:{}".format(group_id)
+            profile = runtime.profiles.get(scope_key)
+            goals = runtime.goals.list(scope_key)
+            plans = runtime.plans.list(scope_key, statuses={"active", "running"})
+            topics = profile.get("proactive_topics", []) if profile else []
+            if not goals and not plans and not topics:
+                continue
+            last_run = float((state.get(str(group_id)) or {}).get("last_run", 0) or 0)
+            if now - last_run < interval:
+                continue
+            topic = "group-review:{}".format(group_id)
+            allowed, reason = runtime.proactive.allowed(
+                self.dispatcher.config, scope_key, topic=topic,
+                is_private=False, now=now)
+            if not allowed:
+                continue
+            owner_id = int(self.dispatcher.config.get("bot_owner") or 0)
+            event = runtime.build_event({
+                "user_id": owner_id,
+                "group_id": int(group_id),
+                "message_type": "group",
+                "sender": {"role": "owner"},
+                "raw_message": "请根据本群画像、目标、计划和最近事件，主动提出一个具体、有用且不过度打扰的推进。",
+                "time": now,
+            })
+            plan, results = await runtime.run_autonomous(
+                self.dispatcher, event,
+                task_context="这是群域主动复盘。不得泄露其他群或最高主人私域；没有明确价值就保持安静。",
+                allow_background_queue=False,
+                read_only_tools=True,
+            )
+            if plan.get("needs_confirmation", False):
+                state[str(group_id)] = {"last_run": now, "status": "confirmation_required"}
+                runtime.store.write("worker/group_reviews.json", state)
+                return "confirmation_required"
+            reply = str(plan.get("reply") or "").strip()
+            if not reply:
+                state[str(group_id)] = {"last_run": now, "status": "empty"}
+                runtime.store.write("worker/group_reviews.json", state)
+                return "empty"
+            await self.dispatcher.client.send_group_msg(int(group_id), reply[:3500])
+            runtime.proactive.record(self.dispatcher.config, scope_key, topic=topic, now=now)
+            runtime.timeline.add(
+                scope_key, "proactive_group_review", reply[:1000],
+                actor_id=owner_id, evidence=json.dumps(results[-4:], ensure_ascii=False),
+                metadata={"group_id": int(group_id)})
+            state[str(group_id)] = {"last_run": now, "status": "sent"}
+            runtime.store.write("worker/group_reviews.json", state)
+            return "sent"
+        return "idle"
+
     async def tick(self):
         delivered, failed = await self._deliver_reminders()
         task_status = await self._run_owner_task()
         goal_review = await self._review_owner_goal()
+        group_review = await self._review_group_scope()
         self.dispatcher.agent_runtime.store.write("worker/status.json", {
             "running": True,
             "mode": "observation" if self.dispatcher.config.get("agent", {}).get("observation_only", True) else "active",
@@ -176,4 +280,5 @@ class AgentWorker:
             "failed": failed,
             "task_status": task_status,
             "goal_review": goal_review,
+            "group_review": group_review,
         })
