@@ -152,6 +152,7 @@ _CATEGORY_KEYWORDS = (
     ("出行生活", ("抢票", "12306", "火车票", "冬瓜", "睡觉", "降温", "旅行")),
 )
 _DATE_RE = re.compile(r"(20\d{2})年(\d{1,2})月(\d{1,2})日")
+_RELATIVE_TIME_RE = r"\d+\s*(?:分钟|小时|天|周|个月)(?:前|之前)"
 
 
 def _normalized_key(value):
@@ -182,19 +183,22 @@ def _search_result_is_stale(result, now=None, max_age_days=120):
 def _prepare_evidence_fragment(title, value):
     text = _clean_text(value).replace("�", "")
     text = re.sub(
-        r"[?？](?=(?:\d+\s*(?:分钟|小时|天|周|个月)前|20\d{2}年))", " · ", text)
+        rf"[?？](?=(?:{_RELATIVE_TIME_RE}|20\d{{2}}年))", " · ", text)
     if "：" in text:
         prefix, remainder = text.split("：", 1)
         if remainder.strip() and len(prefix) <= 180 and _text_overlap(prefix, title) >= 0.45:
             text = remainder.strip()
     normalized_title = _normalized_key(title)
     while normalized_title and _normalized_key(text).startswith(normalized_title):
-        text = text[len(_clean_text(title)):].lstrip(" -—|丨:：?？")
+        text = text[len(_clean_text(title)):].lstrip(" -—·•|丨:：?？")
         if not text:
             break
     text = re.sub(
-        r"^(?:\d+\s*(?:分钟|小时|天|周|个月)前|20\d{2}年\d{1,2}月\d{1,2}日)\s*[·•-]?\s*",
+        rf"^(?:\s*[·•|丨-]\s*)*(?:{_RELATIVE_TIME_RE}|20\d{{2}}年\d{{1,2}}月\d{{1,2}}日)\s*[·•|丨-]?\s*",
         "", text)
+    text = re.sub(
+        rf"\s*[·•|丨]\s*{_RELATIVE_TIME_RE}\s*(?:[·•|丨-]\s*)?",
+        " ", text)
     return _clean_text(text)
 
 
