@@ -74,8 +74,10 @@ class CoreBehaviorTests(unittest.TestCase):
 
     def test_mutating_apis_are_not_ai_allowed(self):
         for name in (
-            "send_group_msg", "delete_msg", "upload_group_file",
-            "delete_group_folder", "set_qq_avatar", "create_collection",
+            "send_group_msg", "send_group_msg_reply", "send_group_msg_with_at",
+            "send_flash_msg", "click_inline_keyboard_button", "delete_msg",
+            "upload_group_file", "delete_group_folder", "set_qq_avatar",
+            "create_collection", "_send_group_notice", "_del_group_notice",
         ):
             with self.subTest(name=name):
                 self.assertFalse(REGISTRY[name].ai_allowed)

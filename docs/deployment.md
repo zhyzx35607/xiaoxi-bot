@@ -7,8 +7,10 @@ Production keeps these paths unchanged:
 - application root: `/opt/qqbot`
 - environment file: `/etc/qqbot.env`
 - entrypoint: `/opt/qqbot/main.py`
-- configuration: `/opt/qqbot/config.json`
+- configuration source: `/opt/qqbot/config.json` (migration input)
+- active configuration: `/var/lib/qqbot/config.json`
 - persistent state: `/opt/qqbot/data/`
+- runtime temporary files: `/opt/qqbot/data/tmp/`
 - service: `qqbot.service`
 
 ## Validation

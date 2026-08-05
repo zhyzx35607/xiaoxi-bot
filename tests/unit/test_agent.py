@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime
@@ -145,6 +146,59 @@ class AgentPersistenceTests(unittest.TestCase):
         self.assertEqual(runtime.proactive.muted_until("group:300"), 0)
 
 
+class AgentObservationTests(unittest.IsolatedAsyncioTestCase):
+    async def _run_passive_message(self, observation_enabled):
+        from bot.events.message import GroupMessageMixin
+
+        config = {
+            "bot_owner": 100,
+            "bot_qq": 200,
+            "agent": {"observation_enabled": observation_enabled},
+        }
+        with tempfile.TemporaryDirectory() as root:
+            runtime = AgentRuntime(config, root)
+
+            class Harness(GroupMessageMixin):
+                def __init__(self):
+                    self.config = config
+                    self.agent_runtime = runtime
+                    self._lock = asyncio.Lock()
+                    self._seen_msg_ids = {}
+                    self._seen_msg_ids_maxlen = 10
+
+                async def _is_directed_at_bot(self, message, raw_message=""):
+                    return False
+
+            event = {
+                "post_type": "message",
+                "message_type": "group",
+                "group_id": 300,
+                "user_id": 101,
+                "message_id": 501,
+                "time": 1_000,
+                "raw_message": "普通测试消息",
+                "message": [{"type": "text", "data": {"text": "普通测试消息"}}],
+                "sender": {"role": "member", "nickname": "测试用户"},
+            }
+            with patch("bot.events.message._event_scope_allowed", return_value=True),                     patch("bot.events.message.is_group_enabled", return_value=False):
+                await Harness()._handle_message(event)
+            return (
+                runtime.store.read("events/group_300.json", []),
+                runtime.timeline.list("group:300", limit=100),
+            )
+
+    async def test_passive_observation_is_disabled_by_default(self):
+        events, timeline = await self._run_passive_message(False)
+        self.assertEqual(events, [])
+        self.assertEqual(timeline, [])
+
+    async def test_passive_observation_is_opt_in_without_message_timeline_duplication(self):
+        events, timeline = await self._run_passive_message(True)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["text"], "普通测试消息")
+        self.assertFalse(any(item.get("kind") == "message" for item in timeline))
+
+
 class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_denies_sensitive_tool_before_registry_lookup(self):
         from bot.agent.tools.gateway import AgentToolGateway
@@ -180,6 +234,38 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         result = await AgentToolGateway(dispatcher).execute(event, "get_group_info", group_id=999)
         self.assertTrue(result["ok"])
         self.assertEqual(client.calls, [300])
+
+    async def test_registry_alias_forces_current_group_scope(self):
+        from bot.agent.tools.gateway import AgentToolGateway
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        class Client:
+            def __init__(self): self.calls = []
+            async def get_group_msg_history(self, group_id, count=20):
+                self.calls.append((group_id, count))
+                return {"status": "ok", "data": {"messages": []}}
+        client = Client()
+        dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime, "client": client})()
+        event = runtime.build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
+        result = await AgentToolGateway(dispatcher).execute(
+            event, "get_recent_messages", group_id=999, count=5)
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.calls, [(300, 5)])
+
+    def test_mutating_napcat_actions_are_not_agent_tools(self):
+        from api_registry import REGISTRY
+        from bot.agent.tools.gateway import AgentToolGateway
+        from bot.agent.tools.napcat import SAFE_ACTIONS
+        gateway = AgentToolGateway(type("D", (), {"config": {}})())
+        for name in (
+            "send_group_msg_reply", "send_group_msg_with_at", "send_flash_msg",
+            "click_inline_keyboard_button", "_send_group_notice", "_del_group_notice",
+        ):
+            with self.subTest(name=name):
+                self.assertNotEqual(REGISTRY[name].risk, "read")
+                self.assertFalse(REGISTRY[name].ai_allowed)
+                self.assertNotIn(name, SAFE_ACTIONS)
+                self.assertNotIn(name, gateway.catalog())
+                self.assertFalse(gateway.is_read_only(name))
 
     async def test_owner_private_group_read_requires_explicit_target(self):
         from bot.agent.tools.gateway import AgentToolGateway

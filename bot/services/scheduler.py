@@ -307,6 +307,7 @@ def _new_acg_state():
         "pool": [],
         "pending_due": False,
         "delivery": None,
+        "last_failure": None,
         "schedule": {"date": "", "acg": [], "hotboard": [], "done": {"acg": [], "hotboard": []}},
     }
 
@@ -344,7 +345,10 @@ def _load_acg_state():
     state["pending_due"] = bool(data.get("pending_due", False))
     delivery = data.get("delivery")
     if isinstance(delivery, dict) and isinstance(delivery.get("urls"), list):
+        delivery["attempts"] = delivery.get("attempts") if isinstance(delivery.get("attempts"), dict) else {}
         state["delivery"] = delivery
+    if isinstance(data.get("last_failure"), dict):
+        state["last_failure"] = data["last_failure"]
     schedule = data.get("schedule")
     if isinstance(schedule, dict):
         state["schedule"] = schedule
@@ -519,17 +523,52 @@ async def _batch_seen_in_history(dispatcher, group_id, batch_id):
         return False
 
 
+async def _notify_acg_terminal_failure(dispatcher, batch_id, groups, reason):
+    owner_id = int(dispatcher.config.get("bot_owner") or 0)
+    sender = getattr(dispatcher.client, "send_private_msg", None)
+    if not owner_id or not callable(sender):
+        return
+    group_text = "、".join(str(group_id) for group_id in groups[:20]) or "未知群"
+    message = "ACG 推送批次 {} 已停止重试。失败群：{}。原因：{}".format(
+        batch_id, group_text, reason)
+    try:
+        await sender(owner_id, message[:1500])
+    except Exception as error:
+        log.warning("ACG terminal failure notification failed batch=%s: %s", batch_id, error)
+
+
 async def _try_send_acg_delivery(dispatcher):
+    terminal_notice = None
     async with _delivery_lock(dispatcher):
         now = time.time()
+        cfg = dispatcher.config.get("acg_images", {})
+        max_attempts = max(1, min(int(cfg.get("max_delivery_attempts", 3)), 10))
+        retry_base = max(30, min(int(cfg.get("retry_base_seconds", 300)), 3600))
+        retry_max = max(retry_base, min(int(cfg.get("retry_max_seconds", 1800)), 21600))
+        delivery_ttl = max(300, min(int(cfg.get("delivery_ttl_seconds", 7200)), 86400))
         async with _state_lock(dispatcher):
             state = _load_acg_state()
             _prune_recent(state, dispatcher, now)
             delivery = state.get("delivery")
-            if delivery and float(delivery.get("next_retry_at", 0) or 0) > now:
+            if delivery:
+                created_at = float(delivery.get("created_at", now) or now)
+                if now - created_at >= delivery_ttl:
+                    groups = [str(group_id) for group_id in delivery.get("remaining_groups", [])]
+                    state["last_failure"] = {
+                        "batch_id": str(delivery.get("batch_id", "")),
+                        "groups": groups,
+                        "reason": "delivery_expired",
+                        "failed_at": now,
+                    }
+                    terminal_notice = (str(delivery.get("batch_id", "")), groups, "超过投递有效期")
+                    state["delivery"] = None
+                    state["pending_due"] = False
+                    _save_acg_state(state)
+                    delivery = None
+            if terminal_notice is None and delivery and float(delivery.get("next_retry_at", 0) or 0) > now:
                 _save_acg_state(state)
                 return False
-            if delivery is None:
+            if terminal_notice is None and delivery is None:
                 target = _acg_send_count(dispatcher)
                 if not state.get("pending_due") or len(state["pool"]) < target:
                     _save_acg_state(state)
@@ -543,20 +582,28 @@ async def _try_send_acg_delivery(dispatcher):
                     "batch_id": batch_id,
                     "urls": urls,
                     "remaining_groups": groups,
+                    "attempts": {},
                     "created_at": now,
                     "next_retry_at": 0,
                 }
                 state["delivery"] = delivery
                 state["recent"].update({url: now for url in urls})
                 _save_acg_state(state)
-            delivery = dict(delivery)
+            if terminal_notice is None:
+                delivery = dict(delivery)
+        if terminal_notice is not None:
+            await _notify_acg_terminal_failure(dispatcher, *terminal_notice)
+            return False
         if not _client_connected(dispatcher):
             return False
         bot_qq = dispatcher.config.get("bot_qq", 0)
         remaining = list(delivery.get("remaining_groups", []))
+        attempts = dict(delivery.get("attempts") or {})
         failed = []
         for gid in remaining:
-            header = "小汐的每日图片 · 批次 #{} · 共20张".format(delivery["batch_id"])
+            attempts[str(gid)] = int(attempts.get(str(gid), 0) or 0) + 1
+            header = "小汐的每日图片 · 批次 #{} · 共{}张".format(
+                delivery["batch_id"], len(delivery["urls"]))
             nodes = [{
                 "type": "node",
                 "data": {"name": "小汐", "uin": str(bot_qq), "content": header},
@@ -575,23 +622,42 @@ async def _try_send_acg_delivery(dispatcher):
                     log.info("ACG package sent group=%s batch=%s images=%d", gid, delivery["batch_id"], len(delivery["urls"]))
                 else:
                     failed.append(str(gid))
-                    log.warning("ACG package unconfirmed group=%s batch=%s status=%s", gid, delivery["batch_id"], status)
+                    log.warning("ACG package unconfirmed group=%s batch=%s status=%s attempt=%s/%s",
+                                gid, delivery["batch_id"], status, attempts[str(gid)], max_attempts)
             except Exception as error:
                 failed.append(str(gid))
-                log.warning("ACG package failed group=%s batch=%s: %s", gid, delivery["batch_id"], error)
+                log.warning("ACG package failed group=%s batch=%s attempt=%s/%s: %s",
+                            gid, delivery["batch_id"], attempts[str(gid)], max_attempts, error)
             await asyncio.sleep(2)
+        exhausted = [gid for gid in failed if attempts.get(str(gid), 0) >= max_attempts]
+        retryable = [gid for gid in failed if gid not in exhausted]
         async with _state_lock(dispatcher):
             state = _load_acg_state()
             current = state.get("delivery")
             if current and current.get("batch_id") == delivery.get("batch_id"):
-                if failed:
-                    current["remaining_groups"] = failed
-                    current["next_retry_at"] = time.time() + 300
+                current["attempts"] = attempts
+                if retryable:
+                    highest_attempt = max(attempts.get(str(gid), 1) for gid in retryable)
+                    retry_seconds = min(retry_max, retry_base * (2 ** max(0, highest_attempt - 1)))
+                    current["remaining_groups"] = retryable
+                    current["next_retry_at"] = time.time() + retry_seconds
                     state["delivery"] = current
                 else:
                     state["delivery"] = None
                     state["pending_due"] = False
+                if exhausted:
+                    state["last_failure"] = {
+                        "batch_id": str(delivery.get("batch_id", "")),
+                        "groups": exhausted,
+                        "reason": "attempts_exhausted",
+                        "attempts": {gid: attempts.get(gid, 0) for gid in exhausted},
+                        "failed_at": time.time(),
+                    }
                 _save_acg_state(state)
+        if exhausted:
+            await _notify_acg_terminal_failure(
+                dispatcher, str(delivery.get("batch_id", "")), exhausted,
+                "达到最大重试次数 {}".format(max_attempts))
         return not failed
 
 

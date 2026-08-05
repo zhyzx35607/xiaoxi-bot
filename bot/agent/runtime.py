@@ -62,16 +62,13 @@ class AgentRuntime:
     def _record_event(self, agent_event, decision):
         if not agent_event.text:
             return
+        event_limit = max(12, min(
+            int(self.config.get("agent", {}).get("event_history_limit", 100)), 200))
         self.store.append_bounded(f"events/{agent_event.scope.key.replace(':', '_')}.json", {
             "event_id": agent_event.event_id, "user_id": agent_event.identity.user_id,
             "level": int(agent_event.identity.level), "text": agent_event.text[:1000],
             "timestamp": agent_event.timestamp, "decision": decision.reason,
-        }, limit=200)
-        self.timeline.add(
-            agent_event.scope.key, "message", agent_event.text[:1000],
-            actor_id=agent_event.identity.user_id,
-            metadata={"event_id": agent_event.event_id, "decision": decision.reason},
-        )
+        }, limit=event_limit)
         candidate = self.extract_memory_candidate(agent_event)
         if candidate:
             self.memory.add_candidate(candidate)
