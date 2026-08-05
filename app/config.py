@@ -370,6 +370,37 @@ def migrate_config(config):
         if key not in automation:
             automation[key] = value
             migrated = True
+    roleplay_defaults = {
+        "enabled": True,
+        "database_path": "data/roleplay.sqlite3",
+        "import_directory": "data/roleplay_imports",
+        "private_policy_path": "data/roleplay_private/policies.json",
+        "session_timeout_seconds": 1800,
+        "recent_message_limit": 20,
+        "memory_recall_limit": 10,
+        "summary_every_messages": 20,
+        "max_context_chars": 18000,
+        "lightrag": {
+            "enabled": False,
+            "base_url": "http://127.0.0.1:8020",
+            "mode": "hybrid",
+            "timeout_seconds": 4,
+            "max_context_chars": 5000,
+        },
+    }
+    roleplay = config.setdefault("roleplay", {})
+    for key, value in roleplay_defaults.items():
+        if key not in roleplay:
+            roleplay[key] = value
+            migrated = True
+    if not isinstance(roleplay.get("lightrag"), dict):
+        roleplay["lightrag"] = dict(roleplay_defaults["lightrag"])
+        migrated = True
+    else:
+        for key, value in roleplay_defaults["lightrag"].items():
+            if key not in roleplay["lightrag"]:
+                roleplay["lightrag"][key] = value
+                migrated = True
     agent_defaults = {
         "enabled": True,
         "group_enabled": True,

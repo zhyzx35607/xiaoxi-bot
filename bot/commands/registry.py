@@ -7,10 +7,19 @@ from .fun import *  # noqa: F401,F403
 from .media import *  # noqa: F401,F403
 from .moderation import *  # noqa: F401,F403
 from .queries import *  # noqa: F401,F403
+from .roleplay import *  # noqa: F401,F403
 from .system import *  # noqa: F401,F403
 from .uapi_extra import *  # noqa: F401,F403
 
 def register_all(d):
+    d.register("char", cmd_char, "主人私聊角色卡：list/import/show/export/delete", bot_owner_only=True)
+    d.register("persona", cmd_persona, "主人私聊 Persona：list/create/use/delete", bot_owner_only=True)
+    d.register("chat", cmd_chat, "主人私聊角色会话：new/list/use/rename/export/delete", bot_owner_only=True)
+    d.register("memory", cmd_memory, "主人私聊结构化记忆：list/search/add/update/lock/archive", bot_owner_only=True)
+    d.register("world", cmd_world, "主人私聊世界书：list/show/add/use/delete", bot_owner_only=True)
+    d.register("mode", cmd_mode, "主人私聊文本模式：normal/story/status", bot_owner_only=True)
+    d.register("scene", cmd_scene, "主人私聊场景状态、剧情节拍和稳定/临时记忆", bot_owner_only=True)
+    d.register("bond", cmd_bond, "主人私聊关系时间线", bot_owner_only=True)
     d.register("agent", cmd_agent, "查看/管理 Agent 状态", owner_only=True)
     d.register("功能", cmd_feature_center, "按分类开关 NapCat 扩展功能 /功能 分类 on/off", bot_owner=True)
     d.register("消息", cmd_message_center, "消息扩展：表情详情、语音转文字、闪传")

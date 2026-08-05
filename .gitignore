@@ -21,6 +21,7 @@ docs/*
 !docs/architecture.md
 !docs/napcat-docs-manifest.json
 !docs/operations.md
+!docs/roleplay.md
 
 CLAUDE.md
 .claude/
@@ -38,3 +39,9 @@ backups/
 *.tool-backup
 *.audit-backup
 !docs/api-contracts.json
+# Runtime-only roleplay data and private policy
+data/roleplay.sqlite3
+data/roleplay.sqlite3-*
+data/roleplay_exports/
+data/roleplay_private/
+data/roleplay_imports/

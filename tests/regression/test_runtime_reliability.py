@@ -227,6 +227,96 @@ class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["last_failure"]["attempts"], {"100": 3})
         self.assertEqual(len(notices), 1)
 
+    async def test_acg_delivery_checkpoints_each_group_before_restart(self):
+        sent = []
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append(group_id)
+                return {"status": "ok", "retcode": 0}
+
+            async def get_group_msg_history(self, group_id, count=20):
+                return {"messages": []}
+
+        class Stub:
+            config = {
+                "bot_qq": 1,
+                "acg_images": {"enabled": True},
+                "groups": {
+                    "100": {"enabled": True, "features": {"acg_images": True}},
+                    "200": {"enabled": True, "features": {"acg_images": True}},
+                },
+            }
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "restart-batch",
+                    "urls": ["https://example.com/a.jpg"],
+                    "remaining_groups": ["100", "200"],
+                    "attempts": {},
+                    "created_at": time.time(),
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                with patch.object(scheduler.asyncio, "sleep", new=AsyncMock(side_effect=scheduler.asyncio.CancelledError)):
+                    with self.assertRaises(scheduler.asyncio.CancelledError):
+                        await scheduler._try_send_acg_delivery(Stub())
+                state = scheduler._load_acg_state()
+                self.assertEqual(state["delivery"]["remaining_groups"], ["200"])
+                with patch.object(scheduler.asyncio, "sleep", new=AsyncMock()):
+                    await scheduler._try_send_acg_delivery(Stub())
+                state = scheduler._load_acg_state()
+
+        self.assertEqual(sent, [100, 200])
+        self.assertIsNone(state["delivery"])
+        self.assertFalse(state["pending_due"])
+
+    async def test_acg_delivery_recovers_accepted_inflight_batch_from_history(self):
+        sent = []
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append(group_id)
+                return {"status": "ok"}
+
+            async def get_group_msg_history(self, group_id, count=20):
+                return {"messages": [{"raw_message": "batch #history-batch"}]}
+
+        class Stub:
+            config = {"bot_qq": 1, "acg_images": {"enabled": True}}
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch.object(scheduler.asyncio, "sleep", new=AsyncMock()):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "history-batch",
+                    "urls": ["https://example.com/a.jpg"],
+                    "remaining_groups": ["100"],
+                    "attempts": {"100": 1},
+                    "created_at": time.time(),
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                await scheduler._try_send_acg_delivery(Stub())
+                state = scheduler._load_acg_state()
+
+        self.assertEqual(sent, [])
+        self.assertIsNone(state["delivery"])
+        self.assertFalse(state["pending_due"])
+
     async def test_acg_delivery_expires_without_sending(self):
         sent = []
         notices = []

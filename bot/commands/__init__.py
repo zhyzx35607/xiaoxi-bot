@@ -11,10 +11,11 @@ from . import fun as _fun
 from . import media as _media
 from . import moderation as _moderation
 from . import queries as _queries
+from . import roleplay as _roleplay
 from . import registry as _registry
 from . import system as _system
 
-_OWNERS = (_runtime, _admin, _common, _fun, _media, _moderation, _queries, _registry, _system)
+_OWNERS = (_runtime, _admin, _common, _fun, _media, _moderation, _queries, _roleplay, _registry, _system)
 
 
 def _export_private(owner):
@@ -33,7 +34,7 @@ class _CompatibilityModule(_types.ModuleType):
     def __setattr__(self, name, value):
         if name not in {
             "_runtime", "_admin", "_common", "_fun", "_media", "_moderation",
-            "_queries", "_registry", "_system", "_types", "_sys", "_OWNERS",
+            "_queries", "_roleplay", "_registry", "_system", "_types", "_sys", "_OWNERS",
         }:
             for owner in _OWNERS:
                 if hasattr(owner, name):

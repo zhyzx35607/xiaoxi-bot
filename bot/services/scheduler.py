@@ -601,7 +601,36 @@ async def _try_send_acg_delivery(dispatcher):
         attempts = dict(delivery.get("attempts") or {})
         failed = []
         for gid in remaining:
-            attempts[str(gid)] = int(attempts.get(str(gid), 0) or 0) + 1
+            gid_text = str(gid)
+            # A prior process may have stopped after OneBot accepted the forward
+            # but before the delivery state was checkpointed. Recover from the
+            # batch marker in group history instead of sending the batch again.
+            if int(attempts.get(gid_text, 0) or 0) > 0:
+                if await _batch_seen_in_history(dispatcher, gid_text, delivery["batch_id"]):
+                    async with _state_lock(dispatcher):
+                        state = _load_acg_state()
+                        current = state.get("delivery")
+                        if current and current.get("batch_id") == delivery.get("batch_id"):
+                            current["remaining_groups"] = [
+                                str(value) for value in current.get("remaining_groups", [])
+                                if str(value) != gid_text
+                            ]
+                            current["attempts"] = attempts
+                            state["delivery"] = current
+                            _save_acg_state(state)
+                    log.info("ACG package recovered from history group=%s batch=%s",
+                             gid_text, delivery["batch_id"])
+                    continue
+            attempts[gid_text] = int(attempts.get(gid_text, 0) or 0) + 1
+            # Persist the attempt before the external side effect. If the process
+            # stops during the API call, the next process performs history recovery.
+            async with _state_lock(dispatcher):
+                state = _load_acg_state()
+                current = state.get("delivery")
+                if current and current.get("batch_id") == delivery.get("batch_id"):
+                    current["attempts"] = attempts
+                    state["delivery"] = current
+                    _save_acg_state(state)
             header = "小汐的每日图片 · 批次 #{} · 共{}张".format(
                 delivery["batch_id"], len(delivery["urls"]))
             nodes = [{
@@ -619,6 +648,20 @@ async def _try_send_acg_delivery(dispatcher):
                 if not confirmed and status == "timeout":
                     confirmed = await _batch_seen_in_history(dispatcher, gid, delivery["batch_id"])
                 if confirmed:
+                    # Checkpoint each successful group immediately. Previously the
+                    # state was updated only after every group completed, so a
+                    # service restart replayed already delivered forwards.
+                    async with _state_lock(dispatcher):
+                        state = _load_acg_state()
+                        current = state.get("delivery")
+                        if current and current.get("batch_id") == delivery.get("batch_id"):
+                            current["remaining_groups"] = [
+                                str(value) for value in current.get("remaining_groups", [])
+                                if str(value) != gid_text
+                            ]
+                            current["attempts"] = attempts
+                            state["delivery"] = current
+                            _save_acg_state(state)
                     log.info("ACG package sent group=%s batch=%s images=%d", gid, delivery["batch_id"], len(delivery["urls"]))
                 else:
                     failed.append(str(gid))

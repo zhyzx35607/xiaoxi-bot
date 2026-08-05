@@ -159,6 +159,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                           reply_intent="", consecutive_replies=0,
                           interaction_allowed=False):
     config = dispatcher.config
+    roleplay_history = []
+    roleplay_active = False
     context_key = f"private_{user_id}" if not group_id else str(group_id)
     from ..permission import (
         LEVEL_ADMIN, LEVEL_GOWNER, LEVEL_MASTER, LEVEL_SUPER,
@@ -306,6 +308,16 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         user_mem_ctx=user_mem_ctx,
         tool_ctx=TOOL_USAGE_RULES if tools else "",
     )
+    roleplay = getattr(dispatcher, "roleplay", None)
+    if roleplay is not None:
+        try:
+            roleplay_prompt, roleplay_history = await roleplay.build_context(
+                user_id, group_id, raw_message or "")
+            if roleplay_prompt:
+                roleplay_active = True
+                system_prompt += "\n\n" + roleplay_prompt
+        except Exception as error:
+            log.warning("Roleplay context degraded: %s", error)
     
     # === Private chat: detailed behavior rules for AI to follow ===
     if not group_id:
@@ -347,12 +359,15 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         if memory:
             messages.extend(memory[-30:])
     else:
-        # Private chat: load user memory as structured conversation history
-        priv_mem = _load_user_memory(0, user_id) if user_id else []
-        if priv_mem:
-            priv_history = [m for m in priv_mem[-20:] if m.get("role") in ("user", "assistant")]
-            for m in priv_history:
-                messages.append({"role": m["role"], "content": m["content"]})
+        if roleplay_active:
+            messages.extend(roleplay_history[-20:])
+        else:
+            # Private chat: load user memory as structured conversation history
+            priv_mem = _load_user_memory(0, user_id) if user_id else []
+            if priv_mem:
+                priv_history = [m for m in priv_mem[-20:] if m.get("role") in ("user", "assistant")]
+                for m in priv_history:
+                    messages.append({"role": m["role"], "content": m["content"]})
     # Clean the message
     clean_msg = _sanitize_message(raw_message)
     bot_qq = str(config["bot_qq"])
@@ -576,6 +591,12 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         except Exception as e:
             log.error("Private reply send error (sticker may be stale): %s", e)
             await dispatcher.client.send_private_msg(user_id, clean_reply or reply)
+    if roleplay_active:
+        try:
+            dispatcher.roleplay.record_exchange(
+                user_id, group_id, original_clean_msg or raw_message, clean_reply if clean_reply else reply)
+        except Exception as error:
+            log.warning("Roleplay exchange persistence degraded: %s", error)
     # Track last reply timestamp for multi-layer delay
     _last_reply_ts[context_key] = time.time()
     # Track reply content for anti-echo

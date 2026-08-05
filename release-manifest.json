@@ -1,0 +1,39 @@
+{
+  "base_commit": "590df767675845787517bcef3d2f7dd1641e7d2e",
+  "release": "qqbot-roleplay-reliability-20260805",
+  "created_at": "2026-08-05T15:30:00+08:00",
+  "files": [
+    ".gitignore",
+    "app/config.py",
+    "bot/ai/runtime.py",
+    "bot/commands/__init__.py",
+    "bot/commands/registry.py",
+    "bot/commands/roleplay.py",
+    "bot/dispatcher.py",
+    "bot/roleplay/__init__.py",
+    "bot/roleplay/character_cards.py",
+    "bot/roleplay/lightrag.py",
+    "bot/roleplay/service.py",
+    "bot/roleplay/storage.py",
+    "bot/services/scheduler.py",
+    "docs/roleplay.md",
+    "release-manifest.json",
+    "rollback-roleplay.sh",
+    "tests/regression/test_runtime_reliability.py",
+    "tests/unit/test_roleplay.py"
+  ],
+  "features": [
+    "character-card-v2-png",
+    "personas",
+    "multi-chat",
+    "scoped-structured-memory",
+    "confirmed-destructive-operations",
+    "worldbooks",
+    "lightrag-fallback",
+    "scene-state",
+    "stable-volatile-memory",
+    "story-beats",
+    "bond-timeline",
+    "restart-safe-acg-delivery"
+  ]
+}
