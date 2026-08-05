@@ -1912,6 +1912,25 @@ class HotboardDigestTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(title + "：", details[0])
         self.assertLessEqual(len(details[0]), 170)
 
+    def test_fallback_digest_removes_embedded_relative_time_labels(self):
+        from bot.services import hotboard_digest
+
+        title = "笔试第一称被第二名花钱劝弃考"
+        items = [{
+            "title": title,
+            "evidence": (
+                title + "?1 天前 · 广东陈女士称面试前收到劝弃考传话，教育局已开展核查。"
+                + title + "?2 小时之前 · 广东陈女士称面试前收到劝弃考传话，教育局已开展核查。"
+            ),
+            "hot_value": "1481781",
+        }]
+
+        _, details = hotboard_digest._fallback_digest("微博", items)
+
+        self.assertNotIn("1 天前", details[0])
+        self.assertNotIn("2 小时之前", details[0])
+        self.assertEqual(details[0].count("教育局已开展核查"), 1)
+
     def test_stale_search_result_is_rejected(self):
         from bot.services import hotboard_digest
 
