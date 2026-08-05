@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from bot.ai.runtime import _roleplay_generation_profile
+from bot.ai import providers
 from bot.roleplay.character_cards import parse_json_card
 from bot.roleplay.service import BASE_ROLEPLAY_POLICY, STORY_QUALITY_POLICY, RoleplayService
 
@@ -101,12 +102,26 @@ class RoleplayServiceTests(unittest.TestCase):
 
     def test_roleplay_generation_profile_is_bounded(self):
         self.assertEqual(_roleplay_generation_profile({}), (1200, 0.82))
+        self.assertEqual(
+            _roleplay_generation_profile({}, story_mode=True),
+            (None, 0.82),
+        )
+        self.assertEqual(_roleplay_generation_profile({
+            "roleplay": {"story_unbounded_tokens": False},
+        }, story_mode=True), (1200, 0.82))
         self.assertEqual(_roleplay_generation_profile({
             "roleplay": {"response_max_tokens": 9999, "response_temperature": -2},
         }), (2400, 0.1))
         self.assertEqual(_roleplay_generation_profile({
             "roleplay": {"response_max_tokens": "bad", "response_temperature": "bad"},
         }), (1200, 0.82))
+
+    def test_story_mode_is_distinct_from_normal_roleplay(self):
+        character = self._character()
+        self.service.store.new_chat(self.OWNER, character["id"], title="mode")
+        self.assertFalse(self.service.is_story_mode(self.OWNER, None))
+        self.service.set_mode(self.OWNER, None, "story")
+        self.assertTrue(self.service.is_story_mode(self.OWNER, None))
 
     def test_import_is_confined_to_runtime_import_directory(self):
         import_dir = self.root / "data" / "roleplay_imports"
@@ -137,6 +152,48 @@ class RoleplayReleaseMetadataTests(unittest.TestCase):
         self.assertIn("tests/unit/test_roleplay.py", listed)
         for relative in listed:
             self.assertTrue((root / relative).is_file(), relative)
+
+
+class RoleplayProviderPayloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_story_request_omits_max_tokens(self):
+        payloads = []
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def json(self):
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+        class Session:
+            def post(self, url, **kwargs):
+                payloads.append(kwargs["json"])
+                return Response()
+
+        config = {
+            "sigmai_api_key": "test-key",
+            "sigmai_base_url": "https://provider.invalid/v1",
+            "sigmai_model": "story-model",
+            "deepseek_api_key": "",
+            "runtime": {"sigmai_timeout_seconds": 5},
+        }
+        providers._PROVIDER_COOLDOWNS.clear()
+        result = await providers._call_deepseek_inner(
+            config,
+            [{"role": "user", "content": "continue"}],
+            max_tokens=None,
+            temperature=0.82,
+            session=Session(),
+        )
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(len(payloads), 1)
+        self.assertNotIn("max_tokens", payloads[0])
 
 
 if __name__ == "__main__":

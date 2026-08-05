@@ -5,6 +5,7 @@
   "files": [
     ".gitignore",
     "app/config.py",
+    "bot/ai/providers.py",
     "bot/ai/runtime.py",
     "bot/commands/__init__.py",
     "bot/commands/registry.py",
@@ -35,6 +36,7 @@
     "story-beats",
     "bond-timeline",
     "roleplay-long-form-generation",
+    "story-provider-default-token-budget",
     "restart-safe-acg-delivery"
   ]
 }

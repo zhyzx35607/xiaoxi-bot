@@ -153,17 +153,20 @@ async def deepseek_chat(dispatcher, prompt, system_prompt=None):
         reply = _post_process_reply(reply)
     return reply or "...脑子卡了 等会再说"
 # ========== MAIN AI CHAT ==========
-def _roleplay_generation_profile(config):
+def _roleplay_generation_profile(config, *, story_mode=False):
     settings = config.get("roleplay", {})
     try:
         temperature = float(settings.get("response_temperature", 0.82))
     except (TypeError, ValueError):
         temperature = 0.82
-    try:
-        max_tokens = int(settings.get("response_max_tokens", 1200))
-    except (TypeError, ValueError):
-        max_tokens = 1200
-    return max(300, min(2400, max_tokens)), max(0.1, min(1.5, temperature))
+    max_tokens = None
+    if not (story_mode and settings.get("story_unbounded_tokens", True)):
+        try:
+            max_tokens = int(settings.get("response_max_tokens", 1200))
+        except (TypeError, ValueError):
+            max_tokens = 1200
+        max_tokens = max(300, min(2400, max_tokens))
+    return max_tokens, max(0.1, min(1.5, temperature))
 
 
 async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name,
@@ -174,6 +177,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     config = dispatcher.config
     roleplay_history = []
     roleplay_active = False
+    roleplay_story_mode = False
     context_key = f"private_{user_id}" if not group_id else str(group_id)
     from ..permission import (
         LEVEL_ADMIN, LEVEL_GOWNER, LEVEL_MASTER, LEVEL_SUPER,
@@ -309,6 +313,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             roleplay_prompt, roleplay_history = await roleplay.build_context(
                 user_id, group_id, raw_message or "")
             roleplay_active = bool(roleplay_prompt)
+            roleplay_story_mode = roleplay_active and roleplay.is_story_mode(
+                user_id, group_id)
         except Exception as error:
             log.warning("Roleplay context degraded: %s", error)
 
@@ -405,7 +411,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     is_question = bool(clean_msg) and ("?" in str(clean_msg) or "？" in str(clean_msg) or
                     any(w in str(clean_msg) for w in ("怎么", "为什么", "如何", "啥", "什么")))
     if roleplay_active:
-        dyn_max_tokens, temperature = _roleplay_generation_profile(config)
+        dyn_max_tokens, temperature = _roleplay_generation_profile(
+            config, story_mode=roleplay_story_mode)
     elif group_id:
         dyn_max_tokens = 450 if is_question else 400
     else:

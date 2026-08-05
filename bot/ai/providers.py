@@ -139,12 +139,13 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
         payload = {
             "model": cfg["model"],
             "messages": messages,
-            "max_tokens": max_tokens,
             "temperature": temperature,
             "top_p": 0.9,
             "presence_penalty": 0.3,
             "frequency_penalty": 0.3,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

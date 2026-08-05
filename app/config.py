@@ -382,6 +382,7 @@ def migrate_config(config):
         "max_context_chars": 18000,
         "response_max_tokens": 1200,
         "response_temperature": 0.82,
+        "story_unbounded_tokens": True,
         "lightrag": {
             "enabled": False,
             "base_url": "http://127.0.0.1:8020",

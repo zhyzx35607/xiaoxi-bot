@@ -60,6 +60,7 @@
 
 - `response_max_tokens`：单回合生成预算，范围 300 到 2400，默认 1200；
 - `response_temperature`：生成温度，范围 0.1 到 1.5，默认 0.82。
+- `story_unbounded_tokens`：story 模式默认开启；开启时请求不发送 `max_tokens` 字段，由模型服务端决定最大生成长度。normal 模式仍使用 `response_max_tokens`。
 
 ## LightRAG
 

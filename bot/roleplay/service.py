@@ -74,6 +74,12 @@ class RoleplayService:
         except (TypeError, ValueError):
             return False
 
+    def is_story_mode(self, user_id: int, group_id: int | None) -> bool:
+        if not self.is_owner_private(user_id, group_id):
+            return False
+        mode, _ = self.store.get_mode(user_id)
+        return mode == "owner_story"
+
     def _require_owner_private(self, user_id: int, group_id: int | None) -> None:
         if not self.is_owner_private(user_id, group_id):
             raise PermissionError("角色扮演管理目前只在最高主人私聊中开放")
