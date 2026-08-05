@@ -76,7 +76,8 @@ _NAMES = {
 _INTERACTION = {
     "send_msg", "send_group_msg", "send_private_msg", "send_group_forward_msg",
     "send_private_forward_msg", "forward_group_single_msg", "forward_friend_single_msg",
-    "send_forward_msg", "set_msg_emoji_like", "friend_poke", "group_poke", "send_poke",
+    "send_forward_msg", "send_group_msg_reply", "send_group_msg_with_at", "send_flash_msg",
+    "click_inline_keyboard_button", "set_msg_emoji_like", "friend_poke", "group_poke", "send_poke",
     "send_like", "send_group_sign", "set_group_sign", "send_group_ai_record",
     "mark_msg_as_read", "mark_group_msg_as_read", "mark_private_msg_as_read",
     "mark_all_as_read", "_mark_all_as_read", "set_input_status",
@@ -93,7 +94,7 @@ _MANAGEMENT = set(_NAMES["management"]) | {
     "send_online_file", "send_online_folder", "cancel_online_file", "receive_online_file",
     "refuse_online_file", "set_doubt_friends_add_request", "set_friend_remark",
     "delete_friend", "set_qq_profile", "set_diy_online_status", "add_custom_face",
-    "delete_custom_face", "set_custom_face_desc",
+    "delete_custom_face", "set_custom_face_desc", "_send_group_notice", "_del_group_notice",
 }
 
 

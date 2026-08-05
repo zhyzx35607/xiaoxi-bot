@@ -1,4 +1,4 @@
-﻿# 运行与部署
+# 运行与部署
 
 ## 本地验证
 
@@ -15,7 +15,9 @@ QQBOT_DISABLE_FILE_LOG=1 python -m unittest discover -v
 - 代码：`/opt/qqbot`，由 root 管理，运行用户只读。
 - 配置：`/var/lib/qqbot/config.json`，权限 `0600`。
 - 运行数据：`/opt/qqbot/data`，仅 `qqbot` 用户可写。
-- 日志：`/var/log/qqbot`。
+- 临时文件：`/opt/qqbot/data/tmp`，不写入代码目录。
+- 日志：`/var/log/qqbot`，应用日志轮转并限制为 `0600`。
+- journald：最多使用 `256 MB`，保留 `14` 天。
 - PID：`/run/qqbot/bot.pid`。
 - 密钥：`/etc/qqbot.env`，不进入 Git 或 JSON 配置。
 

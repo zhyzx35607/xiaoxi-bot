@@ -62,6 +62,9 @@ class ContentConfigMigrationTests(unittest.TestCase):
         self.assertFalse(config["voice_reply"]["enabled"])
         self.assertEqual(config["acg_images"]["send_count"], 20)
         self.assertEqual(config["acg_images"]["dedupe_days"], 7)
+        self.assertEqual(config["acg_images"]["max_delivery_attempts"], 3)
+        self.assertEqual(config["acg_images"]["retry_base_seconds"], 300)
+        self.assertEqual(config["acg_images"]["delivery_ttl_seconds"], 7200)
         self.assertEqual(len(config["acg_images"]["windows"]), 4)
         self.assertEqual(config["hotboard_push"]["detail_count"], 10)
         self.assertEqual(len(config["hotboard_push"]["windows"]), 2)
@@ -164,6 +167,111 @@ class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(state["pool"], ["https://example.com/a.jpg"])
         self.assertEqual(len(sent), 0)
 
+    async def test_acg_delivery_stops_after_max_attempts(self):
+        sent = []
+        notices = []
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append(group_id)
+                return {"status": "failed", "retcode": 1200}
+
+            async def send_private_msg(self, user_id, message):
+                notices.append((user_id, message))
+                return {"status": "ok"}
+
+        class Stub:
+            config = {
+                "bot_owner": 9,
+                "bot_qq": 1,
+                "acg_images": {
+                    "enabled": True,
+                    "max_delivery_attempts": 3,
+                    "retry_base_seconds": 30,
+                    "retry_max_seconds": 60,
+                    "delivery_ttl_seconds": 7200,
+                },
+                "groups": {"100": {"enabled": True, "features": {"acg_images": True}}},
+            }
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch.object(scheduler.asyncio, "sleep", new=AsyncMock()):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "test-batch",
+                    "urls": ["https://example.com/a.jpg"],
+                    "remaining_groups": ["100"],
+                    "attempts": {},
+                    "created_at": time.time(),
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                for _ in range(3):
+                    await scheduler._try_send_acg_delivery(Stub())
+                    state = scheduler._load_acg_state()
+                    if state.get("delivery"):
+                        state["delivery"]["next_retry_at"] = 0
+                        scheduler._save_acg_state(state)
+                state = scheduler._load_acg_state()
+
+        self.assertEqual(sent, [100, 100, 100])
+        self.assertIsNone(state["delivery"])
+        self.assertFalse(state["pending_due"])
+        self.assertEqual(state["last_failure"]["reason"], "attempts_exhausted")
+        self.assertEqual(state["last_failure"]["attempts"], {"100": 3})
+        self.assertEqual(len(notices), 1)
+
+    async def test_acg_delivery_expires_without_sending(self):
+        sent = []
+        notices = []
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append(group_id)
+                return {"status": "ok"}
+
+            async def send_private_msg(self, user_id, message):
+                notices.append((user_id, message))
+                return {"status": "ok"}
+
+        class Stub:
+            config = {
+                "bot_owner": 9,
+                "acg_images": {"enabled": True, "delivery_ttl_seconds": 300},
+            }
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "expired-batch",
+                    "urls": ["https://example.com/a.jpg"],
+                    "remaining_groups": ["100"],
+                    "attempts": {},
+                    "created_at": time.time() - 301,
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                await scheduler._try_send_acg_delivery(Stub())
+                state = scheduler._load_acg_state()
+
+        self.assertEqual(sent, [])
+        self.assertIsNone(state["delivery"])
+        self.assertFalse(state["pending_due"])
+        self.assertEqual(state["last_failure"]["reason"], "delivery_expired")
+        self.assertEqual(len(notices), 1)
+
     async def test_checkin_skips_when_onebot_offline(self):
         class Client:
             is_connected = False
@@ -235,4 +343,8 @@ class ImportAndDeploymentTests(unittest.TestCase):
         self.assertIn("QQBOT_CONFIG_PATH=/var/lib/qqbot/config.json", service)
         self.assertIn("QQBOT_PID_FILE=/run/qqbot/bot.pid", service)
         installer = (Path(__file__).parents[2] / "deploy" / "install-qqbot-service.sh").read_text(encoding="utf-8")
-        self.assertIn('git -C "${project_root}" ls-files -z', installer)
+        self.assertIn('status --porcelain --untracked-files=all', installer)
+        self.assertIn('find "${project_root}" -xdev', installer)
+        self.assertIn('-path "${project_root}/data/*"', installer)
+        self.assertIn('chown root:root "${file}"', installer)
+        self.assertIn("QQBOT_SKIP_RESTART", installer)

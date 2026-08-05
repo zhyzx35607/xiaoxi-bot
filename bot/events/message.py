@@ -135,8 +135,10 @@ class GroupMessageMixin:
         if not _event_scope_allowed(self, event):
             return
 
-        # Agent observes permitted events while the primary router is disabled.
-        if not self.agent_runtime.primary_router_enabled(event):
+        # Passive observation is opt-in because it persists message text.
+        agent_settings = self.config.get("agent", {})
+        if (agent_settings.get("observation_enabled", False)
+                and not self.agent_runtime.primary_router_enabled(event)):
             try:
                 self.agent_runtime.observe(event)
             except Exception:

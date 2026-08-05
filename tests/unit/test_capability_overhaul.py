@@ -1,6 +1,8 @@
 """Regression tests for the capability and identity overhaul."""
 
 import asyncio
+import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -167,11 +169,13 @@ class UApiEnhancementTests(unittest.TestCase):
         from bot.integrations import uapi
         self.assertEqual(uapi._retry_after_seconds({"Retry-After": "3"}, 0), 3)
         uapi.reset_state_for_test()
-        with patch.object(uapi, "_STATE_PATH", "NUL"):
-            uapi._record_response({}, "/saying", "user", 200, {
-                "X-RateLimit-Limit": "100", "X-RateLimit-Remaining": "88",
-                "X-RateLimit-Reset": "123", "Uapi-Credits-Charged": "0",
-            })
-            status = uapi.credits_remaining({})
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = os.path.join(directory, "uapi-state.json")
+            with patch.object(uapi, "_STATE_PATH", state_path):
+                uapi._record_response({}, "/saying", "user", 200, {
+                    "X-RateLimit-Limit": "100", "X-RateLimit-Remaining": "88",
+                    "X-RateLimit-Reset": "123", "Uapi-Credits-Charged": "0",
+                })
+                status = uapi.credits_remaining({})
         self.assertEqual(status["rate_limit"], 100)
         self.assertEqual(status["rate_remaining"], 88)
