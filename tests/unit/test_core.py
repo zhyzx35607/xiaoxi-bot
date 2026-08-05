@@ -1890,6 +1890,69 @@ class HotboardDigestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["details"], ["detail"])
         self.assertEqual(result["items"][0]["evidence"], "verified details")
 
+    def test_fallback_digest_summarizes_search_evidence(self):
+        from bot.services import hotboard_digest
+
+        title = "笔试第一称被第二名花钱劝弃考"
+        duplicate = (
+            "广东一事业单位笔试第一考生被第二名花钱劝弃考："
+            "1 天前 · 广东陈女士称面试前收到劝弃考传话，教育局已开展核查。"
+        )
+        items = [{
+            "title": title,
+            "evidence": duplicate + "\n" + duplicate,
+            "hot_value": "1481781",
+        }]
+        overview, details = hotboard_digest._fallback_digest("微博", items)
+
+        self.assertIn("教育考试", overview)
+        self.assertIn("热度靠前", overview)
+        self.assertEqual(details[0].count("教育局已开展核查"), 1)
+        self.assertNotIn("1 天前", details[0])
+        self.assertNotIn(title + "：", details[0])
+        self.assertLessEqual(len(details[0]), 170)
+
+    def test_stale_search_result_is_rejected(self):
+        from bot.services import hotboard_digest
+
+        now = datetime(2026, 8, 5)
+        self.assertTrue(hotboard_digest._search_result_is_stale({
+            "title": "旧报道", "snippet": "2024年11月21日 · 旧案件回顾",
+        }, now=now))
+        self.assertFalse(hotboard_digest._search_result_is_stale({
+            "title": "最新进展", "snippet": "2026年7月31日 · 相关部门回应",
+        }, now=now))
+
+    async def test_partial_ai_digest_keeps_valid_items_and_fills_fallback(self):
+        from bot.services import hotboard_digest
+
+        class Client:
+            session = object()
+
+        class Stub:
+            config = {}
+            client = Client()
+
+        enriched = [
+            {"title": "热点一", "hot_value": "1", "url": "https://example.com/1",
+             "evidence": "部门已经发布正式回应。", "sources": ["https://example.com/1"]},
+            {"title": "热点二", "hot_value": "2", "url": "https://example.com/2",
+             "evidence": "相关调整将于本周正式执行。", "sources": ["https://example.com/2"]},
+        ]
+        response = "概括如下：\n```json\n" + json.dumps({
+            "overview": "今天主要是两项公共事务的新进展。",
+            "items": [{"index": 1, "summary": "第一项已有部门正式回应。"}],
+        }, ensure_ascii=False) + "\n```"
+        with patch.object(hotboard_digest, "enrich_hotboard_items",
+                          new=AsyncMock(return_value=enriched)), \
+                patch("bot.ai._call_deepseek", new=AsyncMock(return_value=response)):
+            result = await hotboard_digest.build_hotboard_digest(
+                Stub(), "weibo", "微博", enriched)
+
+        self.assertEqual(result["summary"], "今天主要是两项公共事务的新进展。")
+        self.assertEqual(result["details"][0], "第一项已有部门正式回应。")
+        self.assertIn("本周正式执行", result["details"][1])
+
 
 class AcgPushTests(unittest.IsolatedAsyncioTestCase):
     def _stub(self, client):
