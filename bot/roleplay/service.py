@@ -23,6 +23,14 @@ DEFAULT_MODE_POLICIES = {
     "owner_story": "使用主人私聊的自定义叙事风格；具体策略从未跟踪的运行时策略文件加载。",
 }
 
+STORY_QUALITY_POLICY = """【连续叙事质量规则】
+这是虚构的成年人角色扮演。以角色卡、Persona、世界信息、场景状态和已发生剧情为准。
+- 保持角色性格、视角、称谓、关系阶段、空间位置、服装与动作连续，不临时重置设定。
+- 每一回合推进一个清晰剧情节拍，综合使用动作、对话、心理、环境和感官反馈，不用摘要代替场景。
+- 亲密情节同样保持人物动机、双方沟通和持续意愿，不自行加入角色卡没有给出的年龄、亲缘、胁迫或伤害属性。
+- 避免重复上一回合、空泛抒情、同义句堆叠和突然跳时；结尾留下自然、可继续回应的落点。
+- 使用连贯自然段，不受普通 QQ 群聊的短句、潜水和表情标记格式约束；不脱离角色解释写作规则。"""
+
 
 class RoleplayService:
     def __init__(self, config: dict[str, Any], root: str | Path, session=None):
@@ -447,6 +455,8 @@ class RoleplayService:
         world_entries = self.store.matching_world_entries(active["id"], user_text, 8)
         rag = await self.lightrag.query(f"角色 {character['name']}；当前消息：{user_text}")
         parts = [BASE_ROLEPLAY_POLICY, "【当前文本模式】\n" + self.mode_policies.get(mode, self.mode_policies["normal"])]
+        if mode == "owner_story":
+            parts.append(STORY_QUALITY_POLICY)
         for label, value in [
             ("角色名称", data.get("name")), ("角色描述", data.get("description")),
             ("角色性格", data.get("personality")), ("当前场景", data.get("scenario")),

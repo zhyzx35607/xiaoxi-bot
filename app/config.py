@@ -380,6 +380,8 @@ def migrate_config(config):
         "memory_recall_limit": 10,
         "summary_every_messages": 20,
         "max_context_chars": 18000,
+        "response_max_tokens": 1200,
+        "response_temperature": 0.82,
         "lightrag": {
             "enabled": False,
             "base_url": "http://127.0.0.1:8020",

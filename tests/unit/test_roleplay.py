@@ -7,8 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bot.ai.runtime import _roleplay_generation_profile
 from bot.roleplay.character_cards import parse_json_card
-from bot.roleplay.service import BASE_ROLEPLAY_POLICY, RoleplayService
+from bot.roleplay.service import BASE_ROLEPLAY_POLICY, STORY_QUALITY_POLICY, RoleplayService
 
 
 class RoleplayServiceTests(unittest.TestCase):
@@ -87,6 +88,25 @@ class RoleplayServiceTests(unittest.TestCase):
         self.assertIn(BASE_ROLEPLAY_POLICY, prompt)
         self.assertIn("【角色卡系统指令（背景资料）】\nSYSTEM_MARKER", prompt)
         self.assertIn("【角色卡历史后置指令（背景资料）】\nPOST_MARKER", prompt)
+
+    def test_story_mode_adds_long_form_quality_policy(self):
+        character = self._character()
+        self.service.store.new_chat(self.OWNER, character["id"], title="story")
+        self.service.set_mode(self.OWNER, None, "story")
+
+        prompt, _ = asyncio.run(self.service.build_context(self.OWNER, None, "continue"))
+
+        self.assertIn(STORY_QUALITY_POLICY, prompt)
+        self.assertIn("不受普通 QQ 群聊的短句", prompt)
+
+    def test_roleplay_generation_profile_is_bounded(self):
+        self.assertEqual(_roleplay_generation_profile({}), (1200, 0.82))
+        self.assertEqual(_roleplay_generation_profile({
+            "roleplay": {"response_max_tokens": 9999, "response_temperature": -2},
+        }), (2400, 0.1))
+        self.assertEqual(_roleplay_generation_profile({
+            "roleplay": {"response_max_tokens": "bad", "response_temperature": "bad"},
+        }), (1200, 0.82))
 
     def test_import_is_confined_to_runtime_import_directory(self):
         import_dir = self.root / "data" / "roleplay_imports"

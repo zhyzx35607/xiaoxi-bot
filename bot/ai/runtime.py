@@ -153,6 +153,19 @@ async def deepseek_chat(dispatcher, prompt, system_prompt=None):
         reply = _post_process_reply(reply)
     return reply or "...脑子卡了 等会再说"
 # ========== MAIN AI CHAT ==========
+def _roleplay_generation_profile(config):
+    settings = config.get("roleplay", {})
+    try:
+        temperature = float(settings.get("response_temperature", 0.82))
+    except (TypeError, ValueError):
+        temperature = 0.82
+    try:
+        max_tokens = int(settings.get("response_max_tokens", 1200))
+    except (TypeError, ValueError):
+        max_tokens = 1200
+    return max(300, min(2400, max_tokens)), max(0.1, min(1.5, temperature))
+
+
 async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name,
                           image_context="", web_search_query="", chat_context="",
                           message_id=0, rate_warning="", web_search_results=None,
@@ -289,10 +302,19 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             "• 有人发长文吐槽/分享 → 如果跟你有关可以回应\n"
             "• 如果实在不确定，就不回——群友不是客服，不需要每条都回。"
         )
-    # Tiered tools for native function calling: explicit scenes (interaction_allowed)
-    # get all three tiers; interjection scenes get the read tier only.
+    roleplay = getattr(dispatcher, "roleplay", None)
+    roleplay_prompt = ""
+    if roleplay is not None:
+        try:
+            roleplay_prompt, roleplay_history = await roleplay.build_context(
+                user_id, group_id, raw_message or "")
+            roleplay_active = bool(roleplay_prompt)
+        except Exception as error:
+            log.warning("Roleplay context degraded: %s", error)
+
+    # Active fiction stays in the roleplay subsystem and never invokes external tools.
     from ai_tools import build_tool_schemas
-    tools = build_tool_schemas(
+    tools = [] if roleplay_active else build_tool_schemas(
         explicit=interaction_allowed, actor_level=caller_level,
         group_id=group_id or 0, dispatcher=dispatcher,
         bot_role=bot_role_display,
@@ -308,19 +330,11 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         user_mem_ctx=user_mem_ctx,
         tool_ctx=TOOL_USAGE_RULES if tools else "",
     )
-    roleplay = getattr(dispatcher, "roleplay", None)
-    if roleplay is not None:
-        try:
-            roleplay_prompt, roleplay_history = await roleplay.build_context(
-                user_id, group_id, raw_message or "")
-            if roleplay_prompt:
-                roleplay_active = True
-                system_prompt += "\n\n" + roleplay_prompt
-        except Exception as error:
-            log.warning("Roleplay context degraded: %s", error)
+    if roleplay_prompt:
+        system_prompt += "\n\n" + roleplay_prompt
     
     # === Private chat: detailed behavior rules for AI to follow ===
-    if not group_id:
+    if not group_id and not roleplay_active:
         system_prompt += (
                     '\n\n【私聊】\n'
         '现在是在QQ上跟人私聊，对方是你认识的朋友。\n'
@@ -333,13 +347,13 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         )
     if chat_hint:
         system_prompt += "\n\n" + chat_hint
-    if reply_intent:
+    if reply_intent and not roleplay_active:
         system_prompt += (
             "\n\n【这次说话的意图】\n"
             f"{reply_intent}。按这个意图自然说一句，像群友接话，不要解释自己为什么接话。"
         )
     # Sticker inventory: let AI know what stickers are available
-    sticker_inv = _build_sticker_inventory(
+    sticker_inv = "" if roleplay_active else _build_sticker_inventory(
         group_id=group_id, user_id=user_id, is_private=(not group_id))
     if sticker_inv:
         system_prompt += "\n\n" + sticker_inv
@@ -349,7 +363,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             "\n【对话状态】这是你在本群连续回的第{}条消息了。"
             "聊得差不多了可以自然收尾（比如\"先溜了\"\"潜了\"之类），真人不会一直聊。"
         ).format(consecutive_replies + 1)
-    elif not group_id and consecutive_replies >= 3:
+    elif not group_id and not roleplay_active and consecutive_replies >= 3:
         system_prompt += (
             "\n【对话状态】你们已经聊了{}轮了。想继续聊就聊，想收尾就自然结束，不用硬撑。"
         ).format(consecutive_replies + 1)
@@ -387,10 +401,12 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     if clean_msg is not None:
         messages.append({"role": "user", "content": f"{sender_name}: {clean_msg}"})
     temperature = 0.65
-        # Fixed token budget: resource boundary, not behavior control
+    # Token budget is a resource boundary; story mode has a separate bounded profile.
     is_question = bool(clean_msg) and ("?" in str(clean_msg) or "？" in str(clean_msg) or
                     any(w in str(clean_msg) for w in ("怎么", "为什么", "如何", "啥", "什么")))
-    if group_id:
+    if roleplay_active:
+        dyn_max_tokens, temperature = _roleplay_generation_profile(config)
+    elif group_id:
         dyn_max_tokens = 450 if is_question else 400
     else:
         dyn_max_tokens = 500
@@ -626,7 +642,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             dispatcher.append_to_buffer(group_id, bot_qq, bot_card + ": " + clean_reply_for_buffer, bot_card)
         except Exception as e:
             log.debug("Failed to append bot reply to buffer: %s", e)
-    else:
+    elif not roleplay_active:
         # === Private chat memory (deeper: 30 entries + LLM long-term compression) ===
         user_mem = _load_user_memory(0, user_id)
         for info in learned:
