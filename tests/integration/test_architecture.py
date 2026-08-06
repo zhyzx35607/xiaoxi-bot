@@ -92,6 +92,11 @@ class ArchitectureRegressionTests(unittest.TestCase):
             with open(os.path.join(ROOT, *relative_path.split("/")), encoding="utf-8") as handle:
                 source = handle.read()
             self.assertNotRegex(source, r"(?:onebot11|napcat)_\d{5,12}\.json")
+        with open(os.path.join(ROOT, "deploy", "napcat-login-watchdog.service"), encoding="utf-8") as handle:
+            watchdog_service = handle.read()
+        self.assertIn("WorkingDirectory=/opt/qqbot", watchdog_service)
+        self.assertIn("PYTHONPATH=/opt/qqbot", watchdog_service)
+        self.assertIn("/opt/qqbot/deploy/napcat-login-watchdog.py", watchdog_service)
     def test_no_dependency_was_added_for_refactor(self):
         with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as handle:
             requirements = {line.strip() for line in handle if line.strip()}

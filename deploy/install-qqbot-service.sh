@@ -69,7 +69,6 @@ install -d -m 0755 /etc/systemd/journald.conf.d
 install -m 0644 "${project_root}/deploy/qqbot-journald.conf" /etc/systemd/journald.conf.d/30-qqbot.conf
 systemctl restart systemd-journald.service
 install -m 0644 "${service_source}" /etc/systemd/system/qqbot.service
-install -m 0755 "${project_root}/deploy/napcat-login-watchdog.py" /usr/local/sbin/napcat-login-watchdog.py
 install -m 0644 "${project_root}/deploy/napcat-login-watchdog.service" /etc/systemd/system/napcat-login-watchdog.service
 install -m 0644 "${project_root}/deploy/napcat-login-watchdog.timer" /etc/systemd/system/napcat-login-watchdog.timer
 install -m 0644 "${project_root}/deploy/qqbot-backup-prune.service" /etc/systemd/system/qqbot-backup-prune.service
