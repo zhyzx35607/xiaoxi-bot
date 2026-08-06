@@ -73,6 +73,16 @@ class ContentConfigMigrationTests(unittest.TestCase):
         self.assertNotIn("batch_size", config["acg_images"])
         self.assertNotIn("times", config["hotboard_push"])
 
+    def test_roleplay_story_generation_migrates_to_bounded_defaults(self):
+        config, migrated = migrate_config({
+            "roleplay": {"story_unbounded_tokens": True},
+        })
+
+        self.assertTrue(migrated)
+        self.assertNotIn("story_unbounded_tokens", config["roleplay"])
+        self.assertEqual(config["roleplay"]["story_response_max_tokens"], 2000)
+        self.assertEqual(config["roleplay"]["max_history_chars"], 12000)
+
 
 class NapCatWatchdogTests(unittest.TestCase):
     def test_prefers_bot_websocket_port(self):
@@ -437,4 +447,6 @@ class ImportAndDeploymentTests(unittest.TestCase):
         self.assertIn('find "${project_root}" -xdev', installer)
         self.assertIn('-path "${project_root}/data/*"', installer)
         self.assertIn('chown root:root "${file}"', installer)
+        self.assertIn("-perm /022", installer)
+        self.assertIn("refusing unsafe project permissions", installer)
         self.assertIn("QQBOT_SKIP_RESTART", installer)

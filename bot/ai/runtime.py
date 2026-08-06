@@ -159,14 +159,65 @@ def _roleplay_generation_profile(config, *, story_mode=False):
         temperature = float(settings.get("response_temperature", 0.82))
     except (TypeError, ValueError):
         temperature = 0.82
-    max_tokens = None
-    if not (story_mode and settings.get("story_unbounded_tokens", True)):
-        try:
-            max_tokens = int(settings.get("response_max_tokens", 1200))
-        except (TypeError, ValueError):
-            max_tokens = 1200
-        max_tokens = max(300, min(2400, max_tokens))
+    setting_name = "story_response_max_tokens" if story_mode else "response_max_tokens"
+    default_tokens = 2000 if story_mode else 1200
+    try:
+        max_tokens = int(settings.get(setting_name, default_tokens))
+    except (TypeError, ValueError):
+        max_tokens = default_tokens
+    minimum = 600 if story_mode else 300
+    max_tokens = max(minimum, min(2400, max_tokens))
     return max_tokens, max(0.1, min(1.5, temperature))
+
+
+def _post_process_roleplay_reply(reply):
+    """Clean protocol noise without rewriting narrative prose."""
+    if not reply:
+        return ""
+    reply = reply.replace("```", "")
+    while "\n\n\n" in reply:
+        reply = reply.replace("\n\n\n", "\n\n")
+    return reply.strip()
+
+
+def _split_roleplay_reply(text, max_chars=900, max_parts=10):
+    """Split long narrative text at paragraph or sentence boundaries."""
+    text = (text or "").replace("\r\n", "\n").strip()
+    if not text:
+        return []
+    try:
+        max_chars = int(max_chars)
+    except (TypeError, ValueError):
+        max_chars = 900
+    try:
+        max_parts = int(max_parts)
+    except (TypeError, ValueError):
+        max_parts = 10
+    max_chars = max(200, min(2000, max_chars))
+    max_parts = max(1, min(20, max_parts))
+    parts = []
+    remaining = text
+    boundaries = ("\n\n", "\n", "。", "！", "？", "!", "?", "；", ";")
+    while remaining:
+        if len(parts) == max_parts - 1 and len(remaining) > max_chars:
+            suffix = "…（本轮内容过长，已截断）"
+            available = max(1, max_chars - len(suffix))
+            parts.append(remaining[:available].rstrip() + suffix)
+            break
+        if len(remaining) <= max_chars:
+            parts.append(remaining.strip())
+            break
+        window = remaining[:max_chars + 1]
+        split_at = 0
+        for marker in boundaries:
+            position = window.rfind(marker)
+            if position >= max_chars // 2:
+                split_at = max(split_at, position + len(marker))
+        if not split_at:
+            split_at = max_chars
+        parts.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    return [part for part in parts if part]
 
 
 async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name,
@@ -313,7 +364,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             roleplay_prompt, roleplay_history = await roleplay.build_context(
                 user_id, group_id, raw_message or "")
             roleplay_active = bool(roleplay_prompt)
-            roleplay_story_mode = roleplay_active and roleplay.is_story_mode(
+            roleplay_story_mode = roleplay_active and await roleplay.is_story_mode_async(
                 user_id, group_id)
         except Exception as error:
             log.warning("Roleplay context degraded: %s", error)
@@ -485,7 +536,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                     await dispatcher.client.send_private_msg(user_id,
                         "警告：请勿发布违规内容。")
             return False
-    reply = _post_process_reply(reply)
+    reply = (_post_process_roleplay_reply(reply) if roleplay_active
+             else _post_process_reply(reply))
     # === AI chose not to reply: [SKIP] signal ===
     if reply and reply.strip().upper().startswith("[SKIP]"):
         if is_owner_tier:
@@ -594,11 +646,22 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             log.error("Reply send error: %s", e, exc_info=True)
             await dispatcher.client.send_group_msg(group_id, reply)
     else:
-        clean_reply, _, _ = _parse_reply_actions(reply, {})
-        if not clean_reply:
+        if roleplay_active:
             clean_reply = reply
+        else:
+            clean_reply, _, _ = _parse_reply_actions(reply, {})
+            if not clean_reply:
+                clean_reply = reply
         await asyncio.sleep(_typing_delay_secs(clean_reply))
-        segments = _split_reply_lines(clean_reply) or [clean_reply]
+        if roleplay_active:
+            roleplay_settings = config.get("roleplay", {})
+            segments = _split_roleplay_reply(
+                clean_reply,
+                roleplay_settings.get("message_chunk_chars", 900),
+                roleplay_settings.get("max_message_segments", 10),
+            ) or [clean_reply]
+        else:
+            segments = _split_reply_lines(clean_reply) or [clean_reply]
         try:
             for i, seg_text in enumerate(segments):
                 seg_text = seg_text.strip()
@@ -616,7 +679,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             await dispatcher.client.send_private_msg(user_id, clean_reply or reply)
     if roleplay_active:
         try:
-            dispatcher.roleplay.record_exchange(
+            await dispatcher.roleplay.record_exchange(
                 user_id, group_id, original_clean_msg or raw_message, clean_reply if clean_reply else reply)
         except Exception as error:
             log.warning("Roleplay exchange persistence degraded: %s", error)

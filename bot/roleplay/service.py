@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -79,6 +80,9 @@ class RoleplayService:
             return False
         mode, _ = self.store.get_mode(user_id)
         return mode == "owner_story"
+
+    async def is_story_mode_async(self, user_id: int, group_id: int | None) -> bool:
+        return await asyncio.to_thread(self.is_story_mode, user_id, group_id)
 
     def _require_owner_private(self, user_id: int, group_id: int | None) -> None:
         if not self.is_owner_private(user_id, group_id):
@@ -425,7 +429,11 @@ class RoleplayService:
                     if not any(item["content"] == content for item in existing):
                         self.store.add_memory(chat_id, memory_type, content, keywords=content, confidence=0.8, source_message_id=message_id)
 
-    def record_exchange(self, user_id: int, group_id: int | None, user_text: str, assistant_text: str) -> None:
+    async def record_exchange(self, user_id: int, group_id: int | None, user_text: str, assistant_text: str) -> None:
+        await asyncio.to_thread(
+            self._record_exchange_sync, user_id, group_id, user_text, assistant_text)
+
+    def _record_exchange_sync(self, user_id: int, group_id: int | None, user_text: str, assistant_text: str) -> None:
         if not self.is_owner_private(user_id, group_id):
             return
         active = self.store.active_chat(user_id)
@@ -441,24 +449,85 @@ class RoleplayService:
             recent = self.store.recent_messages(active["id"], interval)
             summary = "；".join(f"{'主人' if m['role']=='user' else active['character_name']}：{m['content'][:160]}" for m in recent)
             self.store.save_summary(active["id"], summary[:6000], recent[-1]["id"] if recent else 0)
+        cleanup_interval = max(20, int(self.settings.get("retention_cleanup_every_messages", 100)))
+        if count >= cleanup_interval and count % cleanup_interval < 2:
+            self.store.prune_retention(
+                active["id"],
+                max_messages=max(100, int(self.settings.get("max_messages_per_chat", 5000))),
+                max_story_beats=max(20, int(self.settings.get("max_story_beats_per_chat", 1000))),
+                max_summaries=max(2, int(self.settings.get("max_summaries_per_chat", 50))),
+                audit_retention_days=max(1, int(self.settings.get("audit_retention_days", 90))),
+            )
         self.store.audit(user_id, "exchange", {"request_hash": self._hash(user_text), "response_hash": self._hash(assistant_text)}, active["id"])
+
+    @staticmethod
+    def _trim_history_content(content: str, limit: int) -> str:
+        content = str(content or "")
+        if len(content) <= limit:
+            return content
+        marker = "\n…\n"
+        if limit <= len(marker) + 2:
+            return content[:limit]
+        head = max(1, (limit - len(marker)) // 2)
+        tail = max(1, limit - len(marker) - head)
+        return content[:head] + marker + content[-tail:]
+
+    def _load_context_snapshot(self, user_id: int, user_text: str) -> dict[str, Any] | None:
+        active = self.store.active_chat(user_id)
+        if not active:
+            return None
+        character = self.store.get_character(active["character_id"])
+        if not character:
+            return None
+        history_limit = max(1, min(100, int(self.settings.get("recent_message_limit", 20))))
+        return {
+            "active": active,
+            "character": character,
+            "mode": self.store.get_mode(user_id)[0],
+            "summary": self.store.latest_summary(active["id"]),
+            "scene": self.store.get_scene_state(active["id"]),
+            "beats": self.store.recent_story_beats(active["id"], 8),
+            "memories": self.store.search_memories(
+                active["id"], user_text,
+                int(self.settings.get("memory_recall_limit", 10))),
+            "world_entries": self.store.matching_world_entries(active["id"], user_text, 8),
+            "history": self.store.recent_messages(active["id"], history_limit),
+        }
+
+    def _bounded_history(self, rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+        total_limit = max(1000, int(self.settings.get("max_history_chars", 12000)))
+        message_limit = max(200, int(self.settings.get("max_history_message_chars", 4000)))
+        selected = []
+        used = 0
+        for item in reversed(rows):
+            if item.get("role") not in {"user", "assistant"}:
+                continue
+            content = self._trim_history_content(item.get("content", ""), message_limit)
+            remaining = total_limit - used
+            if remaining <= 0:
+                break
+            if len(content) > remaining:
+                content = self._trim_history_content(content, remaining)
+            if content:
+                selected.append({"role": item["role"], "content": content})
+                used += len(content)
+        return list(reversed(selected))
 
     async def build_context(self, user_id: int, group_id: int | None, user_text: str) -> tuple[str, list[dict[str, str]]]:
         if not self.is_owner_private(user_id, group_id):
             return "", []
-        active = self.store.active_chat(user_id)
-        if not active:
+        snapshot = await asyncio.to_thread(self._load_context_snapshot, user_id, user_text)
+        if not snapshot:
             return "", []
-        character = self.store.get_character(active["character_id"])
-        if not character:
-            return "", []
+        active = snapshot["active"]
+        character = snapshot["character"]
         data = character["data"]
-        mode, _ = self.store.get_mode(user_id)
-        summary = self.store.latest_summary(active["id"])
-        scene = self.store.get_scene_state(active["id"])
-        beats = self.store.recent_story_beats(active["id"], 8)
-        memories = self.store.search_memories(active["id"], user_text, int(self.settings.get("memory_recall_limit", 10)))
-        world_entries = self.store.matching_world_entries(active["id"], user_text, 8)
+        mode = snapshot["mode"]
+        summary = snapshot["summary"]
+        scene = snapshot["scene"]
+        beats = snapshot["beats"]
+        memories = snapshot["memories"]
+        world_entries = snapshot["world_entries"]
         rag = await self.lightrag.query(f"角色 {character['name']}；当前消息：{user_text}")
         parts = [BASE_ROLEPLAY_POLICY, "【当前文本模式】\n" + self.mode_policies.get(mode, self.mode_policies["normal"])]
         if mode == "owner_story":
@@ -493,5 +562,5 @@ class RoleplayService:
             parts.append("【知识库检索资料】\n" + rag)
         max_chars = int(self.settings.get("max_context_chars", 18000))
         prompt = "\n\n".join(parts)[:max_chars]
-        history = [{"role": item["role"], "content": item["content"]} for item in self.store.recent_messages(active["id"], int(self.settings.get("recent_message_limit", 20))) if item["role"] in {"user", "assistant"}]
+        history = self._bounded_history(snapshot["history"])
         return prompt, history

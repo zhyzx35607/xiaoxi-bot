@@ -15,8 +15,9 @@ sudo systemctl status qqbot.service napcat.service
 sudo systemctl restart qqbot.service
 
 # View logs
-tail -f /opt/qqbot/bot.log
-tail -f /opt/qqbot/chat.log
+sudo journalctl -u qqbot.service -f
+sudo tail -f /var/log/qqbot/bot.log
+sudo tail -f /var/log/qqbot/chat.log
 
 # Run manually (stop service first; MUST load env or NapCat kicks the WS for missing token)
 sudo systemctl stop qqbot.service && cd /opt/qqbot && set -a && source /etc/qqbot.env && set +a && ./venv/bin/python main.py

@@ -4,10 +4,17 @@ import asyncio
 import gc
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
-from bot.ai.runtime import _roleplay_generation_profile
+from bot.ai import runtime
+from bot.ai.runtime import (
+    _post_process_roleplay_reply,
+    _roleplay_generation_profile,
+    _split_roleplay_reply,
+)
 from bot.ai import providers
 from bot.roleplay.character_cards import parse_json_card
 from bot.roleplay.service import BASE_ROLEPLAY_POLICY, STORY_QUALITY_POLICY, RoleplayService
@@ -104,17 +111,93 @@ class RoleplayServiceTests(unittest.TestCase):
         self.assertEqual(_roleplay_generation_profile({}), (1200, 0.82))
         self.assertEqual(
             _roleplay_generation_profile({}, story_mode=True),
-            (None, 0.82),
+            (2000, 0.82),
         )
         self.assertEqual(_roleplay_generation_profile({
-            "roleplay": {"story_unbounded_tokens": False},
-        }, story_mode=True), (1200, 0.82))
+            "roleplay": {"story_response_max_tokens": 1600},
+        }, story_mode=True), (1600, 0.82))
         self.assertEqual(_roleplay_generation_profile({
             "roleplay": {"response_max_tokens": 9999, "response_temperature": -2},
         }), (2400, 0.1))
         self.assertEqual(_roleplay_generation_profile({
             "roleplay": {"response_max_tokens": "bad", "response_temperature": "bad"},
         }), (1200, 0.82))
+
+    def test_roleplay_reply_preserves_narrative_and_splits_by_sentence(self):
+        reply = "（她轻轻点头）" + "第一段。" * 180 + "\n\n" + "第二段继续。" * 80
+        cleaned = _post_process_roleplay_reply(reply)
+        parts = _split_roleplay_reply(cleaned, max_chars=500, max_parts=10)
+
+        self.assertIn("（她轻轻点头）", cleaned)
+        self.assertGreater(len(cleaned), 500)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= 500 for part in parts))
+        self.assertNotIn("已截断", "".join(parts))
+
+    def test_context_history_has_total_and_per_message_budget(self):
+        self.service.settings.update({
+            "recent_message_limit": 20,
+            "max_history_chars": 1000,
+            "max_history_message_chars": 400,
+        })
+        character = self._character()
+        chat = self.service.store.new_chat(self.OWNER, character["id"], title="budget")
+        for index in range(6):
+            self.service.store.add_message(chat["id"], "user", f"message-{index}-" + "甲" * 600)
+
+        _, history = asyncio.run(self.service.build_context(self.OWNER, None, "continue"))
+
+        self.assertLessEqual(sum(len(item["content"]) for item in history), 1000)
+        self.assertTrue(all(len(item["content"]) <= 400 for item in history))
+        self.assertIn("message-5-", history[-1]["content"])
+        indexes = [int(item["content"].split("message-", 1)[1].split("-", 1)[0]) for item in history]
+        self.assertEqual(indexes, sorted(indexes))
+
+    def test_record_exchange_runs_off_loop_and_persists(self):
+        character = self._character()
+        chat = self.service.store.new_chat(self.OWNER, character["id"], title="async")
+        calls = []
+
+        async def inline_to_thread(function, *args, **kwargs):
+            calls.append(function.__name__)
+            return function(*args, **kwargs)
+
+        with patch("bot.roleplay.service.asyncio.to_thread", side_effect=inline_to_thread):
+            asyncio.run(self.service.record_exchange(self.OWNER, None, "hello", "world"))
+
+        self.assertEqual(calls, ["_record_exchange_sync"])
+        rows = self.service.store.recent_messages(chat["id"], 10)
+        self.assertEqual([(row["role"], row["content"]) for row in rows], [
+            ("user", "hello"), ("assistant", "world"),
+        ])
+
+    def test_storage_retention_keeps_newest_rows(self):
+        character = self._character()
+        chat = self.service.store.new_chat(self.OWNER, character["id"], title="retention")
+        for index in range(8):
+            self.service.store.add_message(chat["id"], "user", str(index))
+            self.service.store.add_story_beat(chat["id"], str(index))
+            self.service.store.save_summary(chat["id"], str(index), index)
+        self.service.store.audit(self.OWNER, "old", {}, chat["id"])
+        with self.service.store._connect() as connection:
+            connection.execute(
+                "UPDATE audit_events SET created_at=? WHERE event_type='old'",
+                (int(time.time()) - 10 * 86400,),
+            )
+
+        self.service.store.prune_retention(
+            chat["id"], max_messages=3, max_story_beats=4,
+            max_summaries=2, audit_retention_days=5)
+
+        self.assertEqual([row["content"] for row in self.service.store.recent_messages(chat["id"], 20)], ["5", "6", "7"])
+        self.assertEqual(len(self.service.store.recent_story_beats(chat["id"], 20)), 4)
+        with self.service.store._connect() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM chat_summaries WHERE chat_id=?", (chat["id"],)
+            ).fetchone()[0], 2)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE event_type='old'"
+            ).fetchone()[0], 0)
 
     def test_story_mode_is_distinct_from_normal_roleplay(self):
         character = self._character()
@@ -154,8 +237,61 @@ class RoleplayReleaseMetadataTests(unittest.TestCase):
             self.assertTrue((root / relative).is_file(), relative)
 
 
+class RoleplayRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_story_reply_is_preserved_split_and_persisted(self):
+        owner = 7
+        generated = "（她抬起眼睛）" + "这是一段连续叙事。" * 150
+        sent = []
+        recorded = []
+
+        class Client:
+            session = None
+
+            async def send_private_msg(self, user_id, message):
+                sent.append(message)
+                return {"status": "ok"}
+
+        class Roleplay:
+            async def build_context(self, user_id, group_id, message):
+                return "roleplay prompt", []
+
+            async def is_story_mode_async(self, user_id, group_id):
+                return True
+
+            async def record_exchange(self, user_id, group_id, user_text, assistant_text):
+                recorded.append((user_text, assistant_text))
+
+        class Dispatcher:
+            config = {
+                "bot_owner": owner,
+                "bot_qq": 8,
+                "runtime": {},
+                "sticker_mode": {},
+                "roleplay": {"message_chunk_chars": 500, "max_message_segments": 10},
+            }
+            client = Client()
+            roleplay = Roleplay()
+
+        async def immediate_typing(dispatcher, user_id, awaitable):
+            return await awaitable
+
+        with patch.object(runtime, "_await_with_private_typing", side_effect=immediate_typing), \
+                patch.object(runtime, "_call_deepseek", new=AsyncMock(return_value=generated)), \
+                patch.object(runtime.asyncio, "sleep", new=AsyncMock()):
+            result = await runtime.handle_ai_chat(
+                Dispatcher(), None, owner, "继续", "主人", web_search_results="")
+
+        texts = [segment[0]["data"]["text"] for segment in sent]
+        self.assertTrue(result)
+        self.assertGreater(len(texts), 1)
+        self.assertTrue(all(len(text) <= 500 for text in texts))
+        self.assertIn("（她抬起眼睛）", texts[0])
+        self.assertEqual("".join(texts), generated)
+        self.assertEqual(recorded, [("继续", generated)])
+
+
 class RoleplayProviderPayloadTests(unittest.IsolatedAsyncioTestCase):
-    async def test_story_request_omits_max_tokens(self):
+    async def test_story_request_includes_bounded_max_tokens(self):
         payloads = []
 
         class Response:
@@ -186,14 +322,14 @@ class RoleplayProviderPayloadTests(unittest.IsolatedAsyncioTestCase):
         result = await providers._call_deepseek_inner(
             config,
             [{"role": "user", "content": "continue"}],
-            max_tokens=None,
+            max_tokens=2000,
             temperature=0.82,
             session=Session(),
         )
 
         self.assertEqual(result, "ok")
         self.assertEqual(len(payloads), 1)
-        self.assertNotIn("max_tokens", payloads[0])
+        self.assertEqual(payloads[0]["max_tokens"], 2000)
 
 
 if __name__ == "__main__":

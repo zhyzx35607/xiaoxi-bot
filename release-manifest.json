@@ -1,9 +1,10 @@
 {
-  "base_commit": "590df767675845787517bcef3d2f7dd1641e7d2e",
-  "release": "qqbot-roleplay-reliability-20260805",
-  "created_at": "2026-08-05T15:30:00+08:00",
+  "base_commit": "1d25c2f8ea40ca94690df821fb4a09574ae4b8b2",
+  "release": "qqbot-roleplay-hardening-20260806",
+  "created_at": "2026-08-06T11:12:50+08:00",
   "files": [
     ".gitignore",
+    "CLAUDE.md",
     "app/config.py",
     "bot/ai/providers.py",
     "bot/ai/runtime.py",
@@ -17,6 +18,7 @@
     "bot/roleplay/service.py",
     "bot/roleplay/storage.py",
     "bot/services/scheduler.py",
+    "deploy/install-qqbot-service.sh",
     "docs/roleplay.md",
     "release-manifest.json",
     "rollback-roleplay.sh",
@@ -36,7 +38,11 @@
     "story-beats",
     "bond-timeline",
     "roleplay-long-form-generation",
-    "story-provider-default-token-budget",
+    "bounded-story-generation",
+    "bounded-roleplay-history",
+    "async-roleplay-sqlite",
+    "roleplay-retention",
+    "permission-regression-check",
     "restart-safe-acg-delivery"
   ]
 }

@@ -59,8 +59,17 @@
 生成参数可在 `roleplay` 配置段调整：
 
 - `response_max_tokens`：单回合生成预算，范围 300 到 2400，默认 1200；
+- `story_response_max_tokens`：story 模式单回合生成预算，范围 600 到 2400，默认 2000；
 - `response_temperature`：生成温度，范围 0.1 到 1.5，默认 0.82。
-- `story_unbounded_tokens`：story 模式默认开启；开启时请求不发送 `max_tokens` 字段，由模型服务端决定最大生成长度。normal 模式仍使用 `response_max_tokens`。
+- `max_context_chars`：角色设定、场景、摘要和检索资料的总字符上限，默认 18000；
+- `max_history_chars`：最近对话历史的总字符上限，默认 12000；
+- `max_history_message_chars`：单条历史消息进入模型前的字符上限，默认 4000；
+- `message_chunk_chars`：长篇私聊每段的目标字符上限，默认 900；
+- `max_message_segments`：单回合最多发送的长篇私聊段数，默认 10。
+
+story 模式始终向模型服务发送明确的 `max_tokens`，旧版的 `story_unbounded_tokens` 配置会在启动迁移时自动移除。
+
+角色扮演数据库按配置周期清理旧记录。默认每个聊天最多保留 5000 条消息、1000 个剧情节拍和 50 份摘要，审计事件保留 90 天。相关设置为 `max_messages_per_chat`、`max_story_beats_per_chat`、`max_summaries_per_chat`、`audit_retention_days` 和 `retention_cleanup_every_messages`。
 
 ## LightRAG
 

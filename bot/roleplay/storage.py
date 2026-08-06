@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+MAX_MESSAGE_CHARS = 12000
+
+
 def _now() -> int:
     return int(time.time())
 
@@ -122,7 +125,10 @@ class RoleplayStore:
         );
         CREATE INDEX IF NOT EXISTS idx_chats_owner_updated ON chats(owner_id, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_summaries_chat_id ON chat_summaries(chat_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_chat_type ON memories(chat_id, memory_type, archived);
+        CREATE INDEX IF NOT EXISTS idx_story_beats_chat_id ON story_beats(chat_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_chat_id ON audit_events(chat_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
         """
         with self._lock, self._connect() as conn:
@@ -311,7 +317,7 @@ class RoleplayStore:
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO messages(chat_id,role,content,created_at) VALUES(?,?,?,?)",
-                (chat_id, role, content[:50000], _now()),
+                (chat_id, role, content[:MAX_MESSAGE_CHARS], _now()),
             )
             conn.execute("UPDATE chats SET updated_at=? WHERE id=?", (_now(), chat_id))
             return int(cursor.lastrowid)
@@ -508,6 +514,23 @@ class RoleplayStore:
     def audit(self, owner_id: int, event_type: str, detail: dict[str, Any], chat_id: str | None = None) -> None:
         with self._lock, self._connect() as conn:
             conn.execute("INSERT INTO audit_events(owner_id,chat_id,event_type,detail_json,created_at) VALUES(?,?,?,?,?)", (owner_id, chat_id, event_type, json.dumps(detail, ensure_ascii=False, separators=(",", ":")), _now()))
+
+    def prune_retention(self, chat_id: str, *, max_messages: int = 5000,
+                        max_story_beats: int = 1000, max_summaries: int = 50,
+                        audit_retention_days: int = 90) -> None:
+        cutoff = _now() - max(1, audit_retention_days) * 86400
+        with self._lock, self._connect() as conn:
+            for table, limit in (
+                ("messages", max_messages),
+                ("story_beats", max_story_beats),
+                ("chat_summaries", max_summaries),
+            ):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE chat_id=? AND id NOT IN "
+                    f"(SELECT id FROM {table} WHERE chat_id=? ORDER BY id DESC LIMIT ?)",
+                    (chat_id, chat_id, max(1, int(limit))),
+                )
+            conn.execute("DELETE FROM audit_events WHERE created_at<?", (cutoff,))
 
     def export_chat(self, chat_id: str) -> dict[str, Any]:
         chat = self.get_chat(chat_id)

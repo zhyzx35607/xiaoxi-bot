@@ -39,6 +39,13 @@ for directory in deploy scripts; do
   fi
 done
 find "${project_root}" -maxdepth 1 -type f \( -name 'config.json' -o -name 'config.json.*' \) -exec chmod 0600 {} +
+unsafe_path="$(
+  find "${project_root}" -xdev \( -path "${project_root}/data" -o -path "${project_root}/data/*" -o -path "${project_root}/venv" -o -path "${project_root}/venv/*" -o -path "${project_root}/.git" -o -path "${project_root}/.git/*" \) -prune -o \( -type d -o -type f \) -perm /022 -print -quit
+)"
+if [[ -n "${unsafe_path}" ]]; then
+  echo "refusing unsafe project permissions: ${unsafe_path} is group/world writable" >&2
+  exit 1
+fi
 if [[ -d "${project_root}/.git" ]]; then
   chown -R root:root "${project_root}/.git"
 fi

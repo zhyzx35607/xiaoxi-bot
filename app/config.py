@@ -380,9 +380,18 @@ def migrate_config(config):
         "memory_recall_limit": 10,
         "summary_every_messages": 20,
         "max_context_chars": 18000,
+        "max_history_chars": 12000,
+        "max_history_message_chars": 4000,
         "response_max_tokens": 1200,
+        "story_response_max_tokens": 2000,
         "response_temperature": 0.82,
-        "story_unbounded_tokens": True,
+        "message_chunk_chars": 900,
+        "max_message_segments": 10,
+        "max_messages_per_chat": 5000,
+        "max_story_beats_per_chat": 1000,
+        "max_summaries_per_chat": 50,
+        "audit_retention_days": 90,
+        "retention_cleanup_every_messages": 100,
         "lightrag": {
             "enabled": False,
             "base_url": "http://127.0.0.1:8020",
@@ -392,6 +401,11 @@ def migrate_config(config):
         },
     }
     roleplay = config.setdefault("roleplay", {})
+    # Older roleplay releases allowed story requests without a provider-side
+    # token cap. Remove that unsafe switch when migrating existing installs.
+    if "story_unbounded_tokens" in roleplay:
+        del roleplay["story_unbounded_tokens"]
+        migrated = True
     for key, value in roleplay_defaults.items():
         if key not in roleplay:
             roleplay[key] = value
