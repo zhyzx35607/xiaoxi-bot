@@ -14,7 +14,7 @@ class AgentVerifier:
         if not criteria:
             return {"success": bool(plan.get("reply")), "reason": "no_explicit_criteria"}
         prompt = (
-            "你是 Agent 任务验收器，只输出 JSON：{success:boolean, reason:string, evidence:string}。"
+            "你是 Agent 任务验收器，只输出 JSON：{{success:boolean, reason:string, evidence:string}}。"
             "必须依据工具结果和最终答复判断，不允许因为语气自信就通过。\n"
             "任务：{}\n成功标准：{}\n最终答复：{}\n工具结果：{}"
         ).format(task.get("goal", "")[:1000], criteria[:1000], str(plan.get("reply", ""))[:2000], json.dumps(tool_results, ensure_ascii=False)[:5000])

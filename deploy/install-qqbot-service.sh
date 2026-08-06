@@ -17,7 +17,9 @@ fi
 
 id -u qqbot >/dev/null 2>&1 || useradd --system --home-dir /var/lib/qqbot --shell /usr/sbin/nologin qqbot
 install -d -m 0700 -o qqbot -g qqbot /var/lib/qqbot /var/log/qqbot /run/qqbot
-install -d -m 0700 -o qqbot -g qqbot "${project_root}/data/tmp"
+install -d -m 0700 -o qqbot -g qqbot \
+  "${project_root}/data/tmp" \
+  "${project_root}/data/diagnostics"
 chown root:root "${project_root}"
 chmod 0755 "${project_root}"
 
@@ -38,6 +40,7 @@ for directory in deploy scripts; do
     find "${project_root}/${directory}" -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod 0755 {} +
   fi
 done
+chmod 0755 "${project_root}/deploy/prune_qqbot_backups.py"
 find "${project_root}" -maxdepth 1 -type f \( -name 'config.json' -o -name 'config.json.*' \) -exec chmod 0600 {} +
 unsafe_path="$(
   find "${project_root}" -xdev \( -path "${project_root}/data" -o -path "${project_root}/data/*" -o -path "${project_root}/venv" -o -path "${project_root}/venv/*" -o -path "${project_root}/.git" -o -path "${project_root}/.git/*" \) -prune -o \( -type d -o -type f \) -perm /022 -print -quit
@@ -66,7 +69,14 @@ install -d -m 0755 /etc/systemd/journald.conf.d
 install -m 0644 "${project_root}/deploy/qqbot-journald.conf" /etc/systemd/journald.conf.d/30-qqbot.conf
 systemctl restart systemd-journald.service
 install -m 0644 "${service_source}" /etc/systemd/system/qqbot.service
+install -m 0755 "${project_root}/deploy/napcat-login-watchdog.py" /usr/local/sbin/napcat-login-watchdog.py
+install -m 0644 "${project_root}/deploy/napcat-login-watchdog.service" /etc/systemd/system/napcat-login-watchdog.service
+install -m 0644 "${project_root}/deploy/napcat-login-watchdog.timer" /etc/systemd/system/napcat-login-watchdog.timer
+install -m 0644 "${project_root}/deploy/qqbot-backup-prune.service" /etc/systemd/system/qqbot-backup-prune.service
+install -m 0644 "${project_root}/deploy/qqbot-backup-prune.timer" /etc/systemd/system/qqbot-backup-prune.timer
 systemctl daemon-reload
+systemctl enable --now napcat-login-watchdog.timer
+systemctl enable --now qqbot-backup-prune.timer
 if [[ ${QQBOT_SKIP_RESTART:-0} != 1 ]]; then
   systemctl restart qqbot.service
   systemctl --no-pager --full status qqbot.service

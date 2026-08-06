@@ -5,6 +5,8 @@ import logging
 import os
 import time
 
+from ..storage.runtime_paths import runtime_diagnostic_path
+
 log = logging.getLogger("qqbot")
 
 class HealthServiceMixin:
@@ -78,7 +80,8 @@ class HealthServiceMixin:
                         last = time.time()
                         log.warning("RSS thread-watch: %.0fMB | GC: %s",
                                     mb, self._gc_type_histogram())
-                        with open("/tmp/stack_dump.txt", "a") as f:
+                        dump_path = runtime_diagnostic_path("stack_dump.txt")
+                        with open(dump_path, "a", encoding="utf-8") as f:
                             f.write("\n=== RSS %.0fMB at %s ===\n" % (
                                 mb, time.strftime("%F %T")))
                             faulthandler.dump_traceback(file=f)

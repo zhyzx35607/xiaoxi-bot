@@ -297,7 +297,7 @@ data/
 main.py                    稳定入口，委托给 app.bootstrap
 app/
   config.py                配置加载、迁移和环境变量覆盖
-  logging_setup.py         bot.log / chat.log 配置
+  logging_setup.py         bot.log 与可选 chat.log 配置
   bootstrap.py             Client、Dispatcher 与后台任务生命周期
 bot/
   ai/                      AI 提示词、Provider、记忆、搜索和工具
@@ -332,4 +332,4 @@ bot/
 - New ACG images require `UAPI_API_KEY`; the persistent collector pauses without a key and resumes without losing a pending delivery.
 - B站官方接口出现 `-352` 或 `-412` 风控后默认暂停 30 分钟，可通过 `bilibili.risk_cooldown_seconds` 调整。
 - 配置文件和 `config.json.last-good` 会使用 `0600` 权限保存，环境变量中的密钥不会写回配置文件。
-- 生产环境建议使用 `deploy/qqbot.service`、`deploy/napcat.service` 及配套 timer，由 systemd 管理完整进程树。
+- 生产环境建议使用 `deploy/qqbot.service`、`deploy/napcat.service` 及配套 timer，由 systemd 管理完整进程树。生产服务默认关闭聊天正文文件日志，并通过 NapCat 输出过滤器阻止消息正文和 token 进入 journald。

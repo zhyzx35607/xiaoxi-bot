@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import re
-import tempfile
 
 from ..permission import (
     LEVEL_ADMIN,
@@ -13,6 +12,7 @@ from ..permission import (
     LEVEL_SUPER,
     get_user_level,
 )
+from ..storage.runtime_paths import create_runtime_temp_file
 
 log = logging.getLogger("qqbot")
 
@@ -137,7 +137,7 @@ async def _summarize(dispatcher, text, level, kind):
 async def _upload_text_fallback(dispatcher, group_id, user_id, text, title):
     path = ""
     try:
-        handle, path = tempfile.mkstemp(prefix="qqbot_", suffix=".txt")
+        handle, path = create_runtime_temp_file("qqbot_", ".txt")
         os.close(handle)
         with open(path, "w", encoding="utf-8") as output:
             output.write(str(text))

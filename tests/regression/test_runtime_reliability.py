@@ -126,6 +126,41 @@ class RuntimeTemporaryFileTests(unittest.TestCase):
                     self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
                 os.remove(path)
 
+    def test_runtime_diagnostics_use_persistent_configured_directory(self):
+        from bot.storage.runtime_paths import runtime_diagnostic_path
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"QQBOT_DIAGNOSTICS_DIR": directory}):
+                path = runtime_diagnostic_path("../stack_dump.txt")
+                self.assertEqual(path, str(Path(directory) / "stack_dump.txt"))
+
+
+class RuntimeTemporaryFileUploadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_text_fallback_uses_shared_runtime_directory_and_cleans_up(self):
+        from bot.transport.output import _upload_text_fallback
+
+        class Client:
+            uploaded_path = ""
+
+            async def upload_group_file(self, group_id, path, name):
+                self.uploaded_path = path
+                self.uploads.append((group_id, Path(path).read_text(encoding="utf-8"), name))
+                return {"status": "ok"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = Client()
+            client.uploads = []
+            dispatcher = type("Dispatcher", (), {"client": client})()
+            with patch.dict(os.environ, {"QQBOT_TMP_DIR": directory}):
+                result = await _upload_text_fallback(
+                    dispatcher, 10001, 0, "long response", "report"
+                )
+
+            self.assertTrue(result)
+            self.assertEqual(client.uploads[0][:2], (10001, "long response"))
+            self.assertTrue(client.uploaded_path.startswith(directory))
+            self.assertFalse(os.path.exists(client.uploaded_path))
+
 class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_acg_without_key_skips_resolution(self):
         class Client:

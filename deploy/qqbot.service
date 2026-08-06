@@ -17,6 +17,8 @@ Environment=QQBOT_CONFIG_PATH=/var/lib/qqbot/config.json
 Environment=QQBOT_LOG_DIR=/var/log/qqbot
 Environment=QQBOT_PID_FILE=/run/qqbot/bot.pid
 Environment=QQBOT_TMP_DIR=/opt/qqbot/data/tmp
+Environment=QQBOT_DIAGNOSTICS_DIR=/opt/qqbot/data/diagnostics
+Environment=QQBOT_DISABLE_CHAT_LOG=1
 Environment=TZ=Asia/Shanghai
 EnvironmentFile=-/etc/qqbot.env
 ExecStart=/opt/qqbot/venv/bin/python /opt/qqbot/main.py

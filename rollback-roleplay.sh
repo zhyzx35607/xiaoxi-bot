@@ -3,8 +3,17 @@ set -euo pipefail
 BACKUP_DIR="${1:-/opt/qqbot.backup-codex-fix-20260805-1535}"
 APP_DIR="/opt/qqbot"
 NAPCAT_CONFIG_DIR="/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/config"
-NAPCAT_ACCOUNT_CONFIG="napcat_3127014580.json"
 test -d "$BACKUP_DIR"
+if [[ -z "${NAPCAT_QUICK_ACCOUNT:-}" && -f /etc/napcat.env ]]; then
+    # shellcheck disable=SC1091
+    source /etc/napcat.env
+fi
+if [[ ${NAPCAT_QUICK_ACCOUNT:-} =~ ^[0-9]+$ ]]; then
+    NAPCAT_ACCOUNT_CONFIG="napcat_${NAPCAT_QUICK_ACCOUNT}.json"
+else
+    NAPCAT_ACCOUNT_CONFIG="$(find "$BACKUP_DIR/napcat-config" -maxdepth 1 -type f -name 'napcat_[0-9]*.json' -printf '%f\n' | head -1)"
+fi
+test -n "$NAPCAT_ACCOUNT_CONFIG"
 test -f "$BACKUP_DIR/main.py"
 test -f "$BACKUP_DIR/napcat-config/napcat.json"
 test -f "$BACKUP_DIR/napcat-config/$NAPCAT_ACCOUNT_CONFIG"

@@ -72,8 +72,26 @@ class ArchitectureRegressionTests(unittest.TestCase):
         with open(os.path.join(ROOT, "deploy", "qqbot.service"), encoding="utf-8") as handle:
             service = handle.read()
         self.assertIn("QQBOT_TMP_DIR=/opt/qqbot/data/tmp", service)
+        self.assertIn("QQBOT_DIAGNOSTICS_DIR=/opt/qqbot/data/diagnostics", service)
+        self.assertIn("QQBOT_DISABLE_CHAT_LOG=1", service)
         with open(os.path.join(ROOT, "deploy", "qqbot-journald.conf"), encoding="utf-8") as handle:
-            self.assertIn("SystemMaxUse=256M", handle.read())
+            journal_config = handle.read()
+        self.assertIn("SystemMaxUse=192M", journal_config)
+        self.assertIn("MaxRetentionSec=7day", journal_config)
+
+    def test_napcat_service_filters_logs_and_keeps_account_out_of_git(self):
+        with open(os.path.join(ROOT, "deploy", "napcat.service"), encoding="utf-8") as handle:
+            service = handle.read()
+        self.assertIn("napcat_log_filter.py", service)
+        self.assertIn("EnvironmentFile=-/etc/napcat.env", service)
+        self.assertNotRegex(service, r"-q\s+\d+")
+        for relative_path in (
+            "bot/integrations/napcat/watchdog.py",
+            "rollback-roleplay.sh",
+        ):
+            with open(os.path.join(ROOT, *relative_path.split("/")), encoding="utf-8") as handle:
+                source = handle.read()
+            self.assertNotRegex(source, r"(?:onebot11|napcat)_\d{5,12}\.json")
     def test_no_dependency_was_added_for_refactor(self):
         with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as handle:
             requirements = {line.strip() for line in handle if line.strip()}

@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import json
 import os
 import subprocess
@@ -10,10 +11,18 @@ from pathlib import Path
 import websockets
 
 
-CONFIG_PATH = Path(
-    "/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/config/"
-    "onebot11_3127014580.json"
-)
+_CONFIG_DIR = Path("/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/config")
+
+
+def _default_config_path():
+    account = os.getenv("NAPCAT_QUICK_ACCOUNT", "").strip()
+    if account.isdigit():
+        return _CONFIG_DIR / "onebot11_{}.json".format(account)
+    candidates = sorted(Path(path) for path in glob.glob(str(_CONFIG_DIR / "onebot11_*.json")))
+    return candidates[0] if len(candidates) == 1 else _CONFIG_DIR / "onebot11.json"
+
+
+CONFIG_PATH = _default_config_path()
 STATE_PATH = Path("/run/napcat-login-watchdog.json")
 PREFERRED_PORT = int(os.getenv("NAPCAT_WATCHDOG_PORT", "3001"))
 FAILURES_BEFORE_RESTART = 2

@@ -8,6 +8,9 @@ import os
 def setup_logging(base_dir):
     log_dir = os.getenv("QQBOT_LOG_DIR") or base_dir
     disable_files = os.getenv("QQBOT_DISABLE_FILE_LOG", "").lower() in {"1", "true", "yes", "on"}
+    disable_chat = disable_files or os.getenv("QQBOT_DISABLE_CHAT_LOG", "").lower() in {
+        "1", "true", "yes", "on",
+    }
     if not disable_files:
         os.makedirs(log_dir, exist_ok=True)
     handlers = []
@@ -32,7 +35,7 @@ def setup_logging(base_dir):
     chat_log.setLevel(logging.INFO)
     chat_log.propagate = False
     if not chat_log.handlers:
-        if disable_files:
+        if disable_chat:
             chat_handler = logging.NullHandler()
         else:
             chat_handler = RotatingFileHandler(

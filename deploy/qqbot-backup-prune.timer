@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly QQ Bot backup retention
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=30m
+Unit=qqbot-backup-prune.service
+
+[Install]
+WantedBy=timers.target

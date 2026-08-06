@@ -95,6 +95,32 @@ class AgentPlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("execution_plan", plan["reply"])
 
 
+class AgentVerifierTests(unittest.IsolatedAsyncioTestCase):
+    async def test_explicit_success_criteria_builds_json_prompt(self):
+        from bot.agent.verifier import AgentVerifier
+
+        class Client:
+            session = None
+
+        dispatcher = type("Dispatcher", (), {
+            "config": {},
+            "client": Client(),
+        })()
+        response = '{"success": true, "reason": "met", "evidence": "tool ok"}'
+        with patch("bot.agent.verifier._call_deepseek", new=AsyncMock(return_value=response)) as call:
+            result = await AgentVerifier(dispatcher).verify(
+                {"goal": "check service", "success_criteria": "service is active"},
+                {"reply": "service is active"},
+                [{"name": "status", "result": {"ok": True}}],
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["reason"], "met")
+        prompt = call.await_args.args[1][0]["content"]
+        self.assertIn("{success:boolean, reason:string, evidence:string}", prompt)
+        self.assertIn("service is active", prompt)
+
+
 class AgentPersistenceTests(unittest.TestCase):
     def test_private_and_group_memory_are_isolated(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())

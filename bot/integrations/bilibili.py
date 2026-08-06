@@ -80,7 +80,9 @@ def wbi_sign(params, img_key, sub_key):
     }
     cleaned["wts"] = int(time.time())
     query = urllib.parse.urlencode(sorted(cleaned.items()))
-    cleaned["w_rid"] = hashlib.md5((query + key).encode("utf-8")).hexdigest()
+    cleaned["w_rid"] = hashlib.md5(
+        (query + key).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()
     return cleaned
 
 

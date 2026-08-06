@@ -19,7 +19,11 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run high-signal static checks
+        run: |
+          ruff check . --no-cache --select E9,F524,F63,F7,F82
+          bandit -q -r app bot deploy -x tests --severity-level high --confidence-level high
       - name: Check API contract snapshots
         run: python scripts/sync_api_contracts.py --check
       - name: Compile Python sources

@@ -1,0 +1,22 @@
+[Unit]
+Description=Prune expired QQ Bot backups
+ConditionPathIsDirectory=/root/qqbot-backups
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/python3 /opt/qqbot/deploy/prune_qqbot_backups.py --directory /root/qqbot-backups --keep 20 --max-age-days 30 --apply
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/qqbot-backups
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=

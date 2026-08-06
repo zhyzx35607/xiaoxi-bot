@@ -19,6 +19,9 @@ Run before every deployment:
 
 ```bash
 git diff --check
+./venv/bin/python -m pip install -r requirements-dev.txt
+./venv/bin/ruff check . --no-cache --select E9,F524,F63,F7,F82
+./venv/bin/bandit -q -r app bot deploy -x tests --severity-level high --confidence-level high
 ./venv/bin/python -m compileall -q app bot tests main.py
 ./venv/bin/python -m unittest discover -s tests -t . -v
 ```
@@ -36,10 +39,11 @@ monolith modules.
 5. Run compile and full tests with `/opt/qqbot/venv/bin/python`.
 6. Upload the same files to `/opt/qqbot`.
 7. Fetch and reset the server repository to the tested commit.
-8. Restart `qqbot.service`.
-9. Confirm the service is active, the Git worktree is clean, 80 commands are
+8. Install and restart `napcat.service`, then restart `qqbot.service`.
+9. Confirm both services are active, the Git worktree is clean, 114 commands are
    registered, and OneBot WebSocket connects.
-10. Inspect recent journal entries for exceptions.
+10. Inspect recent journal entries for exceptions and confirm NapCat message
+    bodies are not present in journald.
 
 ## Rollback
 

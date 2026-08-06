@@ -7,5 +7,6 @@ Wants=network-online.target
 Type=oneshot
 User=root
 Environment=NAPCAT_WATCHDOG_PORT=3001
+EnvironmentFile=-/etc/napcat.env
 ExecStart=/opt/qqbot/venv/bin/python /usr/local/sbin/napcat-login-watchdog.py
 Nice=19

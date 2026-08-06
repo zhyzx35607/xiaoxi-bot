@@ -10,7 +10,10 @@ Type=simple
 User=root
 Environment=HOME=/root
 Environment=TZ=Asia/Shanghai
-ExecStart=/usr/bin/xvfb-run -a /root/Napcat/opt/QQ/qq --no-sandbox -q 3127014580
+Environment=PYTHONUNBUFFERED=1
+Environment=NAPCAT_BINARY=/root/Napcat/opt/QQ/qq
+EnvironmentFile=-/etc/napcat.env
+ExecStart=/usr/bin/python3 /opt/qqbot/deploy/napcat_log_filter.py
 Restart=on-failure
 RestartSec=15
 TimeoutStartSec=120
@@ -37,6 +40,8 @@ MemoryHigh=2G
 MemoryMax=3G
 CPUQuota=200%
 OOMPolicy=stop
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
 StandardOutput=journal
 StandardError=journal
 
