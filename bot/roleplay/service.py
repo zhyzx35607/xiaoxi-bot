@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..memory import contains_sensitive_data
 from .character_cards import CharacterCardError, load_character_card
 from .lightrag import LightRAGClient
 from .storage import RoleplayStore
@@ -94,6 +95,11 @@ class RoleplayService:
     @staticmethod
     def _hash(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+
+    @staticmethod
+    def _persistent_text(text: str) -> str:
+        value = str(text or "")
+        return "[敏感内容已省略]" if contains_sensitive_data(value) else value
 
     def status(self, user_id: int, group_id: int | None) -> str:
         self._require_owner_private(user_id, group_id)
@@ -269,6 +275,8 @@ class RoleplayService:
             return "当前没有聊天"
         if not content:
             return "用法：/memory add <类型> | <内容>"
+        if contains_sensitive_data(content):
+            return "为保护凭证和敏感信息，不能把这段内容保存为记忆"
         memory_id = self.store.add_memory(active["id"], memory_type or "note", content, keywords=content[:500], locked=True)
         self.store.audit(user_id, "memory_add", {"memory_id": memory_id, "type": memory_type}, active["id"])
         return f"已添加记忆 #{memory_id}"
@@ -290,6 +298,8 @@ class RoleplayService:
         active = self.store.active_chat(user_id)
         if not active:
             return "当前没有聊天"
+        if contains_sensitive_data(content):
+            return "为保护凭证和敏感信息，不能把这段内容保存为记忆"
         return "记忆已更新" if self.store.update_memory(active["id"], int(memory_id), content) else "当前聊天没有找到该记忆"
 
     def set_memory_state(self, user_id: int, group_id: int | None, memory_id: str, action: str) -> str:
@@ -427,25 +437,35 @@ class RoleplayService:
             match = re.search(pattern, text)
             if match:
                 content = match.group(1).strip(" ，。！？")
-                if content:
+                if content and not contains_sensitive_data(content):
                     existing = self.store.search_memories(chat_id, content, 3)
                     if not any(item["content"] == content for item in existing):
                         self.store.add_memory(chat_id, memory_type, content, keywords=content, confidence=0.8, source_message_id=message_id)
 
-    async def record_exchange(self, user_id: int, group_id: int | None, user_text: str, assistant_text: str) -> None:
+    async def record_exchange(
+        self, user_id: int, group_id: int | None, user_text: str, assistant_text: str,
+        *, chat_id: str | None = None,
+    ) -> None:
         await asyncio.to_thread(
-            self._record_exchange_sync, user_id, group_id, user_text, assistant_text)
+            self._record_exchange_sync, user_id, group_id, user_text, assistant_text, chat_id)
 
-    def _record_exchange_sync(self, user_id: int, group_id: int | None, user_text: str, assistant_text: str) -> None:
+    def _record_exchange_sync(
+        self, user_id: int, group_id: int | None, user_text: str, assistant_text: str,
+        chat_id: str | None = None,
+    ) -> None:
         if not self.is_owner_private(user_id, group_id):
             return
-        active = self.store.active_chat(user_id)
+        active = self.store.get_chat(chat_id) if chat_id else self.store.active_chat(user_id)
+        if active and (int(active.get("owner_id", 0)) != int(user_id) or active.get("archived")):
+            return
         if not active:
             return
-        user_message_id = self.store.add_message(active["id"], "user", user_text)
-        self.store.add_message(active["id"], "assistant", assistant_text)
-        self.store.add_story_beat(active["id"], assistant_text)
-        self._auto_extract_memories(active["id"], user_message_id, user_text)
+        safe_user_text = self._persistent_text(user_text)
+        safe_assistant_text = self._persistent_text(assistant_text)
+        user_message_id = self.store.add_message(active["id"], "user", safe_user_text)
+        self.store.add_message(active["id"], "assistant", safe_assistant_text)
+        self.store.add_story_beat(active["id"], safe_assistant_text)
+        self._auto_extract_memories(active["id"], user_message_id, safe_user_text)
         count = self.store.message_count(active["id"])
         interval = max(8, int(self.settings.get("summary_every_messages", 20)))
         if count >= interval and count % interval < 2:
@@ -516,12 +536,14 @@ class RoleplayService:
                 used += len(content)
         return list(reversed(selected))
 
-    async def build_context(self, user_id: int, group_id: int | None, user_text: str) -> tuple[str, list[dict[str, str]]]:
+    async def build_context_snapshot(
+        self, user_id: int, group_id: int | None, user_text: str,
+    ) -> tuple[str, list[dict[str, str]], str | None]:
         if not self.is_owner_private(user_id, group_id):
-            return "", []
+            return "", [], None
         snapshot = await asyncio.to_thread(self._load_context_snapshot, user_id, user_text)
         if not snapshot:
-            return "", []
+            return "", [], None
         active = snapshot["active"]
         character = snapshot["character"]
         data = character["data"]
@@ -531,7 +553,8 @@ class RoleplayService:
         beats = snapshot["beats"]
         memories = snapshot["memories"]
         world_entries = snapshot["world_entries"]
-        rag = await self.lightrag.query(f"角色 {character['name']}；当前消息：{user_text}")
+        rag = "" if contains_sensitive_data(user_text) else await self.lightrag.query(
+            f"角色 {character['name']}；当前消息：{user_text}")
         parts = [BASE_ROLEPLAY_POLICY, "【当前文本模式】\n" + self.mode_policies.get(mode, self.mode_policies["normal"])]
         if mode == "owner_story":
             parts.append(STORY_QUALITY_POLICY)
@@ -566,4 +589,8 @@ class RoleplayService:
         max_chars = int(self.settings.get("max_context_chars", 18000))
         prompt = "\n\n".join(parts)[:max_chars]
         history = self._bounded_history(snapshot["history"])
+        return prompt, history, active["id"]
+
+    async def build_context(self, user_id: int, group_id: int | None, user_text: str) -> tuple[str, list[dict[str, str]]]:
+        prompt, history, _ = await self.build_context_snapshot(user_id, group_id, user_text)
         return prompt, history

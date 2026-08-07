@@ -171,6 +171,47 @@ class RoleplayServiceTests(unittest.TestCase):
             ("user", "hello"), ("assistant", "world"),
         ])
 
+    def test_sensitive_roleplay_memory_is_rejected_and_exchange_is_redacted(self):
+        character = self._character()
+        chat = self.service.store.new_chat(self.OWNER, character["id"], title="secret")
+
+        rejected = self.service.add_memory(
+            self.OWNER, None, "note", "token=super-secret-value")
+        self.assertIn("不能把这段内容保存为记忆", rejected)
+        self.assertEqual(self.service.store.list_memories(chat["id"]), [])
+
+        asyncio.run(self.service.record_exchange(
+            self.OWNER, None, "请记住 token=super-secret-value", "收到"))
+        rows = self.service.store.recent_messages(chat["id"], 10)
+        self.assertEqual(rows[0]["content"], "[敏感内容已省略]")
+        self.assertNotIn("super-secret-value", str(rows))
+        self.assertEqual(self.service.store.list_memories(chat["id"]), [])
+
+    def test_exchange_uses_context_chat_snapshot_after_switch(self):
+        character = self._character()
+        first = self.service.store.new_chat(self.OWNER, character["id"], title="first")
+        prompt, _, chat_id = asyncio.run(
+            self.service.build_context_snapshot(self.OWNER, None, "hello"))
+        self.assertTrue(prompt)
+        self.assertEqual(chat_id, first["id"])
+
+        second = self.service.store.new_chat(self.OWNER, character["id"], title="second")
+        asyncio.run(self.service.record_exchange(
+            self.OWNER, None, "hello", "reply", chat_id=first["id"]))
+        self.assertEqual(
+            [row["content"] for row in self.service.store.recent_messages(first["id"], 10)],
+            ["hello", "reply"],
+        )
+        self.assertEqual(self.service.store.recent_messages(second["id"], 10), [])
+
+    def test_sensitive_roleplay_message_skips_lightrag(self):
+        character = self._character()
+        self.service.store.new_chat(self.OWNER, character["id"], title="rag")
+        self.service.lightrag.query = AsyncMock(return_value="should not be used")
+        asyncio.run(self.service.build_context_snapshot(
+            self.OWNER, None, "我的 cookie=private-value"))
+        self.service.lightrag.query.assert_not_awaited()
+
     def test_storage_retention_keeps_newest_rows(self):
         character = self._character()
         chat = self.service.store.new_chat(self.OWNER, character["id"], title="retention")

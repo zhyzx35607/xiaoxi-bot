@@ -230,6 +230,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     roleplay_history = []
     roleplay_active = False
     roleplay_story_mode = False
+    roleplay_chat_id = None
     context_key = f"private_{user_id}" if not group_id else str(group_id)
     from ..permission import (
         LEVEL_ADMIN, LEVEL_GOWNER, LEVEL_MASTER, LEVEL_SUPER,
@@ -362,8 +363,13 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     roleplay_prompt = ""
     if roleplay is not None:
         try:
-            roleplay_prompt, roleplay_history = await roleplay.build_context(
-                user_id, group_id, raw_message or "")
+            snapshot_builder = getattr(roleplay, "build_context_snapshot", None)
+            if callable(snapshot_builder):
+                roleplay_prompt, roleplay_history, roleplay_chat_id = await snapshot_builder(
+                    user_id, group_id, raw_message or "")
+            else:
+                roleplay_prompt, roleplay_history = await roleplay.build_context(
+                    user_id, group_id, raw_message or "")
             roleplay_active = bool(roleplay_prompt)
             roleplay_story_mode = roleplay_active and await roleplay.is_story_mode_async(
                 user_id, group_id)
@@ -680,8 +686,15 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             await dispatcher.client.send_private_msg(user_id, clean_reply or reply)
     if roleplay_active:
         try:
-            await dispatcher.roleplay.record_exchange(
-                user_id, group_id, original_clean_msg or raw_message, clean_reply if clean_reply else reply)
+            record_exchange = dispatcher.roleplay.record_exchange
+            args = (
+                user_id, group_id, original_clean_msg or raw_message,
+                clean_reply if clean_reply else reply,
+            )
+            if roleplay_chat_id:
+                await record_exchange(*args, chat_id=roleplay_chat_id)
+            else:
+                await record_exchange(*args)
         except Exception as error:
             log.warning("Roleplay exchange persistence degraded: %s", error)
     # Track last reply timestamp for multi-layer delay

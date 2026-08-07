@@ -16,6 +16,27 @@ _SENSITIVE_PATTERNS = [
     (re.compile(r'(?i)(密码|口令|password)\s*[:：=]?\s*\S{4,}'), r'\1：[已隐藏]'),
 ]
 
+_SENSITIVE_MARKERS = (
+    "密码", "口令", "password", "passwd", "passkey", "token", "api key",
+    "apikey", "密钥", "cookie", "authorization", "clientkey", "client_key",
+    "csrf", "rkey", "access_token", "access token", "sessdata", "secret",
+    "private_key", "private key", "令牌",
+)
+_CREDENTIAL_VALUE_PATTERNS = (
+    re.compile(r"(?i)\bsk-[A-Za-z0-9_.-]{12,}\b"),
+    re.compile(r"(?i)\b(?:ghp|github_pat|xox[baprs])-[A-Za-z0-9_.-]{12,}\b"),
+    re.compile(r"(?i)\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+)
+
+
+def contains_sensitive_data(text: str) -> bool:
+    """Return whether text is unsafe to persist as a memory or event body."""
+    value = str(text or "").lower()
+    if any(marker in value for marker in _SENSITIVE_MARKERS):
+        return True
+    original = str(text or "")
+    return any(pattern.search(original) for pattern in _CREDENTIAL_VALUE_PATTERNS)
+
 
 def sanitize_for_memory(text):
     """Redact sensitive values before persistent memory writes."""

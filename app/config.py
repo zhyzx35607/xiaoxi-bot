@@ -460,8 +460,10 @@ def migrate_config(config):
         "tool_timeout_seconds": 15,
         "background_tasks_enabled": True,
         "background_task_max_attempts": 3,
+        "background_task_lease_seconds": 3600,
         "owner_goal_check_interval_seconds": 7200,
         "group_review_interval_seconds": 10800,
+        "review_lease_seconds": 3600,
         "worker_enabled": True,
         "worker_interval_seconds": 30,
     }
