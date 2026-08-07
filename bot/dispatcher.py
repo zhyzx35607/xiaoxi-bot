@@ -25,6 +25,7 @@ from .events.router import RouterMixin
 from .services.delayed_reply import DelayedReplyServiceMixin
 from .services.health import HealthServiceMixin
 from .services.member_cache import MemberCacheMixin
+from .services.confirmations import prune_expired_confirmations
 from .agent.runtime import AgentRuntime
 from .agent.worker_service import AgentWorker
 from .roleplay import RoleplayService
@@ -63,6 +64,7 @@ class Dispatcher(
         self.agent_runtime = AgentRuntime(config, _ROOT)
         self.agent_worker = AgentWorker(self)
         self.roleplay = RoleplayService(config, _ROOT, session=getattr(client, "session", None))
+        prune_expired_confirmations()
         self._config_path = config_path or os.path.join(_ROOT, "config.json")
         self.commands = {}
         self._lock = asyncio.Lock()

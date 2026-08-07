@@ -1,8 +1,11 @@
 import asyncio
+import json
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from bot.agent.identity import resolve_identity, resolve_scope
@@ -123,6 +126,63 @@ class AgentVerifierTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentPersistenceTests(unittest.TestCase):
+    def test_json_store_serializes_read_modify_write_and_redacts_values(self):
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        threads = [
+            threading.Thread(
+                target=runtime.goals.create,
+                args=("owner:100", 100, f"goal-{index}"),
+            )
+            for index in range(40)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        records = runtime.goals.list("owner:100", include_done=True)
+        self.assertEqual(len(records), 40)
+
+        runtime.store.write("secret.json", {
+            "token": "super-secret",
+            "nested": "ghp_abcdefghijklmnopqrstuvwxyz123456",
+            "ordinary": "tokenizer",
+        })
+        saved = json.dumps(runtime.store.read("secret.json", {}), ensure_ascii=False)
+        self.assertNotIn("super-secret", saved)
+        self.assertNotIn("ghp_abcdefghijklmnopqrstuvwxyz123456", saved)
+        self.assertIn("tokenizer", saved)
+
+        runtime.store.write("bounded.json", [{"index": index} for index in range(250)])
+        self.assertEqual(len(runtime.store.read("bounded.json", [])), 250)
+
+        legacy_path = Path(runtime.store._path("legacy.json"))
+        legacy_path.write_text(json.dumps({
+            "message": "Authorization: Bearer legacy-agent-secret",
+        }), encoding="utf-8")
+        loaded = runtime.store.read("legacy.json", {})
+        rewritten = legacy_path.read_text(encoding="utf-8")
+        self.assertNotIn("legacy-agent-secret", str(loaded))
+        self.assertNotIn("legacy-agent-secret", rewritten)
+
+    def test_persistent_agent_fields_keep_their_declared_lengths(self):
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        plan = runtime.plans.create(
+            "owner:100", 100, "题" * 1000,
+            [{"title": "步" * 500, "success_criteria": "准" * 500}],
+            success_criteria="总" * 1000,
+        )
+        updated = runtime.plans.update_step(
+            "owner:100", plan["id"], "s1", "done",
+            evidence="证" * 2000, result="果" * 2000,
+        )
+
+        self.assertEqual(len(updated["title"]), 1000)
+        self.assertEqual(len(updated["success_criteria"]), 1000)
+        self.assertEqual(len(updated["steps"][0]["title"]), 500)
+        self.assertEqual(len(updated["steps"][0]["success_criteria"]), 500)
+        self.assertEqual(len(updated["steps"][0]["evidence"]), 2000)
+        self.assertEqual(len(updated["steps"][0]["result"]), 2000)
+
     def test_private_and_group_memory_are_isolated(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
         private = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "我喜欢咖啡"})
@@ -184,6 +244,55 @@ class AgentPersistenceTests(unittest.TestCase):
         self.assertEqual(runtime.proactive.muted_until("group:300"), 0)
 
 
+class ConfirmationPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    def test_dispatcher_startup_prunes_expired_confirmations(self):
+        from bot.dispatcher import Dispatcher
+        from bot.services import confirmations
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "pending_actions.json"
+            path.write_text(json.dumps({
+                "expired": {"expires_at": time.time() - 1},
+                "valid": {"expires_at": time.time() + 60},
+            }), encoding="utf-8")
+            with patch.object(confirmations, "_PATH", str(path)), \
+                    patch("bot.dispatcher.AgentRuntime"), \
+                    patch("bot.dispatcher.AgentWorker"), \
+                    patch("bot.dispatcher.RoleplayService"):
+                Dispatcher({"runtime": {}}, object())
+
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("expired", saved)
+            self.assertIn("valid", saved)
+
+    async def test_confirmation_rechecks_group_after_permission_lookup(self):
+        from bot.permission import LEVEL_ADMIN
+        from bot.services import confirmations
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "pending_actions.json"
+            with patch.object(confirmations, "_PATH", str(path)):
+                code = confirmations.create_confirmation(
+                    100, 7, "set_group_name", {"group_id": 100}, "rename")
+
+                async def move_confirmation(*_args, **_kwargs):
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                    data[code]["group_id"] = 200
+                    path.write_text(json.dumps(data), encoding="utf-8")
+                    return LEVEL_ADMIN, "admin"
+
+                client = type("Client", (), {})()
+                client.call = AsyncMock()
+                dispatcher = type("Dispatcher", (), {"client": client})()
+                with patch("bot.permission.get_user_level", side_effect=move_confirmation):
+                    ok, message = await confirmations.execute_confirmation(
+                        dispatcher, code, 7, 100, "admin")
+
+            self.assertFalse(ok)
+            self.assertIn("不属于当前群", message)
+            client.call.assert_not_awaited()
+
+
 class AgentObservationTests(unittest.IsolatedAsyncioTestCase):
     async def _run_passive_message(self, observation_enabled):
         from bot.events.message import GroupMessageMixin
@@ -238,6 +347,24 @@ class AgentObservationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registry_exception_does_not_expose_credentials(self):
+        from bot.agent.tools.gateway import AgentToolGateway
+
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
+
+        def broken(_dispatcher):
+            raise RuntimeError("Authorization: Bearer private-tool-secret")
+
+        dispatcher = type("Dispatcher", (), {"config": {}})()
+        gateway = AgentToolGateway(dispatcher)
+        gateway._registry = {"uapi_broken": broken}
+        result = await gateway.execute(event, "uapi_broken")
+
+        self.assertFalse(result["ok"])
+        self.assertNotIn("private-tool-secret", result["message"])
+        self.assertIn("[已隐藏]", result["message"])
+
     async def test_denies_sensitive_tool_before_registry_lookup(self):
         from bot.agent.tools.gateway import AgentToolGateway
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())

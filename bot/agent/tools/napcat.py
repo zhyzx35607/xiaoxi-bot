@@ -3,6 +3,7 @@
 import inspect
 
 from api_registry import REGISTRY
+from ...memory import sanitize_for_memory
 
 
 EXPLICIT_SAFE_ACTIONS = {
@@ -111,7 +112,11 @@ async def napcat_read(dispatcher, agent_event, tool_name, **params):
         if inspect.isawaitable(result):
             result = await result
     except TypeError as error:
-        return {"ok": False, "error": "invalid_tool_arguments", "message": str(error)[:300]}
+        return {
+            "ok": False,
+            "error": "invalid_tool_arguments",
+            "message": sanitize_for_memory(error)[:300],
+        }
     if not isinstance(result, dict):
         return {"ok": True, "data": result}
     return {

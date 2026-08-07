@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..memory import sanitize_persistent_value
+
 
 MAX_MESSAGE_CHARS = 12000
 
@@ -136,9 +138,17 @@ class RoleplayStore:
 
     @staticmethod
     def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        result = dict(row)
+        for key, value in list(result.items()):
+            if key.endswith("_json") or key == "data_json":
+                continue
+            result[key] = sanitize_persistent_value(value)
+        return result
 
     def import_character(self, card: dict[str, Any]) -> dict[str, Any]:
+        card = sanitize_persistent_value(card)
         now = _now()
         slug = _slug(str(card["name"]))
         data_json = json.dumps(card, ensure_ascii=False, separators=(",", ":"))
@@ -155,7 +165,7 @@ class RoleplayStore:
     def list_characters(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT id,slug,name,created_at,updated_at FROM characters ORDER BY name").fetchall()
-        return [dict(row) for row in rows]
+        return [sanitize_persistent_value(dict(row)) for row in rows]
 
     def get_character(self, value: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -164,7 +174,7 @@ class RoleplayStore:
             ).fetchone()
         result = self._row(row)
         if result:
-            result["data"] = json.loads(result.pop("data_json"))
+            result["data"] = sanitize_persistent_value(json.loads(result.pop("data_json")))
         return result
 
     def delete_character(self, value: str) -> bool:
@@ -178,6 +188,8 @@ class RoleplayStore:
     def create_persona(self, owner_id: int, name: str, description: str, *, default: bool = False) -> dict[str, Any]:
         now = _now()
         persona_id = uuid.uuid4().hex
+        name = str(sanitize_persistent_value(name))[:120]
+        description = str(sanitize_persistent_value(description))[:12000]
         with self._lock, self._connect() as conn:
             if default:
                 conn.execute("UPDATE personas SET is_default=0 WHERE owner_id=?", (owner_id,))
@@ -187,12 +199,12 @@ class RoleplayStore:
                 (persona_id, owner_id, name[:120], description[:12000], int(default), now, now),
             )
             row = conn.execute("SELECT * FROM personas WHERE owner_id=? AND name=?", (owner_id, name[:120])).fetchone()
-        return dict(row)
+        return sanitize_persistent_value(dict(row))
 
     def list_personas(self, owner_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM personas WHERE owner_id=? ORDER BY is_default DESC,name", (owner_id,)).fetchall()
-        return [dict(row) for row in rows]
+        return [sanitize_persistent_value(dict(row)) for row in rows]
 
     def get_persona(self, owner_id: int, value: str | None) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -227,7 +239,10 @@ class RoleplayStore:
         character = self.get_character(character_id)
         if not character:
             raise ValueError("角色不存在")
-        title = (title.strip() or f"{character['name']}-{time.strftime('%Y%m%d-%H%M')}")[:160]
+        title = (
+            str(sanitize_persistent_value(title)).strip()
+            or f"{character['name']}-{time.strftime('%Y%m%d-%H%M')}"
+        )[:160]
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO chats(id,owner_id,character_id,persona_id,title,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
@@ -260,7 +275,7 @@ class RoleplayStore:
                 "SELECT c.*,ch.name character_name FROM chats c JOIN characters ch ON ch.id=c.character_id "
                 "WHERE c.owner_id=? AND c.archived=0 ORDER BY c.updated_at DESC LIMIT ?", (owner_id, limit)
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [sanitize_persistent_value(dict(row)) for row in rows]
 
     def use_chat(self, owner_id: int, value: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
@@ -317,15 +332,139 @@ class RoleplayStore:
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO messages(chat_id,role,content,created_at) VALUES(?,?,?,?)",
-                (chat_id, role, content[:MAX_MESSAGE_CHARS], _now()),
+                (chat_id, role, str(sanitize_persistent_value(content))[:MAX_MESSAGE_CHARS], _now()),
             )
             conn.execute("UPDATE chats SET updated_at=? WHERE id=?", (_now(), chat_id))
             return int(cursor.lastrowid)
 
+    def record_exchange(
+        self,
+        chat_id: str,
+        user_text: str,
+        assistant_text: str,
+        *,
+        memory_candidates: Iterable[tuple[str, str]] = (),
+        summary_every_messages: int = 20,
+        cleanup_every_messages: int = 100,
+        max_messages: int = 5000,
+        max_story_beats: int = 1000,
+        max_summaries: int = 50,
+        audit_retention_days: int = 90,
+        request_hash: str = "",
+        response_hash: str = "",
+    ) -> None:
+        """Persist one complete exchange in a single SQLite transaction."""
+        safe_user = str(sanitize_persistent_value(user_text))[:MAX_MESSAGE_CHARS]
+        safe_assistant = str(sanitize_persistent_value(assistant_text))[:MAX_MESSAGE_CHARS]
+        now = _now()
+        with self._lock, self._connect() as conn:
+            chat = conn.execute(
+                "SELECT c.character_id,ch.name character_name FROM chats c "
+                "JOIN characters ch ON ch.id=c.character_id WHERE c.id=? AND c.archived=0",
+                (chat_id,),
+            ).fetchone()
+            if not chat:
+                raise ValueError("聊天不存在")
+            user_cursor = conn.execute(
+                "INSERT INTO messages(chat_id,role,content,created_at) VALUES(?,?,?,?)",
+                (chat_id, "user", safe_user, now),
+            )
+            assistant_cursor = conn.execute(
+                "INSERT INTO messages(chat_id,role,content,created_at) VALUES(?,?,?,?)",
+                (chat_id, "assistant", safe_assistant, now),
+            )
+            conn.execute("UPDATE chats SET updated_at=? WHERE id=?", (now, chat_id))
+
+            scene = conn.execute(
+                "SELECT scene_id FROM scene_states WHERE chat_id=?", (chat_id,)
+            ).fetchone()
+            scene_id = scene["scene_id"] if scene else uuid.uuid4().hex
+            if not scene:
+                conn.execute(
+                    "INSERT INTO scene_states(chat_id,scene_id,updated_at) VALUES(?,?,?)",
+                    (chat_id, scene_id, now),
+                )
+            conn.execute(
+                "INSERT INTO story_beats(chat_id,scene_id,content,created_at) VALUES(?,?,?,?)",
+                (chat_id, scene_id, safe_assistant[:8000], now),
+            )
+
+            for memory_type, content in memory_candidates:
+                safe_content = str(sanitize_persistent_value(content)).strip()[:8000]
+                if not safe_content:
+                    continue
+                existing = conn.execute(
+                    "SELECT 1 FROM memories WHERE chat_id=? AND content=? AND archived=0 LIMIT 1",
+                    (chat_id, safe_content),
+                ).fetchone()
+                if existing:
+                    continue
+                conn.execute(
+                    "INSERT INTO memories(chat_id,character_id,memory_type,content,keywords,"
+                    "confidence,source_message_id,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        chat_id, chat["character_id"],
+                        str(sanitize_persistent_value(memory_type))[:80],
+                        safe_content, safe_content[:1000], 0.8,
+                        int(user_cursor.lastrowid), now, now,
+                    ),
+                )
+
+            count = int(conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE chat_id=?", (chat_id,)
+            ).fetchone()[0])
+            interval = max(8, int(summary_every_messages))
+            if count >= interval and count % interval < 2:
+                rows = conn.execute(
+                    "SELECT role,content FROM messages WHERE chat_id=? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (chat_id, interval),
+                ).fetchall()
+                recent = list(reversed(rows))
+                summary = "；".join(
+                    f"{'主人' if row['role'] == 'user' else chat['character_name']}："
+                    f"{row['content'][:160]}"
+                    for row in recent
+                )
+                conn.execute(
+                    "INSERT INTO chat_summaries(chat_id,content,through_message_id,created_at) "
+                    "VALUES(?,?,?,?)",
+                    (chat_id, summary[:6000], int(assistant_cursor.lastrowid), now),
+                )
+
+            cleanup = max(20, int(cleanup_every_messages))
+            if count >= cleanup and count % cleanup < 2:
+                for table, limit in (
+                    ("messages", max_messages),
+                    ("story_beats", max_story_beats),
+                    ("chat_summaries", max_summaries),
+                ):
+                    conn.execute(
+                        f"DELETE FROM {table} WHERE chat_id=? AND id NOT IN "
+                        f"(SELECT id FROM {table} WHERE chat_id=? ORDER BY id DESC LIMIT ?)",
+                        (chat_id, chat_id, max(1, int(limit))),
+                    )
+                cutoff = now - max(1, int(audit_retention_days)) * 86400
+                conn.execute("DELETE FROM audit_events WHERE created_at<?", (cutoff,))
+
+            conn.execute(
+                "INSERT INTO audit_events(owner_id,chat_id,event_type,detail_json,created_at) "
+                "SELECT owner_id,?, ?, ?, ? FROM chats WHERE id=?",
+                (
+                    chat_id, "exchange",
+                    json.dumps({
+                        "request_hash": request_hash,
+                        "response_hash": response_hash,
+                    }, ensure_ascii=False, separators=(",", ":")),
+                    now, chat_id,
+                ),
+            )
+
     def recent_messages(self, chat_id: str, limit: int = 24) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit)).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        return [sanitize_persistent_value(dict(row)) for row in reversed(rows)]
 
     def message_count(self, chat_id: str) -> int:
         with self._connect() as conn:
@@ -333,7 +472,10 @@ class RoleplayStore:
 
     def save_summary(self, chat_id: str, content: str, through_message_id: int) -> None:
         with self._lock, self._connect() as conn:
-            conn.execute("INSERT INTO chat_summaries(chat_id,content,through_message_id,created_at) VALUES(?,?,?,?)", (chat_id, content[:12000], through_message_id, _now()))
+            conn.execute(
+                "INSERT INTO chat_summaries(chat_id,content,through_message_id,created_at) VALUES(?,?,?,?)",
+                (chat_id, str(sanitize_persistent_value(content))[:12000], through_message_id, _now()),
+            )
 
     def latest_summary(self, chat_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -348,14 +490,23 @@ class RoleplayStore:
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "INSERT INTO memories(chat_id,character_id,memory_type,subject,predicate,object,content,keywords,confidence,source_message_id,locked,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (chat_id, chat["character_id"], memory_type[:80], subject[:200], predicate[:200], object_value[:500], content[:8000], keywords[:1000], max(0.0, min(1.0, confidence)), source_message_id, int(locked), now, now),
+                (
+                    chat_id, chat["character_id"],
+                    str(sanitize_persistent_value(memory_type))[:80],
+                    str(sanitize_persistent_value(subject))[:200],
+                    str(sanitize_persistent_value(predicate))[:200],
+                    str(sanitize_persistent_value(object_value))[:500],
+                    str(sanitize_persistent_value(content))[:8000],
+                    str(sanitize_persistent_value(keywords))[:1000],
+                    max(0.0, min(1.0, confidence)), source_message_id, int(locked), now, now,
+                ),
             )
             return int(cursor.lastrowid)
 
     def list_memories(self, chat_id: str, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM memories WHERE chat_id=? AND archived=0 ORDER BY locked DESC,updated_at DESC LIMIT ?", (chat_id, limit)).fetchall()
-        return [dict(row) for row in rows]
+        return [sanitize_persistent_value(dict(row)) for row in rows]
 
     def search_memories(self, chat_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         raw_parts = [part for part in re.split(r"\s+|[,，。！？;；]+", query) if len(part) >= 2]
@@ -381,14 +532,18 @@ class RoleplayStore:
         sql = "SELECT * FROM memories WHERE chat_id=? AND archived=0 AND (" + " OR ".join(clauses) + ") ORDER BY locked DESC,confidence DESC,updated_at DESC LIMIT ?"
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [dict(row) for row in rows]
+        return [sanitize_persistent_value(dict(row)) for row in rows]
 
     def update_memory(self, chat_id: str, memory_id: int, content: str) -> bool:
         with self._lock, self._connect() as conn:
             cursor = conn.execute(
                 "UPDATE memories SET content=?,keywords=?,updated_at=? "
                 "WHERE id=? AND chat_id=? AND archived=0",
-                (content[:8000], content[:1000], _now(), memory_id, chat_id),
+                (
+                    str(sanitize_persistent_value(content))[:8000],
+                    str(sanitize_persistent_value(content))[:1000],
+                    _now(), memory_id, chat_id,
+                ),
             )
             return cursor.rowcount > 0
 
@@ -407,15 +562,16 @@ class RoleplayStore:
 
     def create_worldbook(self, owner_id: int, name: str) -> dict[str, Any]:
         now = _now(); worldbook_id = uuid.uuid4().hex
+        name = str(sanitize_persistent_value(name))[:120]
         with self._lock, self._connect() as conn:
             conn.execute("INSERT INTO worldbooks(id,owner_id,name,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(owner_id,name) DO UPDATE SET updated_at=excluded.updated_at", (worldbook_id, owner_id, name[:120], now, now))
             row = conn.execute("SELECT * FROM worldbooks WHERE owner_id=? AND name=?", (owner_id, name[:120])).fetchone()
-        return dict(row)
+        return sanitize_persistent_value(dict(row))
 
     def list_worldbooks(self, owner_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM worldbooks WHERE owner_id=? ORDER BY name", (owner_id,)).fetchall()
-        return [dict(row) for row in rows]
+        return [sanitize_persistent_value(dict(row)) for row in rows]
 
     def get_worldbook(self, owner_id: int, value: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -423,8 +579,8 @@ class RoleplayStore:
             if not book:
                 return None
             entries = conn.execute("SELECT * FROM world_entries WHERE worldbook_id=? ORDER BY priority DESC,id", (book["id"],)).fetchall()
-        result = dict(book)
-        result["entries"] = [dict(row) for row in entries]
+        result = sanitize_persistent_value(dict(book))
+        result["entries"] = [sanitize_persistent_value(dict(row)) for row in entries]
         return result
 
     def delete_worldbook(self, owner_id: int, value: str) -> bool:
@@ -436,7 +592,15 @@ class RoleplayStore:
         book = self.create_worldbook(owner_id, worldbook)
         now = _now()
         with self._lock, self._connect() as conn:
-            cursor = conn.execute("INSERT INTO world_entries(worldbook_id,keywords,content,priority,created_at,updated_at) VALUES(?,?,?,?,?,?)", (book["id"], keywords[:1000], content[:12000], priority, now, now))
+            cursor = conn.execute(
+                "INSERT INTO world_entries(worldbook_id,keywords,content,priority,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (
+                    book["id"],
+                    str(sanitize_persistent_value(keywords))[:1000],
+                    str(sanitize_persistent_value(content))[:12000],
+                    priority, now, now,
+                ),
+            )
             return int(cursor.lastrowid)
 
     def bind_worldbook(self, chat_id: str, owner_id: int, worldbook: str) -> bool:
@@ -455,7 +619,7 @@ class RoleplayStore:
         for row in rows:
             keywords = [k.strip().lower() for k in re.split(r"[,，|]", row["keywords"]) if k.strip()]
             if not keywords or any(keyword in lowered for keyword in keywords):
-                matches.append(dict(row))
+                matches.append(sanitize_persistent_value(dict(row)))
             if len(matches) >= limit:
                 break
         return matches
@@ -465,9 +629,12 @@ class RoleplayStore:
             row = conn.execute("SELECT * FROM scene_states WHERE chat_id=?", (chat_id,)).fetchone()
         result = self._row(row)
         if result:
-            result["active_characters"] = json.loads(result.pop("active_characters_json") or "[]")
-            result["stable_memory"] = json.loads(result.pop("stable_memory_json") or "{}")
-            result["volatile_memory"] = json.loads(result.pop("volatile_memory_json") or "{}")
+            result["active_characters"] = sanitize_persistent_value(
+                json.loads(result.pop("active_characters_json") or "[]"))
+            result["stable_memory"] = sanitize_persistent_value(
+                json.loads(result.pop("stable_memory_json") or "{}"))
+            result["volatile_memory"] = sanitize_persistent_value(
+                json.loads(result.pop("volatile_memory_json") or "{}"))
         return result
 
     def update_scene_state(self, chat_id: str, **fields: Any) -> dict[str, Any]:
@@ -491,29 +658,50 @@ class RoleplayStore:
             conn.execute(
                 "INSERT INTO scene_states(chat_id,scene_id,title,current_situation,scene_time,location,active_characters_json,story_progress,stable_memory_json,volatile_memory_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(chat_id) DO UPDATE SET scene_id=excluded.scene_id,title=excluded.title,current_situation=excluded.current_situation,scene_time=excluded.scene_time,location=excluded.location,active_characters_json=excluded.active_characters_json,story_progress=excluded.story_progress,stable_memory_json=excluded.stable_memory_json,volatile_memory_json=excluded.volatile_memory_json,updated_at=excluded.updated_at",
-                (chat_id, current["scene_id"], str(current["title"])[:300], str(current["current_situation"])[:4000], str(current["scene_time"])[:200], str(current["location"])[:300], json.dumps(current["active_characters"], ensure_ascii=False), max(0, min(100, int(current["story_progress"] or 0))), json.dumps(current["stable_memory"], ensure_ascii=False), json.dumps(current["volatile_memory"], ensure_ascii=False), _now()),
+                (
+                    chat_id, current["scene_id"],
+                    str(sanitize_persistent_value(current["title"]))[:300],
+                    str(sanitize_persistent_value(current["current_situation"]))[:4000],
+                    str(sanitize_persistent_value(current["scene_time"]))[:200],
+                    str(sanitize_persistent_value(current["location"]))[:300],
+                    json.dumps(sanitize_persistent_value(current["active_characters"]), ensure_ascii=False),
+                    max(0, min(100, int(current["story_progress"] or 0))),
+                    json.dumps(sanitize_persistent_value(current["stable_memory"]), ensure_ascii=False),
+                    json.dumps(sanitize_persistent_value(current["volatile_memory"]), ensure_ascii=False),
+                    _now(),
+                ),
             )
         return self.get_scene_state(chat_id)
 
     def add_story_beat(self, chat_id: str, content: str) -> int:
         scene = self.get_scene_state(chat_id) or self.update_scene_state(chat_id)
         with self._lock, self._connect() as conn:
-            cursor = conn.execute("INSERT INTO story_beats(chat_id,scene_id,content,created_at) VALUES(?,?,?,?)", (chat_id, scene["scene_id"], content[:8000], _now()))
+            cursor = conn.execute(
+                "INSERT INTO story_beats(chat_id,scene_id,content,created_at) VALUES(?,?,?,?)",
+                (chat_id, scene["scene_id"], str(sanitize_persistent_value(content))[:8000], _now()),
+            )
             return int(cursor.lastrowid)
 
     def recent_story_beats(self, chat_id: str, limit: int = 12) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM story_beats WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit)).fetchall()
-        return [dict(row) for row in reversed(rows)]
+        return [sanitize_persistent_value(dict(row)) for row in reversed(rows)]
 
     def relationship_timeline(self, chat_id: str, limit: int = 30) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM memories WHERE chat_id=? AND memory_type IN ('relationship_state','relationship_event') AND archived=0 ORDER BY created_at DESC LIMIT ?", (chat_id, limit)).fetchall()
-        return [dict(row) for row in rows]
+        return [sanitize_persistent_value(dict(row)) for row in rows]
 
     def audit(self, owner_id: int, event_type: str, detail: dict[str, Any], chat_id: str | None = None) -> None:
         with self._lock, self._connect() as conn:
-            conn.execute("INSERT INTO audit_events(owner_id,chat_id,event_type,detail_json,created_at) VALUES(?,?,?,?,?)", (owner_id, chat_id, event_type, json.dumps(detail, ensure_ascii=False, separators=(",", ":")), _now()))
+            conn.execute(
+                "INSERT INTO audit_events(owner_id,chat_id,event_type,detail_json,created_at) VALUES(?,?,?,?,?)",
+                (
+                    owner_id, chat_id, str(event_type)[:80],
+                    json.dumps(sanitize_persistent_value(detail), ensure_ascii=False, separators=(",", ":")),
+                    _now(),
+                ),
+            )
 
     def prune_retention(self, chat_id: str, *, max_messages: int = 5000,
                         max_story_beats: int = 1000, max_summaries: int = 50,
@@ -536,10 +724,10 @@ class RoleplayStore:
         chat = self.get_chat(chat_id)
         if not chat:
             raise ValueError("聊天不存在")
-        return {
+        return sanitize_persistent_value({
             "format": "qqbot-roleplay-v1",
             "chat": chat,
             "messages": self.recent_messages(chat_id, 100000),
             "summary": self.latest_summary(chat_id),
             "memories": self.list_memories(chat_id, 100000),
-        }
+        })

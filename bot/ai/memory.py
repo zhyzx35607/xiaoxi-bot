@@ -31,6 +31,21 @@ _LAST_REPLY_CLEANUP_TS = 0  # monotonic fallback
 
 _LONG_MEMORY_TASKS = {}  # target key -> running task
 
+
+def _sanitize_entries(entries):
+    """Return valid memory rows with bounded, redacted content."""
+    from ..memory import sanitize_for_memory
+
+    sanitized = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        item = dict(entry)
+        if "content" in item:
+            item["content"] = sanitize_for_memory(item.get("content", ""))
+        sanitized.append(item)
+    return sanitized
+
 def _schedule_long_memory(key, coro):
     """Run at most one memory compression task per target at a time."""
     if key in _LONG_MEMORY_TASKS:
@@ -54,13 +69,17 @@ def _memory_file(group_id):
 
 def _load_memory(group_id, config=None):
     if group_id in _memories:
+        _memories[group_id] = _sanitize_entries(_memories[group_id])
         return _memories[group_id]
     path = _memory_file(group_id)
     now = time.time()
     if os.path.exists(path):
         try:
             with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+                loaded = json.load(f)
+            data = _sanitize_entries(loaded)
+            if data != loaded:
+                atomic_write_json(path, data)
             # Clean old entries (config memory_expire_hours, default 72h)
             expire_hours = int((config or {}).get("memory_expire_hours", 72))
             cutoff = now - expire_hours * 3600
@@ -130,13 +149,11 @@ def _cleanup_replies_by_user():
 
 def _save_memory(group_id, memory, config=None, session=None):
     """Save working memory. Caps at 20, triggers compression to long-term."""
-    from ..memory import sanitize_for_memory
     now = time.time()
+    memory[:] = _sanitize_entries(memory)
     for e in memory:
         if "ts" not in e:
             e["ts"] = now
-        if "content" in e:
-            e["content"] = sanitize_for_memory(e.get("content", ""))
     # Periodic cleanup: evict groups not accessed in > 1 hour
     stale = [g for g, ts in _memory_timestamps.items() if now - ts > 3600]
     for g in stale:
@@ -185,7 +202,10 @@ def _load_user_memory(group_id, user_id):
     if os.path.exists(path):
         try:
             with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+                loaded = json.load(f)
+            data = _sanitize_entries(loaded)
+            if data != loaded:
+                atomic_write_json(path, data)
             # 7 day TTL
             cutoff = now - 7 * 86400
             fresh = [e for e in data if e.get("ts", 0) > cutoff]
@@ -200,13 +220,11 @@ def _load_user_memory(group_id, user_id):
     return []
 
 def _save_user_memory(group_id, user_id, memory, config=None, session=None, max_entries=None):
-    from ..memory import sanitize_for_memory
     now = time.time()
+    memory[:] = _sanitize_entries(memory)
     for e in memory:
         if "ts" not in e:
             e["ts"] = now
-        if "content" in e:
-            e["content"] = sanitize_for_memory(e.get("content", ""))
     # Cap at user_memory_max from config (default 15); private chat passes 30
     if max_entries is None:
         max_entries = int((config or {}).get("user_memory_max", 15))
@@ -249,7 +267,10 @@ def _load_long_memory(group_id):
     if os.path.exists(path):
         try:
             with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+                loaded = json.load(f)
+            data = _sanitize_entries(loaded)
+            if data != loaded:
+                atomic_write_json(path, data)
             # 30 day TTL
             cutoff = now - 30 * 86400
             fresh = [e for e in data if e.get("ts", 0) > cutoff]
@@ -261,6 +282,7 @@ def _load_long_memory(group_id):
 def _save_long_memory(group_id, entries):
     path = _long_memory_file(group_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    entries = _sanitize_entries(entries)
     # Cap at 10
     if len(entries) > 10:
         entries = entries[-10:]
@@ -277,7 +299,10 @@ def _load_user_long_memory(group_id, user_id):
     if os.path.exists(path):
         try:
             with open(path, encoding="utf-8") as f:
-                data = json.load(f)
+                loaded = json.load(f)
+            data = _sanitize_entries(loaded)
+            if data != loaded:
+                atomic_write_json(path, data)
             # 30 day TTL
             cutoff = now - 30 * 86400
             fresh = [e for e in data if e.get("ts", 0) > cutoff]
@@ -292,6 +317,7 @@ def _load_user_long_memory(group_id, user_id):
 def _save_user_long_memory(group_id, user_id, entries):
     path = _user_long_memory_file(group_id, user_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    entries = _sanitize_entries(entries)
     if len(entries) > 8:
         entries = entries[-8:]
     atomic_write_json(path, entries)
@@ -318,8 +344,10 @@ async def _compress_user_to_long(group_id, user_id, old_entries, config, session
             long = _load_user_long_memory(group_id, user_id)
             long.append({"ts": time.time(), "content": summary})
             _save_user_long_memory(group_id, user_id, long)
-            log.info("User long-term memory saved (group %s, user %s): %s",
-                     group_id, user_id, summary[:60])
+            log.info(
+                "User long-term memory saved group=%s user=%s chars=%s",
+                group_id, user_id, len(summary),
+            )
     except Exception as e:
         log.error("User long-term compression failed: %s", e)
 

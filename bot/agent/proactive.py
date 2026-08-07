@@ -36,21 +36,35 @@ class ProactiveBudget:
         return True, "ok"
 
     def record(self, config, scope_key, *, topic="", now=None):
-        now = now or time.time(); state = self._state(scope_key)
-        day = datetime.fromtimestamp(now).strftime("%Y%m%d")
-        if state.get("day") != day: state = {"day": day, "sent": [], "topics": {}, "muted_until": 0}
-        state.setdefault("sent", []).append(now)
-        if topic: state.setdefault("topics", {})[topic] = now
-        self.store.write(self._path(scope_key), state)
+        now = now or time.time()
+        def update(state):
+            if not isinstance(state, dict):
+                state = {"day": "", "sent": [], "topics": {}, "muted_until": 0}
+            day = datetime.fromtimestamp(now).strftime("%Y%m%d")
+            if state.get("day") != day:
+                state = {"day": day, "sent": [], "topics": {}, "muted_until": 0}
+            state.setdefault("sent", []).append(now)
+            if topic:
+                state.setdefault("topics", {})[topic] = now
+            return state, None
+        self.store.update(self._path(scope_key), {}, update)
 
     def mute(self, scope_key, seconds=43200, now=None):
-        state = self._state(scope_key); state["muted_until"] = (now or time.time()) + seconds
-        self.store.write(self._path(scope_key), state)
+        now = now or time.time()
+        def update(state):
+            if not isinstance(state, dict):
+                state = {"day": "", "sent": [], "topics": {}, "muted_until": 0}
+            state["muted_until"] = now + seconds
+            return state, None
+        self.store.update(self._path(scope_key), {}, update)
 
     def unmute(self, scope_key):
-        state = self._state(scope_key)
-        state["muted_until"] = 0
-        self.store.write(self._path(scope_key), state)
+        def update(state):
+            if not isinstance(state, dict):
+                state = {"day": "", "sent": [], "topics": {}, "muted_until": 0}
+            state["muted_until"] = 0
+            return state, None
+        self.store.update(self._path(scope_key), {}, update)
 
     def muted_until(self, scope_key):
         return float(self._state(scope_key).get("muted_until", 0) or 0)

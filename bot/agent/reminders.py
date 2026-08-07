@@ -23,9 +23,12 @@ class AgentReminderStore:
             "attempts": 0,
             "created_at": time.time(),
         }
-        records = self._records()
-        records.append(reminder)
-        self.store.write("reminders/index.json", records[-1000:])
+        def add(records):
+            if not isinstance(records, list):
+                records = []
+            return (records + [reminder])[-1000:], reminder
+
+        self.store.update("reminders/index.json", [], add)
         return reminder
 
     def list(self, scope_key, *, pending_only=True):
@@ -40,16 +43,22 @@ class AgentReminderStore:
                 if item.get("status") == "pending" and float(item.get("due_at", 0)) <= now][:limit]
 
     def mark(self, reminder_id, status, error=""):
-        records = self._records()
-        for item in records:
-            if item.get("id") == str(reminder_id):
-                item["status"] = status
+        def change(records):
+            if not isinstance(records, list):
+                records = []
+            updated = None
+            for item in records:
+                if item.get("id") != str(reminder_id):
+                    continue
+                item["status"] = str(status)[:30]
                 item["attempts"] = int(item.get("attempts", 0)) + 1
                 item["last_error"] = str(error)[:300]
                 item["updated_at"] = time.time()
-                self.store.write("reminders/index.json", records[-1000:])
-                return item
-        return None
+                updated = item
+                break
+            return records[-1000:], updated
+
+        return self.store.update("reminders/index.json", [], change)
 
     def cancel(self, scope_key, reminder_id):
         for item in self._records():

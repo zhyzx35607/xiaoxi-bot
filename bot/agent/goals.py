@@ -31,21 +31,29 @@ class AgentGoalStore:
             "created_at": now,
             "updated_at": now,
         }
-        records = self.list(scope_key, include_done=True)
-        records.append(goal)
-        self.store.write(self._path(scope_key), records[-200:])
+        def add(records):
+            if not isinstance(records, list):
+                records = []
+            return (records + [goal])[-200:], goal
+
+        self.store.update(self._path(scope_key), [], add)
         return goal
 
     def update(self, scope_key, goal_id, *, status=None, progress=None):
-        records = self.list(scope_key, include_done=True)
-        for item in records:
-            if item.get("id") != str(goal_id):
-                continue
-            if status:
-                item["status"] = str(status)[:30]
-            if progress is not None:
-                item["progress"] = str(progress)[:1000]
-            item["updated_at"] = time.time()
-            self.store.write(self._path(scope_key), records[-200:])
-            return item
-        return None
+        def change(records):
+            if not isinstance(records, list):
+                records = []
+            updated = None
+            for item in records:
+                if item.get("id") != str(goal_id):
+                    continue
+                if status:
+                    item["status"] = str(status)[:30]
+                if progress is not None:
+                    item["progress"] = str(progress)[:1000]
+                item["updated_at"] = time.time()
+                updated = item
+                break
+            return records[-200:], updated
+
+        return self.store.update(self._path(scope_key), [], change)
