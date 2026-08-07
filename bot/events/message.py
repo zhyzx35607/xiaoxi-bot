@@ -402,9 +402,13 @@ class GroupMessageMixin:
         is_name_mentioned = self._check_name_mention(raw) if not is_at_bot else False
         is_reply_to_bot = await self._is_directed_at_bot(message, "") if not is_at_bot else False
         is_at_others = (not is_at_bot) and self._extract_mentions(message)
+        # In an enabled group, every message from the highest owner is an
+        # explicit conversation turn.  This bypasses ordinary interjection
+        # sampling, sleep gating and group rate limits while leaving all other
+        # members on the existing conservative path.
         force_owner_reply = (
             user_id == self.config.get("bot_owner")
-            and (is_at_bot or is_name_mentioned or is_reply_to_bot)
+            and self.config.get("agent", {}).get("owner_group_direct_reply", True)
         )
 
         # === BLACKLIST GUARD: check before all interactive features ===
@@ -534,6 +538,13 @@ class GroupMessageMixin:
                 group_id, user_id, raw, sender_card, message, message_id,
                 reply_intent="直接回应",
                 rate_warning=self._get_rate_limit_warning(remaining),
+            )
+            self._record_ai_outcome(group_id, bool(result))
+            return
+        if force_owner_reply:
+            result = await self._do_ai_reply(
+                group_id, user_id, raw, sender_card, message, message_id,
+                reply_intent="最高主人群聊回应",
             )
             self._record_ai_outcome(group_id, bool(result))
             return

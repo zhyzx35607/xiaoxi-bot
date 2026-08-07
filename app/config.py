@@ -472,6 +472,7 @@ def migrate_config(config):
         "companion_max_tokens": 700,
         "companion_temperature": 0.85,
         "companion_outbox_max_attempts": 3,
+        "owner_group_direct_reply": True,
     }
     agent = config.setdefault("agent", {})
     for key, value in agent_defaults.items():
@@ -502,5 +503,6 @@ def migrate_config(config):
         agent.setdefault("companion_max_tokens", 700)
         agent.setdefault("companion_temperature", 0.85)
         agent.setdefault("companion_outbox_max_attempts", 3)
+        agent.setdefault("owner_group_direct_reply", True)
         migrated = True
     return config, migrated

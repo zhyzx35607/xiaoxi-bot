@@ -7,10 +7,21 @@ import random
 import time
 import uuid
 from datetime import datetime
+from urllib.parse import urlparse
 
 from .policy import is_quiet_hours
 
 log = logging.getLogger("qqbot")
+
+
+def _safe_media_ref(value):
+    value = str(value or "").strip()[:2000]
+    if value.startswith("file://"):
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc and not parsed.username and not parsed.password:
+        return value
+    return ""
 
 
 class AgentWorker:
@@ -108,17 +119,25 @@ class AgentWorker:
                         await asyncio.sleep(random.uniform(0.5, 1.8))
                 media = payload.get("media_request") or {}
                 media_kind = str(media.get("kind") or "").lower()
-                media_file = str(media.get("file") or media.get("url") or "").strip()
+                media_file = _safe_media_ref(media.get("file") or media.get("url"))
                 if (companion.state().get("media_enabled", True) and not media_file
                         and media_kind == "image" and media.get("query")):
                     try:
                         from ..ai import generate_image
                         media_file, media_error = await generate_image(
                             self.dispatcher, str(media.get("query"))[:500])
+                        media_file = _safe_media_ref(media_file)
                         if media_error:
                             log.debug("Companion image generation skipped: %s", media_error)
                     except Exception as error:
                         log.debug("Companion image generation failed: %s", error)
+                    if not media_file:
+                        try:
+                            from ..integrations.uapi import uapi_resolve_image_url
+                            media_file = _safe_media_ref(await uapi_resolve_image_url(
+                                self.dispatcher, "/image/bing-daily"))
+                        except Exception as error:
+                            log.debug("Companion UApi image fallback failed: %s", error)
                 if companion.state().get("media_enabled", True) and media_file:
                     segment_type = "video" if media_kind == "video" else "image"
                     result = await self.dispatcher.client.send_private_msg(
