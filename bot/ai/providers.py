@@ -204,39 +204,14 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
                                  runtime.get("agnes_timeout_seconds",
                                              runtime.get("ai_timeout_seconds", 15)))
     deepseek_timeout = runtime.get("deepseek_timeout_seconds", 20)
-    fallback_delay = max(1.0, min(10.0, float(
-        runtime.get("sigmai_fallback_delay_seconds",
-                    runtime.get("agnes_fallback_delay_seconds", 6)))))
     if sigmai_cfg["api_key"]:
-        sigmai_task = asyncio.create_task(
-            _call_api(sigmai_cfg, "SigmaI", session, sigmai_timeout)
-        )
-        try:
-            result = await asyncio.wait_for(asyncio.shield(sigmai_task), timeout=fallback_delay)
-            if result:
-                return result
-            log.info("SigmaI failed or returned empty, falling back to DeepSeek")
-        except asyncio.TimeoutError:
-            if deepseek_cfg["api_key"]:
-                log.info("SigmaI is slow; starting hedged DeepSeek fallback")
-                deepseek_task = asyncio.create_task(
-                    _call_api(deepseek_cfg, "DeepSeek", session, deepseek_timeout)
-                )
-                pending = {sigmai_task, deepseek_task}
-                while pending:
-                    done, pending = await asyncio.wait(
-                        pending, return_when=asyncio.FIRST_COMPLETED
-                    )
-                    for task in done:
-                        result = task.result()
-                        if result:
-                            for other in pending:
-                                other.cancel()
-                            if pending:
-                                await asyncio.gather(*pending, return_exceptions=True)
-                            return result
-                return None
-            return await sigmai_task
+        # SigmaI is the normal provider.  DeepSeek is deliberately not
+        # hedged: wait for the bounded SigmaI request to finish before using
+        # the paid/secondary provider.
+        result = await _call_api(sigmai_cfg, "SigmaI", session, sigmai_timeout)
+        if result:
+            return result
+        log.info("SigmaI failed or returned empty; falling back to DeepSeek")
     if deepseek_cfg["api_key"]:
         return await _call_api(deepseek_cfg, "DeepSeek", session, deepseek_timeout)
     log.warning("No AI model API key configured (SigmaI or DeepSeek)")

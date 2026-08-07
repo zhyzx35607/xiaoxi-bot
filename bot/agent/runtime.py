@@ -8,6 +8,7 @@ import time
 
 from ..memory import contains_sensitive_data
 from .context import AgentContextBuilder
+from .companion_runtime import CompanionRuntime
 from .executor import AgentExecutor
 from .goals import AgentGoalStore
 from .identity import resolve_identity, resolve_scope
@@ -44,6 +45,7 @@ class AgentRuntime:
         self.timeline = AgentTimeline(self.store)
         self.proactive = ProactiveBudget(self.store)
         self.tasks = AgentTaskStore(self.store)
+        self.companion = CompanionRuntime(config, self.root)
         self.context = AgentContextBuilder(self)
         self.planner = None
         self.tools = None

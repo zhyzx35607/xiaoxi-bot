@@ -275,6 +275,13 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         relationship = "【当前对话身份：普通群友】\n保持原本自然、克制、有自主性的群友人格。"
     bot_role = relationship + "\n小汐当前在本群的身份：{}。".format(
         bot_role_display if group_id else "私聊场景")
+    if is_super_owner and not group_id:
+        try:
+            companion = getattr(getattr(dispatcher, "agent_runtime", None), "companion", None)
+            if companion is not None:
+                bot_role += "\n\n【最高主人长期陪伴状态】\n" + companion.context()
+        except Exception as error:
+            log.debug("Companion context unavailable: %s", error)
     memory = _load_memory(group_id, config) if group_id else []
     
     # Build memory context string
@@ -697,6 +704,13 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 await record_exchange(*args)
         except Exception as error:
             log.warning("Roleplay exchange persistence degraded: %s", error)
+    if is_super_owner and not group_id:
+        try:
+            companion = getattr(getattr(dispatcher, "agent_runtime", None), "companion", None)
+            if companion is not None:
+                companion.observe_outgoing(clean_reply if clean_reply else reply, topic=reply_intent or "conversation")
+        except Exception as error:
+            log.debug("Companion outgoing observation failed: %s", error)
     # Track last reply timestamp for multi-layer delay
     _last_reply_ts[context_key] = time.time()
     # Track reply content for anti-echo

@@ -224,6 +224,58 @@ async def _timeline_command(dispatcher, group_id, user_id):
     await dispatcher._reply(group_id, user_id, "\n".join(lines))
 
 
+async def _companion_command(dispatcher, user_id, action, value):
+    companion = getattr(dispatcher.agent_runtime, "companion", None)
+    if companion is None:
+        await dispatcher._reply(None, user_id, "陪伴模块尚未启动")
+        return
+    if action in {"on", "off", "主动"}:
+        enabled = value.lower() in {"on", "开启", "1", "true"} if action == "主动" else action == "on"
+        companion.set_control("proactive_enabled", enabled)
+        await dispatcher._reply(None, user_id, "最高主人主动陪伴已{}".format("开启" if enabled else "关闭"))
+        return
+    if action in {"追问", "followup"}:
+        enabled = value.lower() in {"on", "开启", "1", "true"}
+        companion.set_control("followup_enabled", enabled)
+        await dispatcher._reply(None, user_id, "主动追问已{}".format("开启" if enabled else "关闭"))
+        return
+    if action in {"媒体", "media"}:
+        enabled = value.lower() in {"on", "开启", "1", "true"}
+        companion.set_control("media_enabled", enabled)
+        await dispatcher._reply(None, user_id, "主动媒体已{}".format("开启" if enabled else "关闭"))
+        return
+    if action in {"情绪", "emotion", "mood"}:
+        state = companion.state()
+        await dispatcher._reply(None, user_id, "情绪：{mood}\n正向：{valence:.2f}\n精力：{energy:.2f}\n亲近：{attachment:.2f}\n牵挂：{concern:.2f}".format(**state))
+        return
+    if action in {"事件", "events"}:
+        events = companion.store.due_events(companion.owner_id, time.localtime().tm_mon, time.localtime().tm_mday)
+        facts = companion.store.list_facts(companion.owner_id, "生日", 20)
+        lines = ["今天事件：{}".format("；".join(item.get("title", "") for item in events) or "无")]
+        lines.append("关键记忆：{}".format("；".join(item.get("content", "") for item in facts[:10]) or "无"))
+        await dispatcher._reply(None, user_id, "\n".join(lines))
+        return
+    if action in {"清空", "clear"}:
+        companion.store.cancel_followups(companion.owner_id, value)
+        await dispatcher._reply(None, user_id, "已清理{}相关主动追问".format(value or "全部"))
+        return
+    if action in {"记忆", "memory", "search"}:
+        result = companion.search_memory(value)
+        facts = result["facts"]
+        episodes = result["episodes"]
+        lines = ["长期事实："] + ["- {}".format(item.get("content", "")[:180]) for item in facts[:20]]
+        lines.append("长期经历：")
+        lines.extend("- {}".format(item.get("content", "")[:180]) for item in episodes[:10])
+        await dispatcher._reply(None, user_id, "\n".join(lines))
+        return
+    state = companion.state()
+    await dispatcher._reply(None, user_id, "陪伴：{}；追问：{}；媒体：{}；心情：{}；长期事实：{}".format(
+        "开启" if state.get("proactive_enabled", True) else "关闭",
+        "开启" if state.get("followup_enabled", True) else "关闭",
+        "开启" if state.get("media_enabled", True) else "关闭",
+        state.get("mood", "calm"), len(companion.store.list_facts(companion.owner_id))))
+
+
 async def _insight_command(dispatcher, group_id, user_id):
     scope = _scope_key(group_id, user_id)
     records = dispatcher.agent_runtime.insights.list(scope, limit=20)
@@ -270,6 +322,9 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
         await dispatcher._reply(group_id, user_id, "\u6700\u9ad8\u4e3b\u4eba\u79c1\u57df\u81ea\u6cbb\u5df2{}".format("\u5f00\u542f" if enabled else "\u5173\u95ed"))
         return
     if action in {"\u4e3b\u52a8", "proactive"}:
+        if not group_id and level >= LEVEL_SUPER:
+            await _companion_command(dispatcher, user_id, "主动", value)
+            return
         if level < LEVEL_GOWNER or not group_id:
             await dispatcher._reply(group_id, user_id, "\u7fa4\u57df\u4e3b\u52a8 Agent \u53ea\u80fd\u7531\u6700\u9ad8\u4e3b\u4eba\u6216\u5f53\u524d\u7fa4\u4e3b\u5728\u7fa4\u91cc\u8bbe\u7f6e")
             return
@@ -280,16 +335,26 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
         save_group_config(dispatcher)
         await dispatcher._reply(group_id, user_id, "\u672c\u7fa4\u4e3b\u52a8 Agent \u5df2{}".format("\u5f00\u542f" if enabled else "\u5173\u95ed"))
         return
+    if not group_id and level >= LEVEL_SUPER and action in {
+        "追问", "followup", "媒体", "media", "情绪", "emotion", "mood",
+        "事件", "events", "清空", "clear", "状态", "status", "search",
+    }:
+        await _companion_command(dispatcher, user_id, action, value)
+        return
     if action in {"静默", "mute"}:
         seconds = _duration_seconds(value) if value else 43200
         if seconds is None:
             await dispatcher._reply(group_id, user_id, "用法：/agent 静默 12小时")
             return
         dispatcher.agent_runtime.proactive.mute(_scope_key(group_id, user_id), seconds=seconds)
+        if not group_id and user_id == dispatcher.config.get("bot_owner"):
+            dispatcher.agent_runtime.companion.set_control("muted_until", time.time() + seconds)
         await dispatcher._reply(group_id, user_id, "当前作用域主动消息已静默约 {}".format(value or "12小时"))
         return
     if action in {"恢复主动", "unmute", "resume"}:
         dispatcher.agent_runtime.proactive.unmute(_scope_key(group_id, user_id))
+        if not group_id and user_id == dispatcher.config.get("bot_owner"):
+            dispatcher.agent_runtime.companion.set_control("muted_until", 0)
         await dispatcher._reply(group_id, user_id, "当前作用域主动消息已恢复")
         return
     if action in {"\u76ee\u6807", "goal", "goals"}:
@@ -299,6 +364,10 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
         await _reminder_command(dispatcher, group_id, user_id, value)
         return
     if action in {"\u8bb0\u5fc6", "memory"}:
+        if not group_id and level >= LEVEL_SUPER and (not value or value.lower().startswith(("search", "list", "查询", "搜索"))):
+            query = value.split(maxsplit=1)[1] if len(value.split(maxsplit=1)) > 1 else ""
+            await _companion_command(dispatcher, user_id, "记忆", query)
+            return
         await _memory_command(dispatcher, group_id, user_id, value)
         return
     if action in {"\u4efb\u52a1", "task", "tasks"}:

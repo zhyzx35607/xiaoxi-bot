@@ -3,8 +3,12 @@
 import asyncio
 import json
 import logging
+import random
 import time
 import uuid
+from datetime import datetime
+
+from .policy import is_quiet_hours
 
 log = logging.getLogger("qqbot")
 
@@ -77,6 +81,87 @@ class AgentWorker:
                 log.warning("Agent reminder delivery failed id=%s attempt=%s: %s",
                             reminder.get("id"), attempts, error)
         return delivered, failed
+
+    async def _deliver_companion_outbox(self):
+        runtime = self.dispatcher.agent_runtime
+        companion = getattr(runtime, "companion", None)
+        owner_id = int(self.dispatcher.config.get("bot_owner") or 0)
+        if companion is None or not owner_id:
+            return 0, 0
+        delivered = failed = 0
+        max_attempts = max(1, int(self.dispatcher.config.get("agent", {}).get(
+            "companion_outbox_max_attempts", 3)))
+        for item in companion.store.due_outbox(owner_id, time.time(), limit=10):
+            try:
+                payload = item.get("payload") or {}
+                parts = payload.get("message_parts") or []
+                if isinstance(parts, str):
+                    parts = [parts]
+                for index, text in enumerate(parts[:4]):
+                    if not str(text).strip():
+                        continue
+                    result = await self.dispatcher.client.send_private_msg(
+                        owner_id, [{"type": "text", "data": {"text": str(text).strip()}}])
+                    if isinstance(result, dict) and result.get("status") not in {None, "ok"}:
+                        raise RuntimeError(result.get("message") or result.get("msg") or result)
+                    if index < len(parts) - 1:
+                        await asyncio.sleep(random.uniform(0.5, 1.8))
+                media = payload.get("media_request") or {}
+                media_kind = str(media.get("kind") or "").lower()
+                media_file = str(media.get("file") or media.get("url") or "").strip()
+                if (companion.state().get("media_enabled", True) and not media_file
+                        and media_kind == "image" and media.get("query")):
+                    try:
+                        from ..ai import generate_image
+                        media_file, media_error = await generate_image(
+                            self.dispatcher, str(media.get("query"))[:500])
+                        if media_error:
+                            log.debug("Companion image generation skipped: %s", media_error)
+                    except Exception as error:
+                        log.debug("Companion image generation failed: %s", error)
+                if companion.state().get("media_enabled", True) and media_file:
+                    segment_type = "video" if media_kind == "video" else "image"
+                    result = await self.dispatcher.client.send_private_msg(
+                        owner_id, [{"type": segment_type, "data": {"file": media_file}}])
+                    if isinstance(result, dict) and result.get("status") not in {None, "ok"}:
+                        if media_kind == "video":
+                            await self.dispatcher.client.send_private_msg(owner_id, media_file)
+                        else:
+                            raise RuntimeError(result.get("message") or result.get("msg") or result)
+                companion.store.mark_outbox(item["id"], "sent")
+                companion.observe_outgoing("\n".join(str(part) for part in parts), topic=item.get("topic", ""))
+                runtime.proactive.record(self.dispatcher.config, "owner:{}".format(owner_id), topic=item.get("topic", ""))
+                delivered += 1
+            except Exception as error:
+                attempts = int(item.get("attempts", 0)) + 1
+                status = "failed" if attempts >= max_attempts else "pending"
+                retry_at = time.time() + min(3600, 30 * (2 ** max(0, attempts - 1)))
+                companion.store.mark_outbox(item["id"], status, str(error), retry_at if status == "pending" else None)
+                failed += 1
+                log.warning("Companion outbox delivery failed id=%s attempt=%s: %s",
+                            item.get("id"), attempts, error)
+        return delivered, failed
+
+    async def _run_owner_companion(self):
+        settings = self.dispatcher.config.get("agent", {})
+        companion = getattr(self.dispatcher.agent_runtime, "companion", None)
+        owner_id = int(self.dispatcher.config.get("bot_owner") or 0)
+        if not companion or not owner_id or not settings.get("companion_enabled", True):
+            return "disabled"
+        now = time.time()
+        state = companion.state()
+        reason, payload = companion._due_reason(now)
+        high_priority = reason in {"event", "followup"}
+        if is_quiet_hours(settings, datetime.fromtimestamp(now)) and not high_priority:
+            return "quiet_hours"
+        allowed, budget_reason = self.dispatcher.agent_runtime.proactive.allowed(
+            self.dispatcher.config, "owner:{}".format(owner_id),
+            topic=(payload or {}).get("topic", reason) if isinstance(payload, dict) else reason,
+            is_private=True, now=now, priority="urgent" if high_priority else "normal")
+        if not allowed and not (high_priority and budget_reason == "quiet_hours"):
+            return budget_reason
+        result = await companion.decide(self.dispatcher, now=now)
+        return "queued" if result else "idle"
 
     async def _run_owner_task(self):
         settings = self.dispatcher.config.get("agent", {})
@@ -332,15 +417,20 @@ class AgentWorker:
 
     async def tick(self):
         delivered, failed = await self._deliver_reminders()
+        companion_delivered, companion_failed = await self._deliver_companion_outbox()
         task_status = await self._run_owner_task()
         goal_review = await self._review_owner_goal()
         group_review = await self._review_group_scope()
+        companion_status = await self._run_owner_companion()
         self.dispatcher.agent_runtime.store.write("worker/status.json", {
             "running": True,
             "mode": "observation" if self.dispatcher.config.get("agent", {}).get("observation_only", True) else "active",
             "last_tick": time.time(),
             "delivered": delivered,
             "failed": failed,
+            "companion_delivered": companion_delivered,
+            "companion_failed": companion_failed,
+            "companion_status": companion_status,
             "task_status": task_status,
             "goal_review": goal_review,
             "group_review": group_review,

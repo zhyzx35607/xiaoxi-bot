@@ -440,7 +440,8 @@ def migrate_config(config):
         "group_enabled": True,
         "private_enabled": True,
         "proactive_enabled": True,
-        "owner_daily_limit": 6,
+        "owner_daily_limit": 12,
+        "owner_hourly_limit": 3,
         "group_daily_limit": 3,
         "topic_cooldown_seconds": 1800,
         "rejection_mute_seconds": 43200,
@@ -466,6 +467,11 @@ def migrate_config(config):
         "review_lease_seconds": 3600,
         "worker_enabled": True,
         "worker_interval_seconds": 30,
+        "companion_enabled": True,
+        "companion_min_gap_seconds": 1800,
+        "companion_max_tokens": 700,
+        "companion_temperature": 0.85,
+        "companion_outbox_max_attempts": 3,
     }
     agent = config.setdefault("agent", {})
     for key, value in agent_defaults.items():
@@ -484,5 +490,17 @@ def migrate_config(config):
         agent.setdefault("planner_max_tokens", 1400)
         agent.setdefault("group_review_interval_seconds", 10800)
         agent.setdefault("rejection_mute_seconds", 43200)
+        migrated = True
+    if int(agent.get("schema_version", 0) or 0) < 4:
+        agent["schema_version"] = 4
+        if int(agent.get("owner_daily_limit", 6) or 6) == 6:
+            agent["owner_daily_limit"] = 12
+        agent.setdefault("owner_hourly_limit", 3)
+        agent.setdefault("owner_hourly_limit", 3)
+        agent.setdefault("companion_enabled", True)
+        agent.setdefault("companion_min_gap_seconds", 1800)
+        agent.setdefault("companion_max_tokens", 700)
+        agent.setdefault("companion_temperature", 0.85)
+        agent.setdefault("companion_outbox_max_attempts", 3)
         migrated = True
     return config, migrated

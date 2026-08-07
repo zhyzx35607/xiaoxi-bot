@@ -324,6 +324,12 @@ class GroupMessageMixin:
                 user_id=user_id, sender_name=sender_card,
             )
             if user_id == self.config.get("bot_owner") and not raw.startswith(prefix):
+                try:
+                    self.agent_runtime.companion.observe_owner_message(
+                        raw, source="private_message")
+                except Exception:
+                    log.exception("Owner companion observation failed")
+            if user_id == self.config.get("bot_owner") and not raw.startswith(prefix):
                 if await self.agent_runtime.handle_event(self, event, explicit=True):
                     return
                 await self._handle_owner_private(user_id, message, raw, sender, message_id)

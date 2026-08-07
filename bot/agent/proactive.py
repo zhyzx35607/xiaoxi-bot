@@ -17,7 +17,7 @@ class ProactiveBudget:
         state = self.store.read(self._path(scope_key), {"day": "", "sent": [], "topics": {}, "muted_until": 0})
         return state if isinstance(state, dict) else {"day": "", "sent": [], "topics": {}, "muted_until": 0}
 
-    def allowed(self, config, scope_key, *, topic="", is_private=False, now=None):
+    def allowed(self, config, scope_key, *, topic="", is_private=False, now=None, priority="normal"):
         now = now or time.time()
         settings = agent_config(config)
         if is_quiet_hours(settings, datetime.fromtimestamp(now)):
@@ -28,8 +28,13 @@ class ProactiveBudget:
         day = datetime.fromtimestamp(now).strftime("%Y%m%d")
         sent = state.get("sent", []) if state.get("day") == day else []
         limit = int(settings["owner_daily_limit"] if is_private else settings["group_daily_limit"])
-        if len(sent) >= limit:
+        if priority != "urgent" and len(sent) >= limit:
             return False, "daily_limit"
+        if is_private and priority != "urgent":
+            hourly_limit = max(1, int(settings.get("owner_hourly_limit", 3)))
+            recent_hour = [stamp for stamp in sent if now - float(stamp) < 3600]
+            if len(recent_hour) >= hourly_limit:
+                return False, "hourly_limit"
         last_topic = float((state.get("topics") or {}).get(topic, 0) or 0) if topic else 0
         if topic and now - last_topic < int(settings["topic_cooldown_seconds"]):
             return False, "topic_cooldown"
