@@ -74,6 +74,16 @@ class ApplicationLogRedactionTests(unittest.TestCase):
         self.assertNotIn("private-value", sanitized)
         self.assertEqual(sanitized.count("<redacted>"), 2)
 
+    def test_redacts_query_credentials_and_common_api_key_names(self):
+        sanitized = sanitize_log_message(
+            "https://example.invalid/callback?access_token=secret-a&x-api-key=secret-b#sessdata=secret-c "
+            "client-key=secret-d SESSDATA=secret-e"
+        )
+
+        for secret in ("secret-a", "secret-b", "secret-c", "secret-d", "secret-e"):
+            self.assertNotIn(secret, sanitized)
+        self.assertGreaterEqual(sanitized.count("<redacted>"), 5)
+
     def test_formatter_redacts_exception_text(self):
         formatter = RedactingFormatter("%(levelname)s %(message)s")
         try:
@@ -114,6 +124,25 @@ class NapCatConfigTests(unittest.TestCase):
             self.assertEqual(updated["packetBackend"], "example")
             if os.name != "nt":
                 self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertFalse(self.module.update_config(path))
+
+    def test_correct_logging_settings_still_harden_insecure_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "onebot11_123456.json"
+            path.write_text(json.dumps({
+                "consoleLog": False,
+                "consoleLogLevel": "warn",
+                "fileLog": False,
+                "fileLogLevel": "warn",
+            }), encoding="utf-8")
+            os.chmod(path, 0o644)
+
+            updated = self.module.update_config(path)
+            if os.name != "nt":
+                self.assertTrue(updated)
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            else:
+                self.assertFalse(updated)
             self.assertFalse(self.module.update_config(path))
 
 
@@ -160,6 +189,11 @@ class ServiceInstallScriptTests(unittest.TestCase):
             script.index("systemctl enable --now napcat-login-watchdog.service"),
             script.index("systemctl disable --now napcat-login-watchdog.timer"),
         )
+
+    def test_napcat_install_hardens_account_config_permissions(self):
+        script = (ROOT / "deploy" / "install-napcat-service.sh").read_text(encoding="utf-8")
+        self.assertIn("-name 'onebot11_*.json'", script)
+        self.assertIn('chmod 0600 "${config_file}"', script)
 
 
 if __name__ == "__main__":

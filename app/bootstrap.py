@@ -14,6 +14,24 @@ from .config import apply_env_overrides, load_config, migrate_config
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 log = logging.getLogger("qqbot")
 
+
+async def _wait_for_startup_connection(client, client_task, timeout):
+    """Wait for readiness or a client exit without delaying shutdown unnecessarily."""
+    if client.is_connected:
+        return True
+    wait_task = asyncio.create_task(client.wait_until_connected(timeout=timeout))
+    done, _ = await asyncio.wait(
+        {wait_task, client_task}, return_when=asyncio.FIRST_COMPLETED,
+    )
+    if wait_task in done:
+        return bool(wait_task.result())
+    wait_task.cancel()
+    try:
+        await wait_task
+    except asyncio.CancelledError:
+        pass
+    return bool(client.is_connected)
+
 async def amain():
     config_path = os.getenv("QQBOT_CONFIG_PATH") or os.path.join(_BASE_DIR, "config.json")
     config = load_config(config_path)
@@ -53,10 +71,25 @@ async def amain():
             pass
 
     client_task = asyncio.create_task(client.run())
-    await asyncio.sleep(2)
     if client_task.done():
         log.warning("Client task exited during startup; stopping main loop")
         return
+    startup_timeout = config.get("runtime", {}).get("startup_connect_timeout_seconds", 30)
+    try:
+        startup_timeout = max(1.0, float(startup_timeout))
+    except (TypeError, ValueError):
+        startup_timeout = 30.0
+    connected = await _wait_for_startup_connection(client, client_task, startup_timeout)
+    if client_task.done():
+        log.warning("Client task exited during startup; stopping main loop")
+        return
+    if connected:
+        log.info("OneBot connection ready; starting background workers")
+    else:
+        log.warning(
+            "OneBot connection not ready after %.0fs; starting background workers while reconnecting",
+            startup_timeout,
+        )
     dispatcher.start_delayed_worker()
     dispatcher.start_scheduler()
     dispatcher.start_bili_push()
