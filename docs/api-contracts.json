@@ -177,6 +177,7 @@
   "uapi": {
     "version": "1.0.0",
     "pricing": {
+      "/ai/models": 2,
       "/ai/translate": 4,
       "/ai/translate/languages": 0,
       "/answerbook/ask": 0,

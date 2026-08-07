@@ -157,8 +157,8 @@ class HealthServiceMixin:
                         log.warning("GC histogram at restart: %s",
                                     self._gc_type_histogram())
                         self.save_runtime_state(force=True)
-                    except Exception:
-                        pass
+                    except Exception as error:
+                        log.exception("Failed to persist runtime state before RSS restart: %s", error)
                     os.kill(os.getpid(), 15)  # SIGTERM -> clean shutdown, systemd restarts
                     return
                 if mb >= log_mb and time.time() - last_diag > 30:

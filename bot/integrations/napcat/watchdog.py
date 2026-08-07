@@ -2,6 +2,7 @@ import asyncio
 import glob
 import json
 import os
+import re
 import subprocess
 import time
 import urllib.parse
@@ -27,6 +28,7 @@ STATE_PATH = Path("/run/napcat-login-watchdog.json")
 PREFERRED_PORT = int(os.getenv("NAPCAT_WATCHDOG_PORT", "3001"))
 FAILURES_BEFORE_RESTART = 2
 RESTART_COOLDOWN_SECONDS = 300
+CHECK_INTERVAL_SECONDS = max(30, int(os.getenv("NAPCAT_WATCHDOG_INTERVAL", "30")))
 
 
 def load_state():
@@ -85,22 +87,29 @@ async def check_online():
     return False
 
 
-def main():
+def _safe_error_text(error):
+    text = str(error)
+    text = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1<redacted>", text)
+    text = re.sub(r"(?i)(token=)[^&\s]+", r"\1<redacted>", text)
+    return text[:240]
+
+
+async def run_check():
     state = load_state()
     now = int(time.time())
     try:
-        online = asyncio.run(check_online())
+        online = await check_online()
         reason = "OneBot reports offline" if not online else ""
     except Exception as error:
         online = False
-        reason = f"health check failed: {type(error).__name__}: {error}"
+        reason = f"health check failed: {type(error).__name__}: {_safe_error_text(error)}"
 
     if online:
         if state.get("failures", 0):
             print("NapCat login recovered; failure counter reset")
         state["failures"] = 0
         save_state(state)
-        return
+        return True
 
     state["failures"] = int(state.get("failures", 0)) + 1
     print(f"NapCat login unhealthy ({state['failures']}): {reason}")
@@ -108,13 +117,14 @@ def main():
     cooldown_remaining = RESTART_COOLDOWN_SECONDS - (now - last_restart)
     if state["failures"] < FAILURES_BEFORE_RESTART:
         save_state(state)
-        return
+        return False
     if cooldown_remaining > 0:
         print(f"Restart suppressed by cooldown ({cooldown_remaining}s remaining)")
         save_state(state)
-        return
+        return False
 
-    result = subprocess.run(
+    result = await asyncio.to_thread(
+        subprocess.run,
         ["systemctl", "restart", "napcat.service"],
         check=False,
         timeout=90,
@@ -125,6 +135,20 @@ def main():
     if result.returncode:
         raise SystemExit(result.returncode)
     print("Restarted napcat.service to trigger automatic login")
+    return False
+
+
+async def run_loop():
+    while True:
+        await run_check()
+        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+
+def main():
+    loop_enabled = os.getenv("NAPCAT_WATCHDOG_LOOP", "").lower() in {
+        "1", "true", "yes", "on",
+    }
+    asyncio.run(run_loop() if loop_enabled else run_check())
 
 
 if __name__ == "__main__":

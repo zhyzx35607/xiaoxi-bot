@@ -213,9 +213,11 @@ def _history_record_text(record):
         return ""
     parts = [record.get("raw_message"), record.get("message")]
     try:
-        parts.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-    except Exception:
-        pass
+        serialized = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        serialized = ""
+    if serialized:
+        parts.append(serialized)
     return "\n".join(str(part) for part in parts if part is not None)
 
 
@@ -380,7 +382,7 @@ async def resolve_b23(dispatcher, short_url):
             if resp.status in (301, 302, 303, 307, 308):
                 return resp.headers.get("Location", "")
     except Exception as e:
-        log.warning("b23 resolve failed %s: %s", short_url, e)
+        log.warning("b23 resolve failed: %s", e)
     return ""
 
 
@@ -482,8 +484,10 @@ async def download_mp4(dispatcher, url, bvid, max_bytes, timeout=120):
 def _remove_quiet(path):
     try:
         os.remove(path)
-    except Exception:
-        pass
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        log.debug("Temporary Bilibili file cleanup failed: %s", error)
 
 
 # ---------- archives (UP主 new-video polling) ----------
@@ -624,7 +628,6 @@ def parse_dynamic_item(item):
     text = ""
     images = []
     prefix = ""
-    target = item
     if item_type == "DYNAMIC_TYPE_FORWARD":
         orig = item.get("orig")
         if isinstance(orig, dict):

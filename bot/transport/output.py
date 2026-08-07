@@ -17,6 +17,11 @@ from ..storage.runtime_paths import create_runtime_temp_file
 log = logging.getLogger("qqbot")
 
 
+def _write_text_file(path, text):
+    with open(path, "w", encoding="utf-8") as output:
+        output.write(str(text))
+
+
 def _output_config(dispatcher):
     configured = dispatcher.config.get("message_output", {})
     return configured if isinstance(configured, dict) else {}
@@ -139,8 +144,7 @@ async def _upload_text_fallback(dispatcher, group_id, user_id, text, title):
     try:
         handle, path = create_runtime_temp_file("qqbot_", ".txt")
         os.close(handle)
-        with open(path, "w", encoding="utf-8") as output:
-            output.write(str(text))
+        await asyncio.to_thread(_write_text_file, path, text)
         name = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", title)[:40] + ".txt"
         if group_id:
             result = await dispatcher.client.upload_group_file(group_id, path, name)
@@ -153,9 +157,11 @@ async def _upload_text_fallback(dispatcher, group_id, user_id, text, title):
     finally:
         if path:
             try:
-                os.remove(path)
-            except OSError:
+                await asyncio.to_thread(os.remove, path)
+            except FileNotFoundError:
                 pass
+            except OSError:
+                log.debug("Long-response temporary file cleanup failed")
 
 
 async def send_text_response(dispatcher, group_id, user_id, text, *, force_forward=False,

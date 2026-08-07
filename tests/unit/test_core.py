@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from api_registry import REGISTRY
@@ -1805,12 +1806,12 @@ class HotboardFormatTests(unittest.TestCase):
                  "hot_value": "123"},
                 {"title": "第二条", "url": "", "hot_value": ""},
             ],
-            bot_qq=3127014580,
+            bot_qq=222,
             summary="今天都在聊大新闻",
         )
         self.assertEqual(len(nodes), 3)
         self.assertEqual(nodes[0]["data"]["content"], '【微博热榜】\n今天都在聊大新闻')
-        self.assertEqual(nodes[0]["data"]["uin"], "3127014580")
+        self.assertEqual(nodes[0]["data"]["uin"], "222")
         self.assertIn("1. 大新闻（123）", nodes[1]["data"]["content"])
         self.assertIn("参考来源：\nhttps://example.com/1", nodes[1]["data"]["content"])
         self.assertNotIn("?", nodes[1]["data"]["content"])
@@ -1820,7 +1821,7 @@ class HotboardFormatTests(unittest.TestCase):
     def test_forward_nodes_use_readable_empty_title(self):
         from bot.scheduler import build_hotboard_forward_nodes
         nodes = build_hotboard_forward_nodes(
-            "weibo", [{"title": "", "url": ""}], bot_qq=3127014580)
+            "weibo", [{"title": "", "url": ""}], bot_qq=222)
         self.assertEqual(nodes[1]["data"]["content"], "1. 暂无标题")
 
 
@@ -1840,7 +1841,7 @@ class HotboardPushTests(unittest.IsolatedAsyncioTestCase):
 
         class Stub:
             config = {
-                "bot_qq": 3127014580,
+                "bot_qq": 222,
                 "uapi_api_key": "test",
                 "hotboard_push": {"enabled": True, "types": ["weibo"]},
                 "groups": {"100": {"enabled": True, "features": {}}},
@@ -2268,8 +2269,11 @@ class PlayfulBanTests(unittest.IsolatedAsyncioTestCase):
             stub, _ = self._dispatcher()
             await ai_tools.execute_playful_ban(
                 stub, {"user_id": 666, "reason": "哈" * 100}, self._ctx())
-            with open(ai_tools._PLAYFUL_BAN_AUDIT, encoding="utf-8") as f:
-                audit = _json.load(f)
+            audit = await asyncio.to_thread(
+                lambda: _json.loads(
+                    Path(ai_tools._PLAYFUL_BAN_AUDIT).read_text(encoding="utf-8")
+                )
+            )
             self.assertEqual(len(audit), 1)
             self.assertEqual(len(audit[0]["reason"]), 50)
             self.assertEqual(audit[0]["actor"], "AI")

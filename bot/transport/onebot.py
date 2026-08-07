@@ -100,8 +100,8 @@ class OneBotClient:
         if self._ws:
             try:
                 await self._ws.close()
-            except Exception:
-                pass
+            except Exception as error:
+                log.debug("WebSocket close failed during shutdown: %s", error)
         await self._cancel_event_tasks()
 
     async def _cancel_event_tasks(self):
@@ -157,13 +157,13 @@ class OneBotClient:
                         msg_queue = asyncio.Queue(maxsize=self._queue_size)
                         self._queue_bytes = 0
 
-                        async def ws_reader():
+                        async def ws_reader(queue=msg_queue):
                             try:
                                 async for raw in ws:
                                     try:
                                         data = json.loads(raw)
                                     except json.JSONDecodeError:
-                                        log.warning("Invalid JSON: %s", str(raw)[:80])
+                                        log.warning("Invalid OneBot JSON frame: chars=%s", len(str(raw)))
                                         continue
 
                                     # API replies must never wait behind event dispatch. Event
@@ -188,7 +188,7 @@ class OneBotClient:
                                             self._last_queue_warning = now
                                         continue
                                     try:
-                                        msg_queue.put_nowait((data, raw_len))
+                                        queue.put_nowait((data, raw_len))
                                         self._queue_bytes += raw_len
                                     except asyncio.QueueFull:
                                         now = time.monotonic()
@@ -199,11 +199,11 @@ class OneBotClient:
                                 log.error("Reader error: %s", e)
                             finally:
                                 try:
-                                    msg_queue.put_nowait(None)
+                                    queue.put_nowait(None)
                                 except asyncio.QueueFull:
-                                    self._discard_oldest_queued_event(msg_queue)
+                                    self._discard_oldest_queued_event(queue)
                                     try:
-                                        msg_queue.put_nowait(None)
+                                        queue.put_nowait(None)
                                     except asyncio.QueueFull:
                                         log.warning("Message queue full while closing reader")
 
@@ -228,7 +228,7 @@ class OneBotClient:
                                 t.add_done_callback(self._event_tasks.discard)
 
                             except Exception as e:
-                                log.error("Message loop error: %s", e, exc_info=True)
+                                log.exception("Message loop error: %s", e)
 
                         reader_task.cancel()
                         try:
@@ -276,8 +276,8 @@ class OneBotClient:
                 try:
                     await asyncio.sleep(0.3)
                     await self._session.close()
-                except Exception:
-                    pass
+                except Exception as error:
+                    log.debug("HTTP session close failed during shutdown: %s", error)
             self._session = None
             self._release_pid()
 
@@ -289,7 +289,7 @@ class OneBotClient:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.error("Dispatch error: %s", e, exc_info=True)
+                log.exception("Dispatch error: %s", e)
 
     async def call(self, action, params=None, timeout=None):
         if not self.is_connected:
@@ -404,10 +404,10 @@ class OneBotClient:
 
     async def send_group_msg(self, group_id, message):
         if isinstance(message, str):
-            log.debug("[SEND] group=%s text=%s", group_id, message[:80])
+            log.debug("[SEND] group=%s text_chars=%s", group_id, len(message))
             message = [{"type": "text", "data": {"text": message}}]
         else:
-            log.debug("[SEND] group=%s card=%s", group_id, str(message)[:80])
+            log.debug("[SEND] group=%s payload_type=%s", group_id, type(message).__name__)
         return await self.call("send_group_msg", {"group_id": group_id, "message": message})
 
     async def send_private_msg(self, user_id, message):
@@ -502,8 +502,8 @@ class OneBotClient:
             if result.get("status") == "ok":
                 data = result.get("data", {})
                 return data.get("file") or data.get("url")
-        except Exception:
-            pass
+        except Exception as error:
+            log.debug("OneBot get_image failed: %s", error)
         return None
 
     async def set_group_leave(self, group_id, is_dismiss=False):

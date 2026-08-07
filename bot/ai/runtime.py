@@ -55,6 +55,7 @@ from .stickers import (
     STICKER_DIR,
     _allow_sticker_send,
     _build_sticker_inventory,
+    _load_sticker_file,
     collect_sticker_async,
     describe_image,
     get_sticker_summaries,
@@ -112,8 +113,8 @@ async def _await_with_private_typing(dispatcher, user_id, awaitable):
                 "user_id": user_id, "event_type": 1,
             })
             started = result.get("status") == "ok" if isinstance(result, dict) else False
-        except Exception:
-            pass
+        except Exception as error:
+            log.debug("Private typing indicator start failed: %s", error)
         return await awaitable
     finally:
         if started:
@@ -121,8 +122,8 @@ async def _await_with_private_typing(dispatcher, user_id, awaitable):
                 await dispatcher.client.call("set_input_status", {
                     "user_id": user_id, "event_type": 0,
                 })
-            except Exception:
-                pass
+            except Exception as error:
+                log.debug("Private typing indicator stop failed: %s", error)
 async def _notify_ai_unavailable(dispatcher, group_id, user_id, explicit=False):
     """Tell direct callers about an outage without adding group-chat noise."""
     if group_id and not explicit:
@@ -503,7 +504,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             dispatcher, user_id, _delayed_ai_request())
     # === R18 / inappropriate content interception ===
     if reply and "[R18]" in reply:
-        log.warning("AI rejected user %s in group %s: %s", user_id, group_id, reply[:50])
+        log.warning("AI rejected unsafe reply for user=%s group=%s", user_id, group_id)
         owner = config.get("bot_owner")
         bot_qq = config.get("bot_qq")
         if is_owner_tier:
@@ -566,23 +567,23 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             f"private_{user_id}.json" if not group_id else f"group_{group_id}.json")
         if os.path.exists(_sticker_path):
             try:
-                with open(_sticker_path, encoding="utf-8") as _sf:
-                    _stickers = json.load(_sf)
+                _stickers = await asyncio.to_thread(_load_sticker_file, _sticker_path)
                 exact_matches = [s for s in _stickers if s.get("emotion", "") == wanted_emotion]
                 current_gid = str(group_id) if group_id else f"private_{user_id}"
                 same_group = [s for s in exact_matches if s.get("group_id", "") == current_gid]
                 matches = same_group if same_group else exact_matches
+                matched_same_group = bool(same_group)
                 if not matches:
                     tag_matches = [s for s in _stickers if wanted_emotion in s.get("tags", [])]
                     same_group_tag = [s for s in tag_matches if s.get("group_id", "") == current_gid]
                     matches = same_group_tag if same_group_tag else tag_matches
+                    matched_same_group = bool(same_group_tag)
                 if matches:
                     sticker_file = random.choice(matches)["file"]
                     if not _allow_sticker_send(config, group_id, user_id):
                         sticker_file = None
-                    log.info("AI-driven sticker: emotion=%s -> file=%s (from %d matches, same_group=%s)",
-                             wanted_emotion, (sticker_file or "")[:16], len(matches),
-                             bool(same_group or same_group_tag))
+                    log.info("AI-driven sticker selected: emotion=%s matches=%d same_group=%s",
+                             wanted_emotion, len(matches), matched_same_group)
                 else:
                     log.info("AI wanted sticker emotion=%s but no match found in %d stickers",
                              wanted_emotion, len(_stickers))
@@ -601,7 +602,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 log.error("Sticker matching error: %s", e)
     # === Anti-echo guard: skip if reply is too similar to recent replies ===
     if user_id and not is_owner_tier and _is_repetitive(user_id, reply):
-        log.info("Anti-echo: skipping repetitive reply to user %s: %s", user_id, reply[:60])
+        log.info("Anti-echo skipped repetitive reply for user=%s", user_id)
         return None
     if group_id:
         try:
@@ -643,7 +644,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 if target:
                     await dispatcher.client.group_poke(group_id, target)
         except Exception as e:
-            log.error("Reply send error: %s", e, exc_info=True)
+            log.exception("Reply send error: %s", e)
             await dispatcher.client.send_group_msg(group_id, reply)
     else:
         if roleplay_active:

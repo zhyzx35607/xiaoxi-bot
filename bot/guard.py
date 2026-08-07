@@ -78,8 +78,8 @@ def add_blacklist(group_id, user_id, duration_hours=48, bot_owner=None, bot_qq=N
                 bot_owner = cfg.get("bot_owner")
             if bot_qq is None:
                 bot_qq = cfg.get("bot_qq")
-        except Exception:
-            pass
+        except (OSError, _json.JSONDecodeError, TypeError, ValueError) as error:
+            log.warning("Unable to read protected account IDs from config: %s", error)
     if user_id == bot_owner or user_id == bot_qq:
         log.info("Skipped blacklist for bot owner/self: %s", user_id)
         return

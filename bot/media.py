@@ -64,7 +64,7 @@ async def extract_message_context(dispatcher, group_id, message, raw_message="",
             if text:
                 contexts.append(text)
         except Exception as e:
-            log.error("Media context failed for %s: %s", typ, e, exc_info=True)
+            log.exception("Media context failed for %s: %s", typ, e)
     return "\n".join(contexts)
 
 
@@ -115,7 +115,8 @@ async def describe_image_with_ocr(dispatcher, group_id, seg):
                     if ocr_text:
                         parts.append("OCR文字：" + ocr_text[:180])
                         break
-                except Exception:
+                except Exception as error:
+                    log.debug("OCR provider failed: api=%s error=%s", api_name, error)
                     continue
     return "；".join(parts)
 

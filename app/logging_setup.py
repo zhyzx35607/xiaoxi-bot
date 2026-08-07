@@ -1,8 +1,42 @@
 """Application logging initialization."""
 
 import logging
-from logging.handlers import RotatingFileHandler
 import os
+import re
+from logging.handlers import RotatingFileHandler
+
+
+_HEADER_SECRET_PATTERN = re.compile(
+    r"(?i)([\"']?(?:authorization|cookie|set-cookie)[\"']?\s*[:=]\s*[\"']?)"
+    r"(?:bearer\s+)?([^\"'\r\n,}]+)"
+)
+_SECRET_PATTERN = re.compile(
+    r"(?i)([\"']?(?:access_?token|token|password|passkey|api_?key)"
+    r"[\"']?\s*[:=]\s*[\"']?)([^\"'\s,&}]+)"
+)
+_LONG_ID_PATTERN = re.compile(r"(?<!\d)\d{5,12}(?!\d)")
+_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_PAYLOAD_PATTERN = re.compile(
+    r"(?i)(\[CQ:|(?:raw_message|message|content|text|reply|summary|query|body|payload)\s*[:=])"
+)
+
+
+def sanitize_log_message(message, limit=4000):
+    text = _CONTROL_PATTERN.sub("", str(message).replace("\r", ""))
+    text = _HEADER_SECRET_PATTERN.sub(r"\1<redacted>", text)
+    text = _SECRET_PATTERN.sub(r"\1<redacted>", text)
+    text = _LONG_ID_PATTERN.sub("<id>", text)
+    payload = _PAYLOAD_PATTERN.search(text)
+    if payload:
+        text = text[:payload.start()].rstrip() + " <payload redacted>"
+    if len(text) > limit:
+        text = text[:limit] + "...<truncated>"
+    return text
+
+
+class RedactingFormatter(logging.Formatter):
+    def format(self, record):
+        return sanitize_log_message(super().format(record))
 
 
 def setup_logging(base_dir):
@@ -24,9 +58,14 @@ def setup_logging(base_dir):
     if not handlers:
         handlers.append(logging.NullHandler())
 
+    application_formatter = RedactingFormatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+    for handler in handlers:
+        handler.setFormatter(application_formatter)
+
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=handlers,
     )
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)

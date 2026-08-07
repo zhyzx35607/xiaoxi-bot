@@ -22,6 +22,20 @@ from .common import CONFIG_PATH, _load, _save
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+def _write_binary_fd(fd, payload):
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+
+
+def _remove_temp_file(path):
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        log.debug("Temporary query file cleanup failed: %s", error)
+
 async def cmd_hotboard(d, group_id, user_id, args, role, sender_card, message):
     """/热榜 [平台] — real hot board via uapis.cn."""
     from ..scheduler import BOARD_NAMES, build_detailed_hotboard, build_hotboard_forward_nodes, format_hotboard
@@ -68,18 +82,14 @@ async def _send_uapi_image(d, group_id, user_id, path, params, label):
     ext = ".png" if "png" in ctype else ".jpg"
     fd, tmp_path = create_runtime_temp_file("uapi_", ext)
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(payload)
+        await asyncio.to_thread(_write_binary_fd, fd, payload)
         segments = [{"type": "image", "data": {"file": "file://" + tmp_path}}]
         if group_id:
             await d.client.send_group_msg(group_id, segments)
         else:
             await d.client.send_private_msg(user_id, segments)
     finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
+        await asyncio.to_thread(_remove_temp_file, tmp_path)
 
 async def cmd_daily_news(d, group_id, user_id, args, role, sender_card, message):
     """/每日新闻 — daily news image via uapis.cn."""
@@ -164,8 +174,8 @@ async def cmd_translate(d, group_id, user_id, args, role, sender_card, message):
             if translated:
                 await d._reply(group_id, user_id, translated[:500])
                 return
-    except Exception:
-        pass
+    except Exception as error:
+        log.debug("Native translation failed; using AI fallback: %s", error)
     # Fallback to DeepSeek
     from ..ai import deepseek_chat
     reply = await deepseek_chat(d, "请将以下文本翻译成中文，只给出翻译结果：" + text)

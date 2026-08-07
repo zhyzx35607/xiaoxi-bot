@@ -97,6 +97,13 @@ class ArchitectureRegressionTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=/opt/qqbot", watchdog_service)
         self.assertIn("PYTHONPATH=/opt/qqbot", watchdog_service)
         self.assertIn("/opt/qqbot/deploy/napcat-login-watchdog.py", watchdog_service)
+        self.assertIn("Type=simple", watchdog_service)
+        self.assertIn("NoNewPrivileges=true", watchdog_service)
+        self.assertIn("ProtectSystem=strict", watchdog_service)
+        self.assertIn("CapabilityBoundingSet=", watchdog_service)
+        self.assertFalse(os.path.exists(os.path.join(
+            ROOT, "deploy", "napcat-login-watchdog.timer"
+        )))
     def test_no_dependency_was_added_for_refactor(self):
         with open(os.path.join(ROOT, "requirements.txt"), encoding="utf-8") as handle:
             requirements = {line.strip() for line in handle if line.strip()}

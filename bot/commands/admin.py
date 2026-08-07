@@ -40,7 +40,7 @@ async def cmd_at_all(d, group_id, user_id, args, role, sender_card, message):
         {"type": "at", "data": {"qq": "all"}},
         {"type": "text", "data": {"text": " " + content[:200]}},
     ])
-    log.info("AT_ALL group=%s user=%s text=%s", group_id, user_id, content[:40])
+    log.info("AT_ALL group=%s user=%s chars=%s", group_id, user_id, len(content))
 
 async def _toggle_group_feature(d, group_id, user_id, args, feature, label, cmd_name):
     """Shared on/off toggle for per-group feature flags."""
@@ -413,15 +413,15 @@ async def cmd_special_title(d, group_id, user_id, args, role, sender_card, messa
         return
     target = mentions[0]
     result = await d.client.set_group_special_title(group_id, target, title)
-    log.info("set_group_special_title response: %s", str(result)[:300])
+    log.info("set_group_special_title completed: status=%s", result.get("status"))
     if result.get("status") != "ok" and title:
         # A timeout may still have applied server-side; verify before failing.
         try:
             info = await d.client.get_group_member_info(group_id, target)
             if (info.get("data") or {}).get("title", "") == title:
                 result = {"status": "ok"}
-        except Exception:
-            pass
+        except Exception as error:
+            log.debug("Special title verification failed: %s", error)
     if result.get("status") == "ok":
         from ..notice_handler import mark_title_set_by_bot
         mark_title_set_by_bot(group_id, target, title)
@@ -448,16 +448,16 @@ async def cmd_my_title(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, "换太勤了，歇会再来")
         return
     result = await d.client.set_group_special_title(group_id, user_id, title)
-    log.info("mytitle: g=%s u=%s title=%s result=%s",
-             group_id, user_id, title[:20], str(result)[:200])
+    log.info("Self-title request completed: group=%s user=%s status=%s",
+             group_id, user_id, result.get("status"))
     if result.get("status") != "ok":
         # A timeout may still have applied server-side; verify before failing.
         try:
             info = await d.client.get_group_member_info(group_id, user_id)
             if (info.get("data") or {}).get("title", "") == title:
                 result = {"status": "ok"}
-        except Exception:
-            pass
+        except Exception as error:
+            log.debug("Self-title verification failed: %s", error)
     if result.get("status") == "ok":
         from ..notice_handler import mark_title_set_by_bot
         mark_title_set_by_bot(group_id, user_id, title)

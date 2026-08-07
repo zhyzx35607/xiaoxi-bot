@@ -4,11 +4,40 @@ After=network-online.target napcat.service
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
 User=root
 WorkingDirectory=/opt/qqbot
 Environment=PYTHONPATH=/opt/qqbot
 Environment=NAPCAT_WATCHDOG_PORT=3001
+Environment=NAPCAT_WATCHDOG_LOOP=1
+Environment=NAPCAT_WATCHDOG_INTERVAL=30
 EnvironmentFile=-/etc/napcat.env
 ExecStart=/opt/qqbot/venv/bin/python /opt/qqbot/deploy/napcat-login-watchdog.py
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=10
 Nice=19
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/run
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 """Sticker collection, analysis, inventory, and image description."""
 
+import asyncio
 import json
 import logging
 import os
@@ -19,6 +20,24 @@ os.makedirs(STICKER_DIR, exist_ok=True)
 _STICKER_LAST_SENT = {}
 
 _STICKER_DAILY_COUNT = {}
+
+
+def _load_sticker_file(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            stickers = json.load(handle)
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+        log.warning("Sticker inventory load failed: %s", error)
+        return []
+    if not isinstance(stickers, list):
+        log.warning("Sticker inventory root is not a list")
+        return []
+    valid = [item for item in stickers if isinstance(item, dict)]
+    if len(valid) != len(stickers):
+        log.warning("Sticker inventory contained invalid entries")
+    return valid
 
 def _allow_sticker_send(config, group_id, user_id):
     """Resource/spam boundary only; AI still decides whether a sticker fits."""
@@ -60,14 +79,14 @@ async def describe_image(dispatcher, group_id, file_id, sub_type, summary=""):
     except Exception as e:
         log.error("get_image failed: %s", e)
     if image_url:
-        log.info("Vision API: describing %s", file_id[:16])
+        log.info("Vision API sticker analysis started")
         desc = await _call_vision_api(config, image_url, session=dispatcher.client.session)
         if desc:
-            log.info("Vision result: %s -> %s", file_id[:16], desc[:50])
+            log.info("Vision API sticker analysis completed")
             return desc
     # Fallback: use QQ summary if vision API failed or image URL unavailable
     if qq_summary:
-        log.info("Image via summary (fallback): %s -> %s", file_id[:16], qq_summary[:50])
+        log.info("Sticker analysis used QQ summary fallback")
         return qq_summary
     # Ultimate fallback
     if sub_type and str(sub_type) != "0":
@@ -87,11 +106,7 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
     path = os.path.join(STICKER_DIR, f"{prefix}_{group_id}.json")
     stickers = []
     if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                stickers = json.load(f)
-        except Exception:
-            pass
+        stickers = await asyncio.to_thread(_load_sticker_file, path)
     # Avoid duplicates
     if any(s.get("file") == file_id for s in stickers):
         return
@@ -119,8 +134,8 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
             if result.get("status") == "ok":
                 data = result.get("data", {})
                 image_url = data.get("url") or data.get("file")
-        except Exception:
-            pass
+        except Exception as error:
+            log.debug("Sticker image lookup failed: %s", error)
     # Call vision API for detailed analysis (or use cached description)
     if cached_entry and not desc_text:
         desc_text = cached_entry.get("desc", "")[:50]
@@ -155,8 +170,8 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
     max_stickers = int(sticker_cfg.get("max_stickers", 50))
     if len(stickers) > max_stickers:
         stickers = stickers[-max_stickers:]
-    atomic_write_json(path, stickers)
-    log.info("Sticker collected + analyzed: %s -> %s [%s]", file_id[:16], desc_text[:40], emotion or "?")
+    await asyncio.to_thread(atomic_write_json, path, stickers)
+    log.info("Sticker collected and analyzed: emotion=%s", emotion or "unknown")
 
 async def _analyze_sticker_vision(config, image_url, session=None):
     """Use vision API to analyze sticker: description, tags, category, usage."""
@@ -218,11 +233,7 @@ def get_sticker_summaries(group_id):
     path = os.path.join(STICKER_DIR, f"group_{group_id}.json")
     if not os.path.exists(path):
         return []
-    try:
-        with open(path, encoding="utf-8") as f:
-            stickers = json.load(f)
-    except Exception:
-        return []
+    stickers = _load_sticker_file(path)
     summaries = []
     for s in stickers:
         desc = s.get("desc") or s.get("description") or s.get("summary", "") or "无描述"
@@ -250,11 +261,7 @@ def _build_sticker_inventory(group_id=None, user_id=None, is_private=False):
     path = os.path.join(STICKER_DIR, f"{prefix}_{gid}.json")
     if not os.path.exists(path):
         return ""
-    try:
-        with open(path, encoding="utf-8") as f:
-            stickers = json.load(f)
-    except Exception:
-        return ""
+    stickers = _load_sticker_file(path)
     if not stickers:
         return ""
     # Group by emotion, collect up to 2 descriptions per emotion

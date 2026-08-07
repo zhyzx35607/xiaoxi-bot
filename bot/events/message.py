@@ -8,13 +8,47 @@ import re
 import time
 
 from ..guard import add_blacklist, is_blacklisted
-from ..permission import LEVEL_ADMIN, LEVEL_MASTER, get_group_config, get_user_level, is_group_enabled
+from ..permission import (
+    LEVEL_ADMIN,
+    LEVEL_MASTER,
+    get_group_config,
+    get_user_level,
+    is_group_enabled,
+    save_group_config,
+)
 from ..utils import atomic_write_json
 from .context import (_cq_unescape, _event_scope_allowed, _log_chat_message, _read_tail_text, _service_state, _share_card_text)
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _FRIEND_CACHE_PATH = os.path.join(_ROOT, "data", "friend_cache.json")
+
+
+def _read_json_list(path):
+    with open(path, encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, list):
+        raise ValueError("JSON root must be a list")
+    return value
+
+
+def _read_linux_uptime_seconds():
+    with open("/proc/uptime", encoding="utf-8") as handle:
+        return int(float(handle.read().split()[0]))
+
+
+def _read_linux_memory_summary():
+    meminfo = {}
+    with open("/proc/meminfo", encoding="utf-8") as handle:
+        for line in handle:
+            key, value = line.split(":", 1)
+            meminfo[key] = int(value.strip().split()[0])
+    return {
+        "total": meminfo.get("MemTotal", 0) // 1024,
+        "available": meminfo.get("MemAvailable", 0) // 1024,
+        "swap_total": meminfo.get("SwapTotal", 0) // 1024,
+        "swap_free": meminfo.get("SwapFree", 0) // 1024,
+    }
 
 
 def _load_persisted_friend_cache(max_age=86400):
@@ -78,7 +112,7 @@ class GroupMessageMixin:
             message_id = event.get("message_id", 0)
             if message_id:
                 self._seen_msg_ids[message_id] = time.time()
-            log.debug("[SELF] group=%s said: %s", group_id, raw[:60])
+            log.debug("[SELF] group command candidate: group=%s chars=%s", group_id, len(raw))
             # Fixed commands and title requests sent from the bot account itself
             await self._handle_self_group_command(group_id, raw, message, sender_card)
 
@@ -88,7 +122,7 @@ class GroupMessageMixin:
                 self, "PRIVATE_OUT", raw,
                 user_id=peer_id, sender_name=sender_card,
             )
-            log.debug("[SELF] private said: %s", raw[:60])
+            log.debug("[SELF] private command candidate: chars=%s", len(raw))
             # Commands typed from the bot account in the owner's chat window run
             # as owner commands; replies land in the same window.
             if peer_id == self.config.get("bot_owner"):
@@ -213,8 +247,10 @@ class GroupMessageMixin:
             gcfg = get_group_config(self, group_id)
             feats = gcfg.get("features", {})
 
-            log.debug("[RECV] group=%s user=%s card=%s role=%s raw=%s",
-                      group_id, user_id, sender_card, sender_role, raw[:80])
+            log.debug(
+                "[RECV] group=%s user=%s role=%s chars=%s segments=%s",
+                group_id, user_id, sender_role, len(raw), len(message or []),
+            )
 
             # Self-message: skip buffer + only process explicit commands
             is_self_msg = user_id == self.config.get("bot_qq")
@@ -547,7 +583,6 @@ class PrivateMessageMixin:
         text = re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
         if not any(word in text for word in ("踢", "禁言", "解禁", "闭嘴", "放出来")):
             return False
-        from ..permission import get_user_level, LEVEL_ADMIN
         level, _ = await get_user_level(self, group_id, actor_id, sender_role)
         if actor_id != self.config.get("bot_owner") and level < LEVEL_ADMIN:
             return False
@@ -666,8 +701,8 @@ class PrivateMessageMixin:
             if args.strip():
                 try:
                     n = int(args.strip())
-                except Exception:
-                    pass
+                except ValueError:
+                    n = 30
             try:
                 filename = "chat.log" if cmd in ("chatlog", "聊天日志") else "bot.log"
                 log_dir = os.getenv("QQBOT_LOG_DIR") or _ROOT
@@ -697,8 +732,8 @@ class PrivateMessageMixin:
                 hours = 48
                 try:
                     hours = int(parts2[3]) if len(parts2) > 3 else 48
-                except Exception:
-                    pass
+                except ValueError:
+                    hours = 48
                 add_blacklist(gid, uid, hours, bot_owner=self.config.get("bot_owner"), bot_qq=self.config.get("bot_qq"))
                 await self._reply(None, user_id, f"加进黑名单了：群 {gid}，QQ {uid}，{hours} 小时")
             elif parts2[0] == "remove" and len(parts2) >= 3:
@@ -716,23 +751,17 @@ class PrivateMessageMixin:
                     value = (text or "").strip()
                     return {"active": "运行中", "inactive": "未运行", "failed": "异常", "activating": "启动中"}.get(value, value or "未知")
                 try:
-                    with open("/proc/uptime", encoding="utf-8") as f:
-                        seconds = int(float(f.read().split()[0]))
+                    seconds = await asyncio.to_thread(_read_linux_uptime_seconds)
                     uptime_text = f"运行时间：{seconds // 86400}天{seconds % 86400 // 3600}小时{seconds % 3600 // 60}分钟"
-                except Exception:
+                except (OSError, ValueError, IndexError):
                     uptime_text = "运行时间：未知"
                 try:
-                    meminfo = {}
-                    with open("/proc/meminfo", encoding="utf-8") as f:
-                        for line in f:
-                            key, value = line.split(":", 1)
-                            meminfo[key] = int(value.strip().split()[0])
-                    total = meminfo.get("MemTotal", 0) // 1024
-                    available = meminfo.get("MemAvailable", 0) // 1024
-                    swap_total = meminfo.get("SwapTotal", 0) // 1024
-                    swap_free = meminfo.get("SwapFree", 0) // 1024
-                    mem_text = f"内存：可用 {available} 兆 / 总计 {total} 兆\n交换分区：可用 {swap_free} 兆 / 总计 {swap_total} 兆"
-                except Exception:
+                    memory = await asyncio.to_thread(_read_linux_memory_summary)
+                    mem_text = (
+                        f"内存：可用 {memory['available']} 兆 / 总计 {memory['total']} 兆\n"
+                        f"交换分区：可用 {memory['swap_free']} 兆 / 总计 {memory['swap_total']} 兆"
+                    )
+                except (OSError, ValueError, IndexError):
                     mem_text = "内存：未知"
                 status = f"NapCat：{_cn_state(napcat_state)}\n"
                 status += f"小汐：{_cn_state(bot_state)}\n"
@@ -754,15 +783,11 @@ class PrivateMessageMixin:
             elif parts2[0] in ("enable", "disable") and len(parts2) >= 2:
                 gid = parts2[1]
                 enabled = parts2[0] == "enable"
-                with open(self._config_path, encoding="utf-8") as f:
-                    cfg = json.load(f)
-                if "groups" not in cfg:
-                    cfg["groups"] = {}
-                if gid not in cfg["groups"]:
-                    cfg["groups"][gid] = json.loads(json.dumps(self.config.get("group_defaults", {})))
-                cfg["groups"][gid]["enabled"] = enabled
-                atomic_write_json(self._config_path, cfg, indent=2)
-                self.config = cfg
+                groups = self.config.setdefault("groups", {})
+                if gid not in groups:
+                    groups[gid] = json.loads(json.dumps(self.config.get("group_defaults", {})))
+                groups[gid]["enabled"] = enabled
+                await asyncio.to_thread(save_group_config, self)
                 await self._reply(None, user_id, f"群 {gid} 已经{'开了' if enabled else '关了'}")
 
         elif cmd == "memory" and args.strip():
@@ -795,11 +820,10 @@ class PrivateMessageMixin:
                 else:
                     await self._reply(None, user_id, f"群 {parts2[1]} 无表情包记录")
             else:
-                import os as _os, json as _json
+                import os as _os
                 sticker_path = _os.path.join(_ROOT, "data", "stickers", f"group_{parts2[0]}.json")
                 if _os.path.exists(sticker_path):
-                    with open(sticker_path) as _sf:
-                        stickers = _json.load(_sf)
+                    stickers = await asyncio.to_thread(_read_json_list, sticker_path)
                     await self._reply(None, user_id, f"群 {parts2[0]} 共有 {len(stickers)} 个表情包")
                 else:
                     await self._reply(None, user_id, f"群 {parts2[0]} 无表情包记录")
@@ -853,8 +877,8 @@ class PrivateMessageMixin:
                     del w[k]
                 if removed_w:
                     save_warnings(w)
-            except Exception:
-                pass
+            except Exception as error:
+                log.warning("Private clear-data warning cleanup failed: group=%s error=%s", gid, error)
             user_mem_dir = _os2.path.join(_os2.path.dirname(_os2.path.dirname(_os2.path.abspath(__file__))),
                                         "data", "memories")
             pattern = _os2.path.join(user_mem_dir, f"group_{gid}_u*.json")
@@ -936,7 +960,7 @@ class PrivateMessageMixin:
         # === Safety: blacklist ===
         from ..guard import is_blacklisted
         if is_blacklisted(0, user_id):
-            log.debug("Private chat blocked (blacklisted): %s(%s)", sender_name, user_id)
+            log.debug("Private chat blocked by blacklist: user=%s", user_id)
             return
 
         # === Private AI gate: master switch + allowlist ===
@@ -949,13 +973,13 @@ class PrivateMessageMixin:
         if (user_id != self.config.get("bot_owner")
                 and not pc_cfg.get("enabled", False)
                 and not is_allowed_user):
-            log.debug("Private AI disabled, ignoring: %s(%s)", sender_name, user_id)
+            log.debug("Private AI disabled for user=%s", user_id)
             return
 
         # === Dedup: prevent concurrent AI calls for same user ===
         now = time.time()
         if user_id in self._private_processing and user_id != self.config.get("bot_owner"):
-            log.debug("Private dedup: user %s(%s) already processing, skipping", sender_name, user_id)
+            log.debug("Private AI request already processing: user=%s", user_id)
             return
         self._private_processing[user_id] = now
         typing_started = False
@@ -964,7 +988,7 @@ class PrivateMessageMixin:
             # === Friend-only gate (silent): non-friends get no response at all ===
             if user_id != self.config.get("bot_owner") and not await self._is_friend(user_id):
                 if not is_allowed_user:
-                    log.debug("Private chat skipped (not friend): %s(%s)", sender_name, user_id)
+                    log.debug("Private chat skipped because sender is not a friend: user=%s", user_id)
                     return
 
             # === Strip CQ codes for clean text ===
@@ -973,7 +997,7 @@ class PrivateMessageMixin:
 
             # Truly empty (no text + no image) → skip even AI call
             if not clean_raw and not has_image:
-                log.debug("Private chat skipped (empty): %s(%s)", sender_name, user_id)
+                log.debug("Private chat skipped because payload is empty: user=%s", user_id)
                 return
 
             # Show "typing..." while preparing (friend check / vision / search
@@ -983,8 +1007,8 @@ class PrivateMessageMixin:
                     "user_id": user_id, "event_type": 1,
                 })
                 typing_started = isinstance(_tr, dict) and _tr.get("status") == "ok"
-            except Exception:
-                pass
+            except Exception as error:
+                log.debug("Private typing indicator start failed: %s", error)
 
             # Build image context (only for non-sticker images)
             from ..media import extract_message_context
@@ -1000,8 +1024,8 @@ class PrivateMessageMixin:
             # Call AI — it decides whether to reply and what to say
             from ..ai import handle_ai_chat
             consecutive = self._private_consecutive_replies.get(user_id, 0)
-            log.info("Private AI evaluating: %s(%s) img=%s consec=%d",
-                     sender_name, user_id, bool(img_ctx), consecutive)
+            log.info("Private AI evaluating: user=%s image=%s consecutive=%d",
+                     user_id, bool(img_ctx), consecutive)
             result = await handle_ai_chat(
                 self, None, user_id, clean_raw, sender_name,
                 image_context=img_ctx or "",
@@ -1012,14 +1036,14 @@ class PrivateMessageMixin:
                 interaction_allowed=True,
             )
             if result is True:
-                log.info("Private AI replied to %s(%s)", sender_name, user_id)
+                log.info("Private AI replied: user=%s", user_id)
                 self._private_last_reply_ts[user_id] = time.time()
                 self._private_consecutive_replies[user_id] = consecutive + 1
                 self._private_urgent_pings.pop(user_id, None)
             elif result is None:
-                log.debug("Private AI anti-echo skipped: %s(%s)", sender_name, user_id)
+                log.debug("Private AI anti-echo skipped: user=%s", user_id)
             else:
-                log.debug("Private AI chose to skip: %s(%s) (consec=%d)", sender_name, user_id, consecutive)
+                log.debug("Private AI chose to skip: user=%s consecutive=%d", user_id, consecutive)
                 # Reset consecutive count when AI skips
                 self._private_consecutive_replies.pop(user_id, None)
                 # Reset after 10 min gap (handled by _cleanup_stale_state)
@@ -1030,8 +1054,8 @@ class PrivateMessageMixin:
                     await self.client.call("set_input_status", {
                         "user_id": user_id, "event_type": 0,
                     })
-                except Exception:
-                    pass
+                except Exception as error:
+                    log.debug("Private typing indicator stop failed: %s", error)
 
     def _parse_private_group_args(self, args):
         parts = (args or "").strip().split(maxsplit=1)
