@@ -39,8 +39,26 @@ class AgentTaskStore:
             records = [item for item in records if item.get("status") in statuses]
         return records
 
-    def next_queued(self):
-        for item in self._records():
+    def next_queued(self, stale_after_seconds=3600):
+        records = self._records()
+        now = time.time()
+        changed = False
+        try:
+            stale_after_seconds = max(60, int(stale_after_seconds))
+        except (TypeError, ValueError):
+            stale_after_seconds = 3600
+        for item in records:
+            if item.get("status") != "running":
+                continue
+            updated_at = float(item.get("updated_at", 0) or 0)
+            if updated_at and now - updated_at >= stale_after_seconds:
+                item["status"] = "queued"
+                item["error"] = "stale running task recovered"
+                item["updated_at"] = now
+                changed = True
+        if changed:
+            self.store.write("tasks/index.json", records[-500:])
+        for item in records:
             if item.get("status") == "queued":
                 return item
         return None

@@ -6,6 +6,7 @@ import os
 import re
 import time
 
+from ..memory import contains_sensitive_data
 from .context import AgentContextBuilder
 from .executor import AgentExecutor
 from .goals import AgentGoalStore
@@ -64,9 +65,10 @@ class AgentRuntime:
             return
         event_limit = max(12, min(
             int(self.config.get("agent", {}).get("event_history_limit", 100)), 200))
+        event_text = "[敏感内容已省略]" if contains_sensitive_data(agent_event.text) else agent_event.text[:1000]
         self.store.append_bounded(f"events/{agent_event.scope.key.replace(':', '_')}.json", {
             "event_id": agent_event.event_id, "user_id": agent_event.identity.user_id,
-            "level": int(agent_event.identity.level), "text": agent_event.text[:1000],
+            "level": int(agent_event.identity.level), "text": event_text,
             "timestamp": agent_event.timestamp, "decision": decision.reason,
         }, limit=event_limit)
         candidate = self.extract_memory_candidate(agent_event)
@@ -102,12 +104,7 @@ class AgentRuntime:
         text = agent_event.text.strip()
         if len(text) < 4 or len(text) > 500:
             return None
-        secret_markers = (
-            "密码", "口令", "token", "api key", "apikey", "密钥", "cookie",
-            "authorization", "clientkey", "client_key", "csrf", "rkey",
-        )
-        lowered = text.lower()
-        if any(marker in lowered for marker in secret_markers):
+        if contains_sensitive_data(text):
             return None
         patterns = (
             ("preference", r"^(?:我|本人)(?:最)?(?:喜欢|偏好|常用|不喜欢|讨厌|希望).+"),

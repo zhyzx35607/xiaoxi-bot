@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -141,6 +142,17 @@ class AgentPersistenceTests(unittest.TestCase):
         runtime.memory.add_candidate(candidate)
         runtime.memory.add_candidate(candidate)
         self.assertEqual(len(runtime.memory.list_records("owner:100", confirmed=True)), 1)
+
+    def test_event_history_redacts_sensitive_message_body(self):
+        runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
+        runtime.observe({
+            "user_id": 100, "message_type": "private",
+            "raw_message": "请记住 token=super-secret-value",
+        })
+        events = runtime.store.read("events/owner_100.json", [])
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["text"], "[敏感内容已省略]")
+        self.assertNotIn("super-secret-value", str(events))
 
     def test_group_rule_is_confirmed_but_member_preference_is_pending(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
@@ -479,6 +491,49 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved[0]["attempts"], 1)
         self.assertIn("任务结果", dispatcher.client.sent[0][1])
 
+    async def test_background_worker_does_not_requeue_when_completion_notice_fails(self):
+        from bot.agent.worker_service import AgentWorker
+        runtime = AgentRuntime({"bot_owner": 100, "agent": {"owner_autonomy_enabled": True, "background_tasks_enabled": True}}, tempfile.mkdtemp())
+        runtime.tasks.create("owner:100", 100, "做一次性操作", success_criteria="完成")
+        runtime.execute_background_task = AsyncMock(return_value={"success": True, "reply": "完成"})
+
+        class Client:
+            async def send_private_msg(self, user_id, text):
+                raise RuntimeError("onebot unavailable")
+
+        dispatcher = type("D", (), {"config": runtime.config, "agent_runtime": runtime, "client": Client()})()
+        status = await AgentWorker(dispatcher)._run_owner_task()
+        self.assertEqual(status, "done")
+        self.assertEqual(runtime.tasks.list("owner:100")[0]["status"], "done")
+
+    async def test_worker_survives_first_tick_failure(self):
+        from bot.agent.worker_service import AgentWorker
+        config = {"agent": {"worker_interval_seconds": 10}}
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        dispatcher = type("D", (), {"config": config, "agent_runtime": runtime, "client": object()})()
+        worker = AgentWorker(dispatcher)
+        calls = []
+
+        async def failing_tick():
+            calls.append(True)
+            worker._stop.set()
+            raise RuntimeError("transient")
+
+        worker.tick = failing_tick
+        await worker._run()
+        self.assertEqual(calls, [True])
+
+    def test_stale_running_task_is_recovered(self):
+        runtime = AgentRuntime({"agent": {}}, tempfile.mkdtemp())
+        task = runtime.tasks.create("owner:100", 100, "恢复任务")
+        runtime.tasks.update(task["id"], "running")
+        records = runtime.store.read("tasks/index.json", [])
+        records[0]["updated_at"] = 1
+        runtime.store.write("tasks/index.json", records)
+        queued = runtime.tasks.next_queued(stale_after_seconds=60)
+        self.assertEqual(queued["id"], task["id"])
+        self.assertEqual(runtime.tasks.list("owner:100")[0]["status"], "queued")
+
 class AgentGoalReviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_goal_review_sends_and_updates_progress(self):
         from bot.agent.worker_service import AgentWorker
@@ -511,6 +566,17 @@ class AgentGoalReviewTests(unittest.IsolatedAsyncioTestCase):
         runtime.goals.create("owner:100", 100, "不会执行")
         dispatcher = type("D", (), {"config": config, "agent_runtime": runtime, "client": object()})()
         self.assertEqual(await AgentWorker(dispatcher)._review_owner_goal(), "disabled")
+
+    async def test_goal_review_running_lease_blocks_duplicate_run(self):
+        from bot.agent.worker_service import AgentWorker
+        config = {"bot_owner": 100, "agent": {"owner_autonomy_enabled": True, "review_lease_seconds": 3600}}
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        runtime.goals.create("owner:100", 100, "只执行一次")
+        runtime.store.write("worker/owner_goal_review.json", {
+            "status": "running", "started_at": time.time(), "run_id": "in-flight",
+        })
+        dispatcher = type("D", (), {"config": config, "agent_runtime": runtime, "client": object()})()
+        self.assertEqual(await AgentWorker(dispatcher)._review_owner_goal(), "in_progress")
 
 class AgentNativeToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_native_goal_tool_is_bound_to_event_scope(self):
@@ -738,5 +804,21 @@ class AgentGroupProactiveTests(unittest.IsolatedAsyncioTestCase):
         config = {"bot_owner": 100, "agent": {"proactive_enabled": True, "quiet_start": 0, "quiet_end": 0}, "groups": {"300": {"agent": {"proactive_enabled": False}}}}
         runtime = AgentRuntime(config, tempfile.mkdtemp())
         runtime.goals.create("group:300", 101, "不应主动")
+        dispatcher = type("D", (), {"config": config, "agent_runtime": runtime, "client": object()})()
+        self.assertEqual(await AgentWorker(dispatcher)._review_group_scope(), "idle")
+
+    async def test_group_review_running_lease_blocks_duplicate_run(self):
+        from bot.agent.worker_service import AgentWorker
+        config = {
+            "bot_owner": 100,
+            "agent": {"proactive_enabled": True, "review_lease_seconds": 3600},
+            "groups": {"300": {"agent": {"proactive_enabled": True}}},
+        }
+        runtime = AgentRuntime(config, tempfile.mkdtemp())
+        runtime.profiles.update("group:300", persona="群助手", proactive_topics=["新番"])
+        runtime.store.write("worker/group_reviews.json", {
+            "300": {"status": "running", "started_at": time.time(), "run_id": "in-flight"},
+        })
+        runtime.run_autonomous = AsyncMock(side_effect=AssertionError("duplicate review"))
         dispatcher = type("D", (), {"config": config, "agent_runtime": runtime, "client": object()})()
         self.assertEqual(await AgentWorker(dispatcher)._review_group_scope(), "idle")
