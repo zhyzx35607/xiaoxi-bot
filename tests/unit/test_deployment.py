@@ -147,11 +147,19 @@ class ServiceInstallScriptTests(unittest.TestCase):
         script = (ROOT / "deploy" / "install-qqbot-service.sh").read_text(encoding="utf-8")
 
         self.assertIn("systemctl stop qqbot.service", script)
-        self.assertIn("trap restore_qqbot_service EXIT", script)
+        self.assertIn("trap restore_runtime_services EXIT", script)
         self.assertIn("--owner-user qqbot", script)
         self.assertIn("--owner-group qqbot", script)
         self.assertIn("systemctl disable --now napcat-login-watchdog.timer", script)
         self.assertIn("systemctl enable --now napcat-login-watchdog.service", script)
+        permission_walk = script.index("while IFS= read -r -d '' directory")
+        self.assertLess(script.index("systemctl stop napcat-login-watchdog.timer"), permission_walk)
+        self.assertLess(script.index("systemctl stop napcat-login-watchdog.service"), permission_walk)
+        self.assertLess(script.index("systemctl stop qqbot.service"), permission_walk)
+        self.assertLess(
+            script.index("systemctl enable --now napcat-login-watchdog.service"),
+            script.index("systemctl disable --now napcat-login-watchdog.timer"),
+        )
 
 
 if __name__ == "__main__":
