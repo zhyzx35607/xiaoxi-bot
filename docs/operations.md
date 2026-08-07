@@ -33,17 +33,20 @@ sudo bash /opt/qqbot/deploy/install-qqbot-service.sh /opt/qqbot
 sudo bash /opt/qqbot/deploy/install-napcat-service.sh /opt/qqbot
 ```
 
-安装脚本会创建系统用户、迁移并脱敏配置、安装 systemd 单元、启用备份保留定时器并重启服务。NapCat 服务通过过滤器仅向 journald 输出生命周期、警告和错误信息，普通聊天事件会被抑制，敏感字段会被脱敏。
+安装脚本会创建系统用户、停止正在运行的 `qqbot.service` 后迁移并脱敏配置、安装 systemd 单元，启用常驻 `napcat-login-watchdog.service` 和备份保留定时器，最后恢复服务。NapCat 服务通过过滤器仅向 journald 输出生命周期、警告和错误信息，普通聊天事件会被抑制，敏感字段会被脱敏。
 
 ## 检查
 
 ```bash
 systemctl status qqbot.service --no-pager
 systemctl status napcat.service --no-pager
+systemctl status napcat-login-watchdog.service --no-pager
 journalctl -u qqbot.service -n 100 --no-pager
 journalctl -u napcat.service -n 100 --no-pager
+journalctl -u napcat-login-watchdog.service -n 100 --no-pager
 systemd-analyze security qqbot.service
 systemd-analyze security napcat.service
+systemd-analyze security napcat-login-watchdog.service
 ```
 
 ## 回滚

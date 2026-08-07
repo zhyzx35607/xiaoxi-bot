@@ -51,7 +51,7 @@ def remove_env_managed_secrets(config, environment):
     return removed
 
 
-def atomic_write(path, data):
+def atomic_write(path, data, owner=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     try:
@@ -61,6 +61,8 @@ def atomic_write(path, data):
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, 0o600)
+        if owner is not None:
+            os.chown(temporary, owner[0], owner[1])
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -72,15 +74,29 @@ def main():
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--target", type=Path, required=True)
     parser.add_argument("--environment-file", type=Path, default=Path("/etc/qqbot.env"))
+    parser.add_argument("--owner-user")
+    parser.add_argument("--owner-group")
     args = parser.parse_args()
+
+    owner = None
+    if args.owner_user or args.owner_group:
+        if not args.owner_user or not args.owner_group:
+            raise SystemExit("--owner-user and --owner-group must be provided together")
+        import grp
+        import pwd
+
+        owner = (
+            pwd.getpwnam(args.owner_user).pw_uid,
+            grp.getgrnam(args.owner_group).gr_gid,
+        )
 
     source = args.target if args.target.exists() else args.source
     config = json.loads(source.read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise SystemExit("configuration root must be a JSON object")
     removed = remove_env_managed_secrets(config, load_environment_file(args.environment_file))
-    atomic_write(args.target, config)
-    atomic_write(Path(str(args.target) + ".last-good"), config)
+    atomic_write(args.target, config, owner=owner)
+    atomic_write(Path(str(args.target) + ".last-good"), config, owner=owner)
     print("runtime configuration ready; removed: " + (", ".join(removed) or "none"))
 
 

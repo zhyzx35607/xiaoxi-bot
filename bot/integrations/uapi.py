@@ -335,8 +335,8 @@ def _retry_after_seconds(headers, attempt):
         except ValueError:
             try:
                 return max(0.0, min(30.0, parsedate_to_datetime(raw).timestamp() - time.time()))
-            except Exception:
-                pass
+            except (TypeError, ValueError, OverflowError):
+                raw = ""
     reset = values.get("x-ratelimit-reset", "").strip()
     if reset:
         try:

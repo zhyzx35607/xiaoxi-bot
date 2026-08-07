@@ -163,9 +163,10 @@ async def _run_group_checkin(dispatcher, group_list, trigger):
                 if _api_succeeded(result):
                     log.info("Group check-in succeeded: group %s trigger=%s", gid, trigger)
                 else:
-                    log.warning("Group check-in failed: group %s trigger=%s retcode=%s message=%s",
-                                gid, trigger, result.get("retcode"),
-                                str(result.get("message") or result.get("msg", ""))[:120])
+                    log.warning(
+                        "Group check-in failed: group=%s trigger=%s retcode=%s status=%s",
+                        gid, trigger, result.get("retcode"), result.get("status"),
+                    )
             except Exception as e:
                 log.warning("Daily check-in failed for group %s: %s", gid, e)
                 result = {"status": "failed", "retcode": -1, "message": str(e)[:120]}

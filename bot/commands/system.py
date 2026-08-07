@@ -1,6 +1,7 @@
 """Help, diagnostics, security, history, and lifecycle commands."""
 
 import asyncio
+import glob
 import json
 import logging
 import os
@@ -16,11 +17,93 @@ from ..permission import (
     save_group_config, can_moderate_target, LEVEL_SUPER, LEVEL_MASTER,
     LEVEL_GOWNER, LEVEL_ADMIN, LEVEL_MEMBER,
 )
+from ..events.context import _service_state
 from ..utils import atomic_write_json
 from .common import CONFIG_PATH, _load, _save
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _read_linux_memory():
+    meminfo = {}
+    with open("/proc/meminfo", encoding="utf-8") as handle:
+        for line in handle:
+            key, value = line.split(":", 1)
+            meminfo[key] = int(value.strip().split()[0])
+    return {
+        "total": meminfo.get("MemTotal", 0) // 1024,
+        "available": meminfo.get("MemAvailable", 0) // 1024,
+        "swap_total": meminfo.get("SwapTotal", 0) // 1024,
+        "swap_free": meminfo.get("SwapFree", 0) // 1024,
+    }
+
+
+def _read_json_container(path, default):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        return default
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+        log.warning("Runtime data read failed for %s: %s", os.path.basename(path), error)
+        return default
+    if not isinstance(value, type(default)):
+        log.warning("Runtime data has unexpected root type: %s", os.path.basename(path))
+        return default
+    return value
+
+
+def _json_count(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        return 0
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+        log.warning("Runtime data count failed for %s: %s", os.path.basename(path), error)
+        return 0
+    return len(value) if isinstance(value, (list, dict)) else 0
+
+
+def _size_kb(path):
+    try:
+        return max(1, os.path.getsize(path) // 1024)
+    except OSError:
+        return 0
+
+
+def _build_group_data_overview(data_root, target_groups):
+    bl_path = os.path.join(data_root, "blacklist.json")
+    rw_path = os.path.join(data_root, "r18_warnings.json")
+    bl_data = _read_json_container(bl_path, {})
+    rw_data = _read_json_container(rw_path, {})
+    lines = ["小汐当前群数据概览", ""]
+    now = time.time()
+    for gid, gcfg in sorted(target_groups.items()):
+        mem_path = os.path.join(data_root, "memories", "group_{}.json".format(gid))
+        lmem_path = os.path.join(data_root, "memories", "group_{}_long.json".format(gid))
+        user_pattern = os.path.join(data_root, "memories", "group_{}_u*.json".format(gid))
+        st_path = os.path.join(data_root, "stickers", "group_{}.json".format(gid))
+        prefix = "{}_".format(gid)
+        active_bl = sum(
+            1 for key, value in bl_data.items()
+            if key.startswith(prefix) and isinstance(value, dict) and value.get("expires", 0) > now
+        )
+        warning_users = sum(1 for key in rw_data if key.startswith(prefix))
+        enabled = "开" if gcfg.get("enabled", False) else "关"
+        masters = len(gcfg.get("masters", []) or [])
+        user_files = glob.glob(user_pattern)
+        total_kb = sum(_size_kb(path) for path in (mem_path, lmem_path, st_path))
+        lines.append(
+            "群 {gid}：{enabled}，主人 {masters} 个，群记忆 {mem} 条，长期记忆 {long} 条，"
+            "个人记忆 {users} 份，表情 {stickers} 个，黑名单 {bl} 个，警告 {warn} 人，数据约 {kb} 千字节".format(
+                gid=gid, enabled=enabled, masters=masters, mem=_json_count(mem_path),
+                long=_json_count(lmem_path), users=len(user_files), stickers=_json_count(st_path),
+                bl=active_bl, warn=warning_users, kb=total_kb,
+            )
+        )
+    return lines
 
 async def cmd_api_status(d, group_id, user_id, args, role, sender_card, message):
     """Show the registered API catalog without probing every endpoint."""
@@ -263,30 +346,21 @@ async def cmd_target_group_help(d, group_id, user_id, args, role, sender_card, m
 
 
 async def cmd_health(d, group_id, user_id, args, role, sender_card, message):
-    import subprocess
     lines = []
     try:
-        bot_state = subprocess.run(["systemctl", "is-active", "qqbot.service"],
-                                   capture_output=True, text=True, timeout=3)
-        napcat_state = subprocess.run(["systemctl", "is-active", "napcat.service"],
-                                      capture_output=True, text=True, timeout=3)
-        lines.append("小汐: " + (bot_state.stdout.strip() or "unknown"))
-        lines.append("NapCat: " + (napcat_state.stdout.strip() or "unknown"))
+        bot_state, napcat_state = await asyncio.gather(
+            _service_state("qqbot.service"),
+            _service_state("napcat.service"),
+        )
+        lines.append("小汐: " + bot_state)
+        lines.append("NapCat: " + napcat_state)
     except Exception as e:
         lines.append("服务状态读取失败: " + str(e))
     try:
-        meminfo = {}
-        with open("/proc/meminfo", encoding="utf-8") as f:
-            for line in f:
-                key, value = line.split(":", 1)
-                meminfo[key] = int(value.strip().split()[0])
-        total = meminfo.get("MemTotal", 0) // 1024
-        available = meminfo.get("MemAvailable", 0) // 1024
-        swap_total = meminfo.get("SwapTotal", 0) // 1024
-        swap_free = meminfo.get("SwapFree", 0) // 1024
-        lines.append("内存: 可用{}M/总{}M".format(available, total))
-        lines.append("Swap: 可用{}M/总{}M".format(swap_free, swap_total))
-    except Exception:
+        memory = await asyncio.to_thread(_read_linux_memory)
+        lines.append("内存: 可用{}M/总{}M".format(memory["available"], memory["total"]))
+        lines.append("Swap: 可用{}M/总{}M".format(memory["swap_free"], memory["swap_total"]))
+    except (OSError, ValueError, IndexError):
         lines.append("内存: unknown")
     lines.append("WS: " + ("connected" if d.client._ws is not None else "disconnected"))
     lines.append("事件任务: {}".format(len(getattr(d.client, "_event_tasks", []))))
@@ -298,9 +372,10 @@ async def cmd_health(d, group_id, user_id, args, role, sender_card, message):
     if user_id == d.config.get("bot_owner"):
         try:
             from ..request_handler import load_pending_requests
-            lines.append("待处理申请: {}".format(len(load_pending_requests())))
-        except Exception:
-            pass
+            pending = await asyncio.to_thread(load_pending_requests)
+            lines.append("待处理申请: {}".format(len(pending)))
+        except Exception as error:
+            log.debug("Pending request count failed: %s", error)
     await d._reply(group_id, user_id, "\n".join(lines))
 
 async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
@@ -324,8 +399,8 @@ async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
         if len(parts) >= 2:
             try:
                 limit = int(parts[1])
-            except Exception:
-                pass
+            except ValueError:
+                limit = 10
         await d._reply(group_id, user_id, format_security_events(group_id=group_id, limit=limit))
         return
     parts = sub.split()
@@ -416,8 +491,8 @@ async def cmd_clear_ai(d, group_id, user_id, args, role, sender_card, message):
                 del w[k]
             if removed_w:
                 save_warnings(w)
-        except Exception:
-            pass
+        except Exception as error:
+            log.warning("R18 warning cleanup failed for group=%s: %s", gid, error)
         # 5. Clear user memories for this group
         user_mem_dir = _os3.path.join(_os3.path.dirname(_os3.path.dirname(_os3.path.abspath(__file__))),
                                     "data", "memories")
@@ -434,11 +509,9 @@ async def cmd_clear_ai(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, msg)
 
 async def cmd_list(d, group_id, user_id, args, role, sender_card, message):
-    import os as _os_list, glob as _glob_list, json as _json_list, time as _time_list
-
     cfg = d.config
     groups_cfg = cfg.get("groups", {})
-    data_root = _os_list.path.join(_os_list.path.dirname(_os_list.path.dirname(_os_list.path.abspath(__file__))), "data")
+    data_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
     if not groups_cfg:
         await d._reply(group_id, user_id, "还没有配置群")
@@ -451,55 +524,7 @@ async def cmd_list(d, group_id, user_id, args, role, sender_card, message):
         target_groups = {gid: groups_cfg.get(gid, {}) for gid in requested}
     else:
         target_groups = groups_cfg
-    def _json_count(path):
-        if not _os_list.path.exists(path):
-            return 0
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = _json_list.load(f)
-            if isinstance(data, (list, dict)):
-                return len(data)
-        except Exception:
-            pass
-        return 0
-    def _size_kb(path):
-        try:
-            return max(1, _os_list.path.getsize(path) // 1024)
-        except OSError:
-            return 0
-    bl_path = _os_list.path.join(data_root, "blacklist.json")
-    rw_path = _os_list.path.join(data_root, "r18_warnings.json")
-    try:
-        with open(bl_path, encoding="utf-8") as f:
-            bl_data = _json_list.load(f)
-    except Exception:
-        bl_data = {}
-    try:
-        with open(rw_path, encoding="utf-8") as f:
-            rw_data = _json_list.load(f)
-    except Exception:
-        rw_data = {}
-    lines = ["小汐当前群数据概览", ""]
-    for gid, gcfg in sorted(target_groups.items()):
-        mem_path = _os_list.path.join(data_root, "memories", "group_{}.json".format(gid))
-        lmem_path = _os_list.path.join(data_root, "memories", "group_{}_long.json".format(gid))
-        user_pattern = _os_list.path.join(data_root, "memories", "group_{}_u*.json".format(gid))
-        st_path = _os_list.path.join(data_root, "stickers", "group_{}.json".format(gid))
-        prefix = "{}_".format(gid)
-        active_bl = sum(1 for k, v in bl_data.items() if k.startswith(prefix) and v.get("expires", 0) > _time_list.time())
-        warning_users = sum(1 for k in rw_data if k.startswith(prefix))
-        enabled = "开" if gcfg.get("enabled", False) else "关"
-        masters = len(gcfg.get("masters", []) or [])
-        user_files = _glob_list.glob(user_pattern)
-        total_kb = sum(_size_kb(p) for p in [mem_path, lmem_path, st_path] if _os_list.path.exists(p))
-        lines.append(
-            "群 {gid}：{enabled}，主人 {masters} 个，群记忆 {mem} 条，长期记忆 {long} 条，"
-            "个人记忆 {users} 份，表情 {stickers} 个，黑名单 {bl} 个，警告 {warn} 人，数据约 {kb} 千字节".format(
-                gid=gid, enabled=enabled, masters=masters, mem=_json_count(mem_path),
-                long=_json_count(lmem_path), users=len(user_files), stickers=_json_count(st_path),
-                bl=active_bl, warn=warning_users, kb=total_kb,
-            )
-        )
+    lines = await asyncio.to_thread(_build_group_data_overview, data_root, target_groups)
     text = "\n".join(lines)
     if len(text) > 3500:
         text = text[:3400] + "\n\n内容太多，我先截到这里。要看单个群可以用 /list 群号"

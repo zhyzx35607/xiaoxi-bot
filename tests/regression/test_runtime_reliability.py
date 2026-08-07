@@ -42,6 +42,14 @@ class ConfigRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "no valid last-good backup"):
                 load_config(path)
 
+    def test_config_permission_error_does_not_restore_backup(self):
+        with patch("app.config.open", side_effect=PermissionError("denied")), \
+                patch("app.config.atomic_write_json") as atomic_write:
+            with self.assertRaisesRegex(RuntimeError, "cannot read config.json"):
+                load_config("/private/config.json")
+
+        atomic_write.assert_not_called()
+
     def test_atomic_json_write_keeps_file_private(self):
         from bot.utils import atomic_write_json
 
@@ -106,6 +114,20 @@ class NapCatWatchdogTests(unittest.TestCase):
                     patch.object(module, "PREFERRED_PORT", 3001):
                 url = module.get_websocket_url()
         self.assertEqual(url, "ws://127.0.0.1:3001?access_token=bot%20token")
+
+    def test_error_text_redacts_websocket_token(self):
+        script_path = Path(__file__).parents[2] / "deploy" / "napcat-login-watchdog.py"
+        spec = importlib.util.spec_from_file_location("napcat_login_watchdog_redaction", script_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        sanitized = module._safe_error_text(
+            RuntimeError("failed ws://127.0.0.1:3001?access_token=secret-token")
+        )
+
+        self.assertNotIn("secret-token", sanitized)
+        self.assertIn("access_token=<redacted>", sanitized)
 
 
 

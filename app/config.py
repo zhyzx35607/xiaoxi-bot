@@ -56,26 +56,42 @@ def apply_env_overrides(config):
 
     return config
 
+def _read_config_object(path, label):
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+    if not isinstance(config, dict):
+        raise ValueError(f"{label} root must be a JSON object")
+    return config
+
+
 def load_config(config_path):
     backup_path = config_path + ".last-good"
     try:
-        with open(config_path, encoding="utf-8") as handle:
-            config = json.load(handle)
-        if not isinstance(config, dict):
-            raise ValueError("config root must be a JSON object")
-    except (json.JSONDecodeError, OSError, ValueError) as error:
+        config = _read_config_object(config_path, "config")
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
         try:
-            with open(backup_path, encoding="utf-8") as handle:
-                config = json.load(handle)
-            if not isinstance(config, dict):
-                raise ValueError("backup config root must be a JSON object")
-        except (json.JSONDecodeError, OSError, ValueError):
+            config = _read_config_object(backup_path, "backup config")
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
             raise RuntimeError(
-                "config.json is invalid and no valid last-good backup exists: {}".format(error)
+                f"config.json is invalid and no valid last-good backup exists: {error}"
             ) from error
-        atomic_write_json(config_path, config, indent=2)
+        except OSError as backup_error:
+            raise RuntimeError(
+                f"cannot read config.json last-good backup: {backup_error}"
+            ) from backup_error
+        try:
+            atomic_write_json(config_path, config, indent=2)
+        except OSError as restore_error:
+            raise RuntimeError(
+                f"cannot restore config.json from last-good backup: {restore_error}"
+            ) from restore_error
         log.error("Recovered invalid config.json from %s: %s", backup_path, error)
-    atomic_write_json(backup_path, config, indent=2)
+    except OSError as error:
+        raise RuntimeError(f"cannot read config.json: {error}") from error
+    try:
+        atomic_write_json(backup_path, config, indent=2)
+    except OSError as backup_error:
+        raise RuntimeError(f"cannot update config.json last-good backup: {backup_error}") from backup_error
     try:
         os.chmod(backup_path, 0o600)
     except OSError:

@@ -128,7 +128,7 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
         bot_role_str, _ = await get_bot_role(dispatcher, group_id)
         if bot_role_str not in ("admin", "owner"):
             return False, "我现在不是管理员，做不了这个"
-    # Bot owner (446697984) bypasses ALL checks
+    # The configured bot owner bypasses all group-level checks.
     if user_id == owner:
         return True, None
     # Group-owner commands are scoped to the current group; super owners bypass above.

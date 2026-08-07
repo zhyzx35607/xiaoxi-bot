@@ -2,10 +2,14 @@
 
 import importlib.util
 import json
+import logging
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from app.logging_setup import RedactingFormatter, sanitize_log_message
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +51,41 @@ class NapCatLogFilterTests(unittest.TestCase):
         self.assertEqual(sanitized, "WARNING Unknown JSON event { <payload redacted>")
         self.assertNotIn("private text", sanitized)
         self.assertNotIn("secret", sanitized)
+
+
+class ApplicationLogRedactionTests(unittest.TestCase):
+    def test_redacts_credentials_ids_and_payloads(self):
+        sanitized = sanitize_log_message(
+            'user=123456789 token="secret" text=private conversation'
+        )
+
+        self.assertNotIn("123456789", sanitized)
+        self.assertNotIn("secret", sanitized)
+        self.assertNotIn("private conversation", sanitized)
+        self.assertIn("<id>", sanitized)
+        self.assertIn("<payload redacted>", sanitized)
+
+    def test_redacts_authorization_and_cookie_headers(self):
+        sanitized = sanitize_log_message(
+            "Authorization: Bearer secret-token, Cookie: session=private-value"
+        )
+
+        self.assertNotIn("secret-token", sanitized)
+        self.assertNotIn("private-value", sanitized)
+        self.assertEqual(sanitized.count("<redacted>"), 2)
+
+    def test_formatter_redacts_exception_text(self):
+        formatter = RedactingFormatter("%(levelname)s %(message)s")
+        try:
+            raise RuntimeError("access_token=secret-token user=123456789")
+        except RuntimeError:
+            record = logging.LogRecord(
+                "qqbot", 40, __file__, 1, "request failed", (), sys.exc_info()
+            )
+
+        formatted = formatter.format(record)
+        self.assertNotIn("secret-token", formatted)
+        self.assertNotIn("123456789", formatted)
 
 
 class NapCatConfigTests(unittest.TestCase):
@@ -101,6 +140,18 @@ class BackupRetentionTests(unittest.TestCase):
             )
 
             self.assertEqual(selected, [files[2], files[3]])
+
+
+class ServiceInstallScriptTests(unittest.TestCase):
+    def test_config_migration_stops_service_and_preserves_runtime_owner(self):
+        script = (ROOT / "deploy" / "install-qqbot-service.sh").read_text(encoding="utf-8")
+
+        self.assertIn("systemctl stop qqbot.service", script)
+        self.assertIn("trap restore_qqbot_service EXIT", script)
+        self.assertIn("--owner-user qqbot", script)
+        self.assertIn("--owner-group qqbot", script)
+        self.assertIn("systemctl disable --now napcat-login-watchdog.timer", script)
+        self.assertIn("systemctl enable --now napcat-login-watchdog.service", script)
 
 
 if __name__ == "__main__":

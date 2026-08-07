@@ -463,7 +463,7 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
     async def test_background_worker_marks_verified_task_done(self):
         from bot.agent.worker_service import AgentWorker
         runtime = AgentRuntime({"bot_owner": 100, "agent": {"owner_autonomy_enabled": True, "background_tasks_enabled": True}}, tempfile.mkdtemp())
-        task = runtime.tasks.create("owner:100", 100, "做事", success_criteria="完成")
+        runtime.tasks.create("owner:100", 100, "做事", success_criteria="完成")
         async def execute(dispatcher, item):
             return {"success": True, "reply": "任务结果", "reason": "ok"}
         runtime.execute_background_task = execute

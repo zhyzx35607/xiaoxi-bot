@@ -221,7 +221,7 @@ async def cmd_set_essence(d, group_id, user_id, args, role, sender_card, message
         await d._reply(group_id, user_id, "回复一条消息再发 /精华")
         return
     result = await d.client.set_essence_msg(mid)
-    log.info("set_essence_msg response: mid=%s result=%s", mid, str(result)[:300])
+    log.info("set_essence_msg completed: mid=%s status=%s", mid, result.get("status"))
     await d._reply(group_id, user_id, "设成精华了" if result.get("status") == "ok" else "没设成：" + str(result.get("msg") or result.get("wording") or result)[:200])
 
 async def cmd_delete_essence(d, group_id, user_id, args, role, sender_card, message):
@@ -271,7 +271,10 @@ async def handle_music_search(d, group_id, user_id, raw_text, sender_card):
                 music_msg = [{"type": "music", "data": {"type": "163", "id": str(song_id)}}]
                 r = await d.client.call("send_group_msg", {"group_id": group_id, "message": music_msg})
                 if r.get("status") != "ok":
-                    log.warning("Music card send failed: %s", r.get("msg", str(r)))
+                    log.warning(
+                        "Music card send failed: status=%s retcode=%s",
+                        r.get("status"), r.get("retcode"),
+                    )
                 return True
         except Exception as e:
             log.error("Music parse error: %s", e)

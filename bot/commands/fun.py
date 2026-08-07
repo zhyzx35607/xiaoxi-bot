@@ -122,7 +122,7 @@ async def cmd_fortune(d, group_id, user_id, args, role, sender_card, message):
 
 async def cmd_profile_like(d, group_id, user_id, args, role, sender_card, message):
     r = await d.client.get_profile_like()
-    log.info("get_profile_like response: %s", str(r)[:300])
+    log.info("get_profile_like completed: status=%s", r.get("status"))
     if r.get("status") != "ok":
         await d._reply(group_id, user_id, "获取点赞信息失败：" + str(r.get("msg") or r)[:200])
         return

@@ -88,7 +88,7 @@ class GroupHelpCommandTests(unittest.IsolatedAsyncioTestCase):
 
         dispatcher._reply = reply
         with patch("bot.commands.system.get_user_level", new=AsyncMock(return_value=(LEVEL_SUPER, "super"))),              patch("bot.commands.system.get_bot_role", new=AsyncMock(return_value=("owner", "owner"))):
-            await cmd_help(dispatcher, 776292505, 100, "", "owner", "主人", [])
+            await cmd_help(dispatcher, 100, 100, "", "owner", "主人", [])
 
         self.assertEqual(len(replies), 1)
         self.assertTrue(replies[0][1]["force_forward"])

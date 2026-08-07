@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -13,6 +14,8 @@ from typing import Any
 from .character_cards import CharacterCardError, load_character_card
 from .lightrag import LightRAGClient
 from .storage import RoleplayStore
+
+log = logging.getLogger("qqbot")
 
 BASE_ROLEPLAY_POLICY = """【角色扮演运行规则】
 你正在进行虚构角色扮演。保持角色设定、场景和对话连续性，不声称已经执行未实际执行的工具或外部操作。
@@ -61,8 +64,8 @@ class RoleplayService:
                         policies[name[:80]] = value[:12000]
         except FileNotFoundError:
             pass
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            log.warning("Roleplay private policy load failed: %s", error)
         return policies
 
     @property

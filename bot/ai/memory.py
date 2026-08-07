@@ -70,8 +70,8 @@ def _load_memory(group_id, config=None):
             _memories[group_id] = fresh
             _memory_timestamps[group_id] = now
             return fresh
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            log.warning("Group memory load failed: group=%s error=%s", group_id, error)
     _memories[group_id] = []
     _memory_timestamps[group_id] = now
     return _memories[group_id]
@@ -81,7 +81,6 @@ def _is_repetitive(user_id, new_reply):
     Returns True if similarity > 0.85 with any of last 5 replies → skip sending.
     """
     # Lazy cleanup on every call
-    global _LAST_REPLY_CLEANUP_TS
     _cleanup_replies_by_user()
     if user_id not in _last_replies_by_user:
         _last_replies_by_user[user_id] = deque(maxlen=5)
@@ -102,8 +101,8 @@ def _is_repetitive(user_id, new_reply):
             ratio = difflib.SequenceMatcher(None, old.strip(), clean_new).ratio()
             if ratio > 0.85:
                 return True
-    except Exception:
-        pass
+    except (AttributeError, TypeError, ValueError) as error:
+        log.debug("Reply similarity check failed: %s", error)
     return False
 
 def _record_reply(user_id, reply):
@@ -193,8 +192,11 @@ def _load_user_memory(group_id, user_id):
             if fresh != data:
                 _save_user_memory(group_id, user_id, fresh, None)
             return fresh
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            log.warning(
+                "User memory load failed: group=%s user=%s error=%s",
+                group_id, user_id, error,
+            )
     return []
 
 def _save_user_memory(group_id, user_id, memory, config=None, session=None, max_entries=None):
@@ -252,8 +254,8 @@ def _load_long_memory(group_id):
             cutoff = now - 30 * 86400
             fresh = [e for e in data if e.get("ts", 0) > cutoff]
             return fresh
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            log.warning("Long memory load failed: group=%s error=%s", group_id, error)
     return []
 
 def _save_long_memory(group_id, entries):
@@ -280,8 +282,11 @@ def _load_user_long_memory(group_id, user_id):
             cutoff = now - 30 * 86400
             fresh = [e for e in data if e.get("ts", 0) > cutoff]
             return fresh
-        except Exception:
-            pass
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            log.warning(
+                "User long memory load failed: group=%s user=%s error=%s",
+                group_id, user_id, error,
+            )
     return []
 
 def _save_user_long_memory(group_id, user_id, entries):
@@ -341,6 +346,6 @@ async def _compress_to_long_term(group_id, old_entries, config, session):
             long = _load_long_memory(group_id)
             long.append({"ts": time.time(), "content": summary})
             _save_long_memory(group_id, long)
-            log.info("Long-term memory saved for group %s: %s", group_id, summary[:60])
+            log.info("Long-term memory saved for group=%s chars=%s", group_id, len(summary))
     except Exception as e:
         log.error("Long-term compression failed: %s", e)

@@ -167,7 +167,7 @@ async def punish_security_violation(dispatcher, group_id, user_id, message_id, r
     if duration > 0:
         banned = await dispatcher.client.set_group_ban(group_id, user_id, duration)
         actions.append("banned:{}s".format(duration) if banned.get("status") == "ok" else "ban_failed")
-    log.warning("Security punished user=%s group=%s reason=%s", user_id, group_id, reason[:120])
+    log.warning("Security action applied: user=%s group=%s", user_id, group_id)
     return ",".join(actions) or "logged"
 
 
@@ -182,7 +182,7 @@ async def check_message_urls(dispatcher, group_id, user_id, raw, message_id, sen
         try:
             result = await dispatcher.client.check_url_safely(url)
         except Exception as e:
-            log.warning("URL safety check failed for %s: %s", url[:120], e)
+            log.warning("URL safety check failed: %s", e)
             continue
         risky, reason = is_url_check_risky(result)
         if not risky:

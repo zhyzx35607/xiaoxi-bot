@@ -7,18 +7,6 @@ from .segments import at_segment, reply_segment, text_segment
 log = logging.getLogger("qqbot")
 
 
-def text_segment(text):
-    return {"type": "text", "data": {"text": str(text)}}
-
-
-def at_segment(user_id):
-    return {"type": "at", "data": {"qq": str(user_id)}}
-
-
-def reply_segment(message_id):
-    return {"type": "reply", "data": {"id": str(message_id)}}
-
-
 async def execute_message_action(client, *, group_id=None, user_id=None, text="",
                                 reply_to=None, mentions=(), reaction=None,
                                 poke_user=None, extra_segments=None):

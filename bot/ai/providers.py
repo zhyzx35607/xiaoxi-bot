@@ -357,7 +357,7 @@ async def _call_vision_api_inner(config, image_url, session=None):
         }
         result = await _call_openai_compat(ds_cfg, "Fallback")
         if result:
-            log.info("Vision via fallback: %s -> %s", image_url[:16], result[:50])
+            log.info("Vision request completed through fallback provider")
             return result
     return None
 

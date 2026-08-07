@@ -1,11 +1,22 @@
 # bot/notice_handler.py - Group notices, poke, badwords, admin changes
+import asyncio
 import json, logging, time, re, os
-from ..permission import get_group_config, is_group_enabled
+from ..permission import get_group_config, is_group_enabled, save_group_config
 from ..utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _GROUP_FILES_PATH = os.path.join(_ROOT, "data", "group_files.json")
+
+
+def _read_json_file(path, default):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+        log.debug("Optional JSON state read failed: %s", error)
+        return default
 
 
 async def handle_notice(dispatcher, event):
@@ -52,11 +63,11 @@ async def handle_notice(dispatcher, event):
             from ..security import handle_gray_tip
             await handle_gray_tip(dispatcher, event)
         else:
-            log.info("Notify event subtype=%s group=%s user=%s target=%s raw=%s",
+            log.info("Notify event subtype=%s group=%s user=%s target=%s keys=%s",
                      sub, event.get("group_id"), event.get("user_id"),
-                     event.get("target_id"), str(event)[:300])
+                     event.get("target_id"), sorted(event.keys()))
     else:
-        log.info("Unhandled notice type=%s raw=%s", notice_type, str(event)[:300])
+        log.info("Unhandled notice type=%s keys=%s", notice_type, sorted(event.keys()))
 
 
 async def _generate_welcome_text(dispatcher, nickname, sex=""):
@@ -70,8 +81,8 @@ async def _generate_welcome_text(dispatcher, nickname, sex=""):
                                       session=dispatcher.client.session)
         if reply and len(reply.strip()) > 3:
             return reply.strip()[:30]
-    except Exception:
-        pass
+    except Exception as error:
+        log.debug("Welcome text generation failed: %s", error)
     return f"欢迎 {nickname} 哦～"
 
 
@@ -95,8 +106,8 @@ async def handle_group_increase(dispatcher, event):
             data = info.get("data", {})
             nickname = data.get("card") or data.get("nickname", str(user_id))
             sex = data.get("sex", "")
-    except Exception:
-        pass
+    except Exception as error:
+        log.debug("Group member lookup failed: %s", error)
     if automation_enabled(dispatcher.config, "ai_welcome", True):
         msg = await _generate_welcome_text(dispatcher, nickname, sex)
     else:
@@ -111,14 +122,11 @@ async def handle_group_decrease(dispatcher, event):
 
     if sub_type == "kick_me":
         log.info("Bot kicked from group %s", group_id)
-        with open(dispatcher._config_path, encoding="utf-8") as f:
-            cfg = json.load(f)
-        groups = cfg.get("groups", {})
+        groups = dispatcher.config.setdefault("groups", {})
         gid = str(group_id)
-        if gid in groups:
+        if gid in groups and isinstance(groups[gid], dict):
             groups[gid]["enabled"] = False
-            atomic_write_json(dispatcher._config_path, cfg, indent=2)
-            dispatcher.config = cfg
+            await asyncio.to_thread(save_group_config, dispatcher)
         return
 
     uid_str = str(user_id)
@@ -129,8 +137,8 @@ async def handle_group_decrease(dispatcher, event):
         if info.get("status") == "ok":
             data = info.get("data", {})
             nickname = data.get("nickname", "") or data.get("card", "") or uid_str
-    except Exception:
-        pass
+    except Exception as error:
+        log.debug("Departed member lookup failed: %s", error)
 
     action = "被移出群聊" if sub_type == "kick" else "离开了群聊"
     text = f"{nickname}({user_id}) {action}"
@@ -175,13 +183,10 @@ async def handle_group_upload(dispatcher, event):
     file_id = file_info.get("id") or file_info.get("file_id") or ""
     busid = file_info.get("busid") or file_info.get("bus_id") or ""
     size = file_info.get("size") or file_info.get("file_size") or 0
-    log.info("Group file uploaded: g=%s u=%s name=%s id=%s busid=%s size=%s",
-             group_id, user_id, name, file_id, busid, size)
+    log.info("Group file uploaded: group=%s user=%s size=%s", group_id, user_id, size)
     try:
-        try:
-            with open(_GROUP_FILES_PATH, encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
+        data = await asyncio.to_thread(_read_json_file, _GROUP_FILES_PATH, {})
+        if not isinstance(data, dict):
             data = {}
         files = data.setdefault(str(group_id), [])
         files.append({
@@ -193,7 +198,7 @@ async def handle_group_upload(dispatcher, event):
             "size": size,
         })
         data[str(group_id)] = files[-200:]
-        atomic_write_json(_GROUP_FILES_PATH, data, indent=2)
+        await asyncio.to_thread(atomic_write_json, _GROUP_FILES_PATH, data, indent=2)
     except Exception as e:
         log.error("Save group upload notice failed: %s", e)
 
@@ -279,10 +284,11 @@ async def check_bad_words(dispatcher, group_id, user_id, raw_message, message_id
         if matched:
             if bw.get("auto_delete", True) and message_id:
                 try: await dispatcher.client.delete_msg(message_id)
-                except Exception: pass
+                except Exception as error:
+                    log.debug("Bad-word message deletion failed: %s", error)
             warn = bw.get("warn_msg", "请注意文明发言！").replace("{user}", str(user_id))
             await dispatcher.client.send_group_msg(group_id, warn)
-            log.info("Bad word filtered: %s from %s", word, user_id)
+            log.info("Bad word filtered for user=%s", user_id)
             return True
     return False
 
@@ -291,9 +297,7 @@ async def handle_group_card(dispatcher, event):
     """群名片变更通知"""
     group_id = event.get("group_id", 0)
     user_id = event.get("user_id", 0)
-    card_new = event.get("card_new", "")
-    card_old = event.get("card_old", "")
-    log.info("Group card changed: g=%s u=%s old=%s new=%s", group_id, user_id, card_old, card_new)
+    log.info("Group card changed: group=%s user=%s", group_id, user_id)
 
 
 async def handle_group_msg_emoji_like(dispatcher, event):
@@ -321,8 +325,7 @@ async def handle_bot_offline(dispatcher, event):
     """机器人离线通知"""
     user_id = event.get("user_id", 0)
     tag = event.get("tag", "")
-    message = event.get("message", "")
-    log.warning("Bot offline: u=%s tag=%s msg=%s", user_id, tag, message)
+    log.warning("Bot offline notice: user=%s tag=%s", user_id, tag)
 
 
 async def handle_title_change(dispatcher, event):
@@ -330,7 +333,7 @@ async def handle_title_change(dispatcher, event):
     group_id = event.get("group_id", 0)
     user_id = event.get("user_id", 0)
     title = event.get("title", "")
-    log.info("Title changed: g=%s u=%s title=%s", group_id, user_id, title)
+    log.info("Title changed: group=%s user=%s", group_id, user_id)
     # Bot-initiated sets: the issuing command already replied, skip the
     # duplicate congrats (also avoids contradicting a timeout-then-success).
     pending = _bot_title_sets.pop((group_id, user_id), None)
@@ -340,8 +343,8 @@ async def handle_title_change(dispatcher, event):
         try:
             await dispatcher.client.send_group_msg(group_id,
                 f"恭喜获得专属头衔「{title}」！")
-        except Exception:
-            pass
+        except Exception as error:
+            log.debug("Title congratulation send failed: %s", error)
 
 
 # (group_id, user_id) -> (title, ts): titles the bot set via /title or 我要头衔
@@ -362,9 +365,8 @@ async def handle_profile_like(dispatcher, event):
     from event_policy import automation_enabled
     if not automation_enabled(dispatcher.config, "like_back", True):
         return
-    operator_nick = event.get("operator_nick", "")
     times = event.get("times", 0)
-    log.info("Profile like: operator=%s(%s) times=%s", operator_id, operator_nick, times)
+    log.info("Profile like received: operator=%s times=%s", operator_id, times)
     # 不回点机器人自己
     bot_qq = dispatcher.config.get("bot_qq")
     if operator_id == bot_qq:
@@ -382,7 +384,7 @@ async def handle_profile_like(dispatcher, event):
     try:
         r = await dispatcher.client.send_like(operator_id, like_times)
         if r.get("status") == "ok":
-            log.info("Liked back %s(%s) x%s", operator_nick, operator_id, like_times)
+            log.info("Profile like response sent: operator=%s times=%s", operator_id, like_times)
         else:
             msg = r.get("msg", "") or r.get("wording", "") or str(r)[:120]
             if r.get("retcode") == 1200 or "点赞数已达" in msg or "上限" in msg:
@@ -396,5 +398,4 @@ async def handle_profile_like(dispatcher, event):
 async def handle_group_name_change(dispatcher, event):
     """群名变更通知"""
     group_id = event.get("group_id", 0)
-    name_new = event.get("name_new", "")
-    log.info("Group name changed: g=%s new=%s", group_id, name_new)
+    log.info("Group name changed: group=%s", group_id)

@@ -129,7 +129,8 @@ class Dispatcher(
         try:
             with open(self._state_path, encoding="utf-8") as f:
                 state = json.load(f)
-        except Exception:
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+            log.warning("Runtime state load failed; starting with empty state: %s", error)
             return
         self._daily_likes = state.get("daily_likes", {}) if isinstance(state.get("daily_likes"), dict) else {}
         self._daily_fortunes = state.get("daily_fortunes", {}) if isinstance(state.get("daily_fortunes"), dict) else {}
@@ -141,7 +142,7 @@ class Dispatcher(
                 for uid, count in users.items():
                     try:
                         self._group_msg_counts[int(gid)][int(uid)] = int(count)
-                    except Exception:
+                    except (TypeError, ValueError):
                         continue
 
     def save_runtime_state(self, force=False):
@@ -332,7 +333,7 @@ class Dispatcher(
 
 
 
-    def _load_guard_file(self, path):
+    def _load_guard_file(path):
         try:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
@@ -481,7 +482,6 @@ class Dispatcher(
         if not cfg.get("enabled", True) or len(raw) < 2 or "[CQ:" in raw:
             return False
         # Skip blacklisted users in repeat tracking
-        from .guard import is_blacklisted
         if is_blacklisted(group_id, sender_user_id):
             return False
         async with self._lock:

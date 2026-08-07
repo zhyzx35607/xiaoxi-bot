@@ -43,7 +43,6 @@ async def search_web(dispatcher, query):
                 cache[cache_key] = {"ts": now, "value": value}
                 if len(cache) > 100:
                     # Lazy cleanup: remove entries older than 30 min (bulk of stale cache)
-                    cutoff = now - 1800
                     stale = [k for k, v in cache.items() if now - v.get("ts", 0) > 1800]
                     for key in stale[:50]:
                         cache.pop(key, None)
@@ -52,7 +51,6 @@ async def search_web(dispatcher, query):
                         oldest = sorted(cache.items(), key=lambda item: item[1].get("ts", 0))[:20]
                         for key, _ in oldest:
                             cache.pop(key, None)
-                        cache.pop(key, None)
             return value
     except Exception as e:
         log.error("Web search error: %s", e)
@@ -72,7 +70,7 @@ async def _search_web_uapi(dispatcher, query):
         return ""
     value = _format_uapi_search_results(data)
     if value:
-        log.info("Web search via uapi: %s -> %d chars", query[:30], len(value))
+        log.info("Web search via uapi completed: result_chars=%d", len(value))
     return value
 
 def _format_uapi_search_results(data, limit=3):
@@ -128,7 +126,7 @@ async def _search_web_bing(dispatcher, query):
                 html = await resp.text()
                 value = _parse_bing_results(html, query)
                 if value:
-                    log.info("Web search via Bing fallback: %s", query[:30])
+                    log.info("Web search completed through Bing fallback")
                 return value
     else:
         async with aiohttp.ClientSession() as s:
@@ -137,7 +135,7 @@ async def _search_web_bing(dispatcher, query):
                     html = await resp.text()
                     value = _parse_bing_results(html, query)
                     if value:
-                        log.info("Web search via Bing fallback: %s", query[:30])
+                        log.info("Web search completed through Bing fallback")
                     return value
     return ""
 

@@ -38,7 +38,7 @@ class RouterMixin:
                 from ..request_handler import handle_request
                 await handle_request(self, event)
         except Exception as e:
-            log.error("Dispatch error: %s", e, exc_info=True)
+            log.exception("Dispatch error: %s", e)
 
     async def _run_command(self, cmd, args, group_id, user_id, role, sender_card, message, request_message_id=0):
         cmd_info = self.commands.get(cmd)
@@ -56,7 +56,7 @@ class RouterMixin:
         try:
             await cmd_info["handler"](self, group_id, user_id, args, role, sender_card, message)
         except Exception as e:
-            log.error("Command %s error: %s", cmd, e, exc_info=True)
+            log.exception("Command %s error: %s", cmd, e)
             await self._reply(group_id, user_id, "出错了，等会再试。")
         finally:
             _command_message_id.reset(token)

@@ -485,9 +485,7 @@ async def handle_auto_request(dispatcher, group_id, user_id, raw):
         {"type": "at", "data": {"qq": str(user_id)}},
         {"type": "text", "data": {"text": "\n" + result["text"]}},
     ])
-    log.info("TouchGal auto reply group=%s user=%s query=%s selected=%s",
-             group_id, user_id, request["title"],
-             (result.get("selected") or {}).get("unique_id", ""))
+    log.info("TouchGal auto reply sent: group=%s user=%s", group_id, user_id)
     return True
 
 
