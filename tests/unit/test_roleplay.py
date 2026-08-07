@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -97,6 +98,52 @@ class RoleplayServiceTests(unittest.TestCase):
         self.assertIn("【角色卡系统指令（背景资料）】\nSYSTEM_MARKER", prompt)
         self.assertIn("【角色卡历史后置指令（背景资料）】\nPOST_MARKER", prompt)
 
+    def test_structured_roleplay_fields_redact_credentials(self):
+        character = self._character(system_prompt="token=card-secret")
+        self.service.store.new_chat(self.OWNER, character["id"], title="safe")
+        prompt, _ = asyncio.run(self.service.build_context(self.OWNER, None, "hello"))
+        self.assertNotIn("card-secret", prompt)
+        self.assertIn("[已隐藏]", prompt)
+
+    def test_long_roleplay_fields_keep_field_specific_lengths(self):
+        description = "甲" * 3000 + " token=card-secret " + "乙" * 3000
+        character = self._character(description=description)
+        persona = self.service.store.create_persona(
+            self.OWNER, "long", "人" * 4000, default=True)
+        chat = self.service.store.new_chat(
+            self.OWNER, character["id"], persona_id=persona["id"], title="long")
+        self.service.store.add_message(chat["id"], "assistant", "话" * 6000)
+
+        stored_character = self.service.store.get_character(character["id"])
+        stored_persona = self.service.store.get_persona(self.OWNER, persona["id"])
+        stored_message = self.service.store.recent_messages(chat["id"], 1)[0]
+        self.assertGreater(len(stored_character["data"]["description"]), 5000)
+        self.assertNotIn("card-secret", stored_character["data"]["description"])
+        self.assertEqual(len(stored_persona["description"]), 4000)
+        self.assertEqual(len(stored_message["content"]), 6000)
+
+    def test_legacy_roleplay_context_and_exports_are_redacted(self):
+        character = self._character()
+        chat = self.service.store.new_chat(self.OWNER, character["id"], title="legacy")
+        with self.service.store._connect() as connection:
+            connection.execute(
+                "INSERT INTO messages(chat_id,role,content,created_at) VALUES(?,?,?,?)",
+                (chat["id"], "user", "Cookie: session=legacy-cookie", int(time.time())),
+            )
+            connection.execute(
+                "INSERT INTO chat_summaries(chat_id,content,through_message_id,created_at) VALUES(?,?,?,?)",
+                (chat["id"], "Authorization: Bearer legacy-bearer", 1, int(time.time())),
+            )
+
+        prompt, history = asyncio.run(self.service.build_context(self.OWNER, None, "hello"))
+        exported = self.service.store.export_chat(chat["id"])
+        serialized = json.dumps(exported, ensure_ascii=False)
+        self.assertNotIn("legacy-cookie", prompt)
+        self.assertNotIn("legacy-bearer", prompt)
+        self.assertNotIn("legacy-cookie", str(history))
+        self.assertNotIn("legacy-cookie", serialized)
+        self.assertNotIn("legacy-bearer", serialized)
+
     def test_story_mode_adds_long_form_quality_policy(self):
         character = self._character()
         self.service.store.new_chat(self.OWNER, character["id"], title="story")
@@ -170,6 +217,49 @@ class RoleplayServiceTests(unittest.TestCase):
         self.assertEqual([(row["role"], row["content"]) for row in rows], [
             ("user", "hello"), ("assistant", "world"),
         ])
+
+    def test_concurrent_exchanges_remain_complete_turns(self):
+        character = self._character()
+        chat = self.service.store.new_chat(self.OWNER, character["id"], title="serialized")
+
+        async def run():
+            await asyncio.gather(
+                self.service.record_exchange(self.OWNER, None, "u1", "a1"),
+                self.service.record_exchange(self.OWNER, None, "u2", "a2"),
+            )
+
+        asyncio.run(run())
+        rows = self.service.store.recent_messages(chat["id"], 20)
+        turns = [(row["role"], row["content"]) for row in rows]
+        self.assertIn(turns, [
+            [("user", "u1"), ("assistant", "a1"), ("user", "u2"), ("assistant", "a2")],
+            [("user", "u2"), ("assistant", "a2"), ("user", "u1"), ("assistant", "a1")],
+        ])
+
+    def test_exchange_rolls_back_when_assistant_insert_fails(self):
+        character = self._character()
+        chat = self.service.store.new_chat(self.OWNER, character["id"], title="rollback")
+        with self.service.store._connect() as connection:
+            connection.executescript("""
+                CREATE TRIGGER reject_assistant_message
+                BEFORE INSERT ON messages
+                WHEN NEW.role = 'assistant'
+                BEGIN
+                    SELECT RAISE(ABORT, 'assistant insert failed');
+                END;
+            """)
+
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.store.record_exchange(chat["id"], "hello", "world")
+
+        self.assertEqual(self.service.store.recent_messages(chat["id"], 10), [])
+        with self.service.store._connect() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM story_beats WHERE chat_id=?", (chat["id"],)
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE chat_id=?", (chat["id"],)
+            ).fetchone()[0], 0)
 
     def test_sensitive_roleplay_memory_is_rejected_and_exchange_is_redacted(self):
         character = self._character()

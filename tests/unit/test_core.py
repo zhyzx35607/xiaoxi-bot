@@ -25,6 +25,60 @@ from bot import scheduler
 
 
 class CoreBehaviorTests(unittest.TestCase):
+    def test_ai_memory_redacts_common_credential_formats(self):
+        from bot.ai import memory as ai_memory
+
+        entries = [{
+            "role": "user",
+            "content": (
+                "Cookie: session=private-cookie; "
+                "Authorization: Bearer private-bearer; "
+                "github_pat_abcdefghijklmnopqrstuvwxyz123456"
+            ),
+        }]
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(ai_memory, "MEMORY_DIR", root):
+            ai_memory._memories.pop(987654, None)
+            ai_memory._memory_timestamps.pop(987654, None)
+            ai_memory._save_memory(987654, entries)
+            saved = Path(root, "group_987654.json").read_text(encoding="utf-8")
+
+        self.assertNotIn("private-cookie", saved)
+        self.assertNotIn("private-bearer", saved)
+        self.assertNotIn("github_pat_abcdefghijklmnopqrstuvwxyz123456", saved)
+        self.assertIn("[已隐藏]", saved)
+
+        from bot.memory import redact_sensitive_text
+        private_key = "-----BEGIN PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----"
+        self.assertNotIn("private-body", redact_sensitive_text(private_key))
+        self.assertNotIn("ASIA1234567890ABCDEF", redact_sensitive_text("ASIA1234567890ABCDEF"))
+
+    def test_ai_memory_redacts_legacy_and_long_term_files_on_read(self):
+        from bot.ai import memory as ai_memory
+
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(ai_memory, "MEMORY_DIR", root):
+            Path(root, "group_987655.json").write_text(json.dumps([{
+                "role": "user", "content": "Cookie: session=legacy-cookie", "ts": time.time(),
+            }]), encoding="utf-8")
+            Path(root, "group_987655_long.json").write_text(json.dumps([{
+                "content": "Authorization: Bearer legacy-bearer", "ts": time.time(),
+            }]), encoding="utf-8")
+            ai_memory._memories.pop(987655, None)
+            ai_memory._memory_timestamps.pop(987655, None)
+
+            short = ai_memory._load_memory(987655)
+            long = ai_memory._load_long_memory(987655)
+            rewritten_short = Path(root, "group_987655.json").read_text(encoding="utf-8")
+            rewritten_long = Path(root, "group_987655_long.json").read_text(encoding="utf-8")
+
+        self.assertNotIn("legacy-cookie", short[0]["content"])
+        self.assertNotIn("legacy-bearer", long[0]["content"])
+        self.assertIn("[已隐藏]", short[0]["content"])
+        self.assertIn("[已隐藏]", long[0]["content"])
+        self.assertNotIn("legacy-cookie", rewritten_short)
+        self.assertNotIn("legacy-bearer", rewritten_long)
+
     def test_chat_log_excludes_disabled_groups_and_disabled_private(self):
         class DispatcherStub:
             config = {

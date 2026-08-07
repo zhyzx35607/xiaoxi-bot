@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..memory import contains_sensitive_data
+from ..memory import contains_sensitive_data, sanitize_persistent_value
 from .character_cards import CharacterCardError, load_character_card
 from .lightrag import LightRAGClient
 from .storage import RoleplayStore
@@ -62,7 +62,7 @@ class RoleplayService:
             if isinstance(payload, dict):
                 for name, value in payload.items():
                     if isinstance(name, str) and isinstance(value, str):
-                        policies[name[:80]] = value[:12000]
+                        policies[name[:80]] = str(sanitize_persistent_value(value))[:12000]
         except FileNotFoundError:
             pass
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
@@ -427,20 +427,20 @@ class RoleplayService:
             return "当前还没有关系时间线。可用 /memory add relationship_event | 内容 添加。"
         return "关系时间线：\n" + "\n".join(f"#{item['id']} {item['content']}" for item in reversed(items))
 
-    def _auto_extract_memories(self, chat_id: str, message_id: int, text: str) -> None:
+    def _auto_extract_memories(self, text: str) -> list[tuple[str, str]]:
         patterns = [
             ("user_preference", r"(?:我喜欢|我偏好|我最喜欢)(.{1,80})"),
             ("user_profile", r"(?:我是|我的身份是|我叫)(.{1,80})"),
             ("important_event", r"(?:记住|别忘了|重要的是)[：:\s]*(.{1,160})"),
         ]
+        candidates = []
         for memory_type, pattern in patterns:
             match = re.search(pattern, text)
             if match:
                 content = match.group(1).strip(" ，。！？")
                 if content and not contains_sensitive_data(content):
-                    existing = self.store.search_memories(chat_id, content, 3)
-                    if not any(item["content"] == content for item in existing):
-                        self.store.add_memory(chat_id, memory_type, content, keywords=content, confidence=0.8, source_message_id=message_id)
+                    candidates.append((memory_type, content))
+        return candidates
 
     async def record_exchange(
         self, user_id: int, group_id: int | None, user_text: str, assistant_text: str,
@@ -462,26 +462,20 @@ class RoleplayService:
             return
         safe_user_text = self._persistent_text(user_text)
         safe_assistant_text = self._persistent_text(assistant_text)
-        user_message_id = self.store.add_message(active["id"], "user", safe_user_text)
-        self.store.add_message(active["id"], "assistant", safe_assistant_text)
-        self.store.add_story_beat(active["id"], safe_assistant_text)
-        self._auto_extract_memories(active["id"], user_message_id, safe_user_text)
-        count = self.store.message_count(active["id"])
-        interval = max(8, int(self.settings.get("summary_every_messages", 20)))
-        if count >= interval and count % interval < 2:
-            recent = self.store.recent_messages(active["id"], interval)
-            summary = "；".join(f"{'主人' if m['role']=='user' else active['character_name']}：{m['content'][:160]}" for m in recent)
-            self.store.save_summary(active["id"], summary[:6000], recent[-1]["id"] if recent else 0)
-        cleanup_interval = max(20, int(self.settings.get("retention_cleanup_every_messages", 100)))
-        if count >= cleanup_interval and count % cleanup_interval < 2:
-            self.store.prune_retention(
-                active["id"],
-                max_messages=max(100, int(self.settings.get("max_messages_per_chat", 5000))),
-                max_story_beats=max(20, int(self.settings.get("max_story_beats_per_chat", 1000))),
-                max_summaries=max(2, int(self.settings.get("max_summaries_per_chat", 50))),
-                audit_retention_days=max(1, int(self.settings.get("audit_retention_days", 90))),
-            )
-        self.store.audit(user_id, "exchange", {"request_hash": self._hash(user_text), "response_hash": self._hash(assistant_text)}, active["id"])
+        self.store.record_exchange(
+            active["id"],
+            safe_user_text,
+            safe_assistant_text,
+            memory_candidates=self._auto_extract_memories(safe_user_text),
+            summary_every_messages=int(self.settings.get("summary_every_messages", 20)),
+            cleanup_every_messages=int(self.settings.get("retention_cleanup_every_messages", 100)),
+            max_messages=max(100, int(self.settings.get("max_messages_per_chat", 5000))),
+            max_story_beats=max(20, int(self.settings.get("max_story_beats_per_chat", 1000))),
+            max_summaries=max(2, int(self.settings.get("max_summaries_per_chat", 50))),
+            audit_retention_days=max(1, int(self.settings.get("audit_retention_days", 90))),
+            request_hash="redacted" if contains_sensitive_data(user_text) else self._hash(user_text),
+            response_hash="redacted" if contains_sensitive_data(assistant_text) else self._hash(assistant_text),
+        )
 
     @staticmethod
     def _trim_history_content(content: str, limit: int) -> str:
@@ -546,15 +540,17 @@ class RoleplayService:
             return "", [], None
         active = snapshot["active"]
         character = snapshot["character"]
-        data = character["data"]
+        data = sanitize_persistent_value(character["data"])
         mode = snapshot["mode"]
-        summary = snapshot["summary"]
-        scene = snapshot["scene"]
-        beats = snapshot["beats"]
-        memories = snapshot["memories"]
-        world_entries = snapshot["world_entries"]
+        summary = sanitize_persistent_value(snapshot["summary"])
+        scene = sanitize_persistent_value(snapshot["scene"])
+        beats = sanitize_persistent_value(snapshot["beats"])
+        memories = sanitize_persistent_value(snapshot["memories"])
+        world_entries = sanitize_persistent_value(snapshot["world_entries"])
         rag = "" if contains_sensitive_data(user_text) else await self.lightrag.query(
-            f"角色 {character['name']}；当前消息：{user_text}")
+            f"角色 {sanitize_persistent_value(character['name'])}；当前消息：{user_text}")
+        safe_rag = sanitize_persistent_value(rag)
+        rag = str(safe_rag) if safe_rag else ""
         parts = [BASE_ROLEPLAY_POLICY, "【当前文本模式】\n" + self.mode_policies.get(mode, self.mode_policies["normal"])]
         if mode == "owner_story":
             parts.append(STORY_QUALITY_POLICY)
@@ -566,7 +562,7 @@ class RoleplayService:
             ("角色卡历史后置指令（背景资料）", data.get("post_history_instructions")),
         ]:
             if value:
-                parts.append(f"【{label}】\n{str(value)}")
+                parts.append(f"【{label}】\n{str(sanitize_persistent_value(value))}")
         if scene:
             parts.append("【当前场景状态】\n" + json.dumps({
                 "title": scene["title"], "situation": scene["current_situation"],
@@ -577,7 +573,10 @@ class RoleplayService:
         if beats:
             parts.append("【最近剧情节拍】\n" + "\n".join(f"- {item['content']}" for item in beats))
         if active.get("persona_description"):
-            parts.append(f"【主人 Persona：{active.get('persona_name')}】\n{active['persona_description']}")
+            parts.append(
+                f"【主人 Persona：{sanitize_persistent_value(active.get('persona_name'))}】\n"
+                f"{sanitize_persistent_value(active['persona_description'])}"
+            )
         if world_entries:
             parts.append("【命中的世界信息】\n" + "\n".join(f"- {item['content']}" for item in world_entries))
         if summary:
@@ -588,7 +587,7 @@ class RoleplayService:
             parts.append("【知识库检索资料】\n" + rag)
         max_chars = int(self.settings.get("max_context_chars", 18000))
         prompt = "\n\n".join(parts)[:max_chars]
-        history = self._bounded_history(snapshot["history"])
+        history = self._bounded_history(sanitize_persistent_value(snapshot["history"]))
         return prompt, history, active["id"]
 
     async def build_context(self, user_id: int, group_id: int | None, user_text: str) -> tuple[str, list[dict[str, str]]]:

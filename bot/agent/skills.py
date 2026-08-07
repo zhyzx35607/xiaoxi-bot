@@ -12,9 +12,6 @@ class AgentSkillStore:
         return "skills/{}.json".format(scope_key.replace(":", "_"))
 
     def create(self, scope_key, owner_id, name, instructions, *, triggers=None):
-        records = self.store.read(self._path(scope_key), [])
-        if not isinstance(records, list):
-            records = []
         now = time.time()
         item = {
             "id": uuid.uuid4().hex[:12], "name": str(name).strip()[:100],
@@ -23,8 +20,12 @@ class AgentSkillStore:
             "owner_id": int(owner_id or 0), "enabled": True,
             "created_at": now, "updated_at": now,
         }
-        records.append(item)
-        self.store.write(self._path(scope_key), records[-100:])
+        def add(records):
+            if not isinstance(records, list):
+                records = []
+            return (records + [item])[-100:], item
+
+        self.store.update(self._path(scope_key), [], add)
         return item
 
     def list(self, scope_key, enabled_only=True):
@@ -45,16 +46,16 @@ class AgentSkillStore:
         return matches[:limit]
 
     def set_enabled(self, scope_key, skill_id, enabled):
-        records = self.store.read(self._path(scope_key), [])
-        if not isinstance(records, list):
-            return None
-        updated = None
-        for item in records:
-            if item.get("id") == skill_id:
-                item["enabled"] = bool(enabled)
-                item["updated_at"] = time.time()
-                updated = item
-                break
-        if updated:
-            self.store.write(self._path(scope_key), records[-100:])
-        return updated
+        def change(records):
+            if not isinstance(records, list):
+                records = []
+            updated = None
+            for item in records:
+                if item.get("id") == skill_id:
+                    item["enabled"] = bool(enabled)
+                    item["updated_at"] = time.time()
+                    updated = item
+                    break
+            return records[-100:], updated
+
+        return self.store.update(self._path(scope_key), [], change)

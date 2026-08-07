@@ -2,6 +2,7 @@
 
 import inspect
 
+from ...memory import sanitize_for_memory
 from ..policy import tool_allowed
 from .napcat import SAFE_ACTIONS, action_description, napcat_read
 from .native import NATIVE_TOOL_DESCRIPTIONS, WRITE_TOOLS, execute_native
@@ -72,4 +73,8 @@ class AgentToolGateway:
                 result = await result
             return result if isinstance(result, dict) else {"ok": True, "data": result}
         except Exception as error:
-            return {"ok": False, "error": "tool_execution_failed", "message": str(error)[:300]}
+            return {
+                "ok": False,
+                "error": "tool_execution_failed",
+                "message": sanitize_for_memory(error)[:300],
+            }

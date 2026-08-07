@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+
+
+log = logging.getLogger("qqbot")
 
 
 def _service(dispatcher):
@@ -14,11 +18,19 @@ def _service(dispatcher):
 
 async def _run(dispatcher, group_id, user_id, fn, *args, **kwargs):
     try:
-        result = await fn(*args, **kwargs) if asyncio.iscoroutinefunction(fn) else fn(*args, **kwargs)
+        result = (
+            await fn(*args, **kwargs)
+            if asyncio.iscoroutinefunction(fn)
+            else await asyncio.to_thread(fn, *args, **kwargs)
+        )
     except PermissionError as exc:
         result = str(exc)
     except Exception as exc:
-        result = f"操作失败：{exc}"
+        log.warning(
+            "Roleplay command failed function=%s error=%s",
+            getattr(fn, "__name__", "unknown"), exc,
+        )
+        result = "操作失败：请检查参数或文件格式"
     await dispatcher._reply(group_id, user_id, result)
 
 

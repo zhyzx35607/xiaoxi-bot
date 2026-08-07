@@ -40,11 +40,12 @@ class AgentPlanStore:
             "source_event_id": str(source_event_id)[:80],
             "created_at": now, "updated_at": now,
         }
-        records = self.store.read(self._path(scope_key), [])
-        if not isinstance(records, list):
-            records = []
-        records.append(record)
-        self.store.write(self._path(scope_key), records[-100:])
+        def add(records):
+            if not isinstance(records, list):
+                records = []
+            return (records + [record])[-100:], record
+
+        self.store.update(self._path(scope_key), [], add)
         return record
 
     def list(self, scope_key, statuses=None):
@@ -59,58 +60,58 @@ class AgentPlanStore:
         return next((item for item in self.list(scope_key) if item.get("id") == plan_id), None)
 
     def update_step(self, scope_key, plan_id, step_id, status, *, evidence="", result=""):
-        records = self.store.read(self._path(scope_key), [])
-        if not isinstance(records, list):
-            return None
-        updated = None
-        now = time.time()
-        for plan in records:
-            if plan.get("id") != plan_id:
-                continue
-            step_found = False
-            for step in plan.get("steps", []):
-                if step.get("id") == step_id:
-                    step_found = True
-                    step["status"] = str(status)[:30]
-                    if evidence:
-                        step["evidence"] = str(evidence)[:2000]
-                    if result:
-                        step["result"] = str(result)[:2000]
-                    step["updated_at"] = now
+        def change(records):
+            if not isinstance(records, list):
+                records = []
+            updated = None
+            now = time.time()
+            for plan in records:
+                if plan.get("id") != plan_id:
+                    continue
+                step_found = False
+                for step in plan.get("steps", []):
+                    if step.get("id") == step_id:
+                        step_found = True
+                        step["status"] = str(status)[:30]
+                        if evidence:
+                            step["evidence"] = str(evidence)[:2000]
+                        if result:
+                            step["result"] = str(result)[:2000]
+                        step["updated_at"] = now
+                        break
+                if not step_found:
                     break
-            if not step_found:
-                return None
-            statuses = [step.get("status") for step in plan.get("steps", [])]
-            if statuses and all(item in TERMINAL_STEP_STATUSES for item in statuses):
-                plan["status"] = "failed" if "failed" in statuses else "done"
-            elif any(item == "running" for item in statuses):
-                plan["status"] = "running"
-            else:
-                plan["status"] = "active"
-            plan["updated_at"] = now
-            updated = plan
-            break
-        if updated:
-            self.store.write(self._path(scope_key), records[-100:])
-        return updated
+                statuses = [step.get("status") for step in plan.get("steps", [])]
+                if statuses and all(item in TERMINAL_STEP_STATUSES for item in statuses):
+                    plan["status"] = "failed" if "failed" in statuses else "done"
+                elif any(item == "running" for item in statuses):
+                    plan["status"] = "running"
+                else:
+                    plan["status"] = "active"
+                plan["updated_at"] = now
+                updated = plan
+                break
+            return records[-100:], updated
+
+        return self.store.update(self._path(scope_key), [], change)
 
     def cancel(self, scope_key, plan_id):
-        records = self.store.read(self._path(scope_key), [])
-        if not isinstance(records, list):
-            return None
-        now = time.time()
-        updated = None
-        for plan in records:
-            if plan.get("id") != plan_id or plan.get("status") in {"done", "failed", "cancelled"}:
-                continue
-            plan["status"] = "cancelled"
-            plan["updated_at"] = now
-            for step in plan.get("steps", []):
-                if step.get("status") not in TERMINAL_STEP_STATUSES:
-                    step["status"] = "cancelled"
-                    step["updated_at"] = now
-            updated = plan
-            break
-        if updated:
-            self.store.write(self._path(scope_key), records[-100:])
-        return updated
+        def cancel_plan(records):
+            if not isinstance(records, list):
+                records = []
+            now = time.time()
+            updated = None
+            for plan in records:
+                if plan.get("id") != plan_id or plan.get("status") in {"done", "failed", "cancelled"}:
+                    continue
+                plan["status"] = "cancelled"
+                plan["updated_at"] = now
+                for step in plan.get("steps", []):
+                    if step.get("status") not in TERMINAL_STEP_STATUSES:
+                        step["status"] = "cancelled"
+                        step["updated_at"] = now
+                updated = plan
+                break
+            return records[-100:], updated
+
+        return self.store.update(self._path(scope_key), [], cancel_plan)
