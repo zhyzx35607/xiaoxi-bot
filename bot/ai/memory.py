@@ -186,9 +186,27 @@ def _save_memory(group_id, memory, config=None, session=None):
     path = _memory_file(group_id)
     atomic_write_json(path, memory)
 
+def clear_group_memory_cache(group_id):
+    """Forget cached group data and cancel pending compression tasks."""
+    keys = {group_id, str(group_id)}
+    try:
+        keys.add(int(group_id))
+    except (TypeError, ValueError):
+        pass
+    for key in keys:
+        _memories.pop(key, None)
+        _memory_timestamps.pop(key, None)
+    task_prefixes = (
+        "group:{}".format(group_id),
+        "group:{}:u".format(group_id),
+    )
+    for key, task in list(_LONG_MEMORY_TASKS.items()):
+        if key == task_prefixes[0] or key.startswith(task_prefixes[1]):
+            task.cancel()
+
+
 def clear_group_memory(dispatcher, group_id):
-    _memories.pop(group_id, None)
-    _memory_timestamps.pop(group_id, None)
+    clear_group_memory_cache(group_id)
     path = _memory_file(group_id)
     if os.path.exists(path):
         os.remove(path)

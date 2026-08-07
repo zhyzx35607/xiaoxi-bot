@@ -195,6 +195,14 @@ class ServiceInstallScriptTests(unittest.TestCase):
         self.assertIn("-name 'onebot11_*.json'", script)
         self.assertIn('chmod 0600 "${config_file}"', script)
 
+    def test_journald_has_bounded_retention(self):
+        config = (ROOT / "deploy" / "qqbot-journald.conf").read_text(encoding="utf-8")
+        self.assertIn("SystemMaxUse=192M", config)
+        self.assertIn("RuntimeMaxUse=64M", config)
+        self.assertIn("MaxRetentionSec=7day", config)
+        script = (ROOT / "deploy" / "install-qqbot-service.sh").read_text(encoding="utf-8")
+        self.assertIn("/etc/systemd/journald.conf.d/30-qqbot.conf", script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -165,9 +165,9 @@ ACG images are collected into a persistent pool. A scheduled delivery waits unti
 
 **群主人（每群的主人，由总主人设置）：**
 
-`/enable` `/disable` — 开关本群
+`/enable` `/disable` — 群聊中开关本群；最高主人私聊时需明确写群号或 `all`
 `/list` — 群数据概览
-`/clearai` — 清本群数据
+`/clearai` — 清本群数据（确认后先备份再清理）；最高主人私聊时需明确写群号或 `all`
 `/b站推送 add/del/list` — 盯 UP 主新投稿（mid 是 UP 主空间网址 space.bilibili.com/ 后面的数字，直接贴空间链接也行；详细用法发 `/help b站推送`）
 `/积分` — 看 uapis 积分额度
 

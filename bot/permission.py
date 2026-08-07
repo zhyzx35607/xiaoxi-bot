@@ -48,33 +48,42 @@ def is_group_enabled(dispatcher, group_id):
     gid = str(group_id)
     groups = dispatcher.config.get("groups", {})
     return groups.get(gid, {}).get("enabled", False)
-async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
+async def _resolve_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
+    """Resolve a caller role and report whether the result is authoritative."""
     # Bot owner has super level everywhere
     if user_id == dispatcher.config.get("bot_owner"):
-        return LEVEL_SUPER, "super"
+        return LEVEL_SUPER, "super", True
     # The bot account itself also has super level (self-commands via message_sent)
     if user_id == dispatcher.config.get("bot_qq"):
-        return LEVEL_SUPER, "super"
+        return LEVEL_SUPER, "super", True
     if not group_id:
-        return LEVEL_MEMBER, "member"
+        return LEVEL_MEMBER, "member", True
     gcfg = get_group_config(dispatcher, group_id)
     masters = gcfg.get("masters", [])
     if user_id in masters:
-        return LEVEL_MASTER, "master"
+        return LEVEL_MASTER, "master", True
     # Query real-time role from API (NOT NapCat's possibly-stale sender.role)
     role_map = {"owner": (LEVEL_GOWNER, "gowner"), "admin": (LEVEL_ADMIN, "admin"), "member": (LEVEL_MEMBER, "member")}
     try:
         r = await dispatcher.client.get_group_member_info(group_id, user_id)
         if r.get("status") == "ok":
             data = r.get("data", {})
-            real_role = data.get("role", sender_role_hint or "member")
+            real_role = data.get("role")
             log.debug("get_user_level: user=%s group=%s api_role=%s hint=%s",
                      user_id, group_id, real_role, sender_role_hint)
-            return role_map.get(real_role, (LEVEL_MEMBER, "member"))
+            if real_role in role_map:
+                level, name = role_map[real_role]
+                return level, name, True
+            log.warning("get_user_level returned an invalid role for group=%s", group_id)
     except Exception as e:
-        log.warning("get_user_level API failed for user=%s: %s, using hint=%s",
-                    user_id, e, sender_role_hint)
-    return role_map.get(sender_role_hint or "member", (LEVEL_MEMBER, "member"))
+        log.warning("get_user_level API failed for group=%s: %s", group_id, e)
+    return LEVEL_MEMBER, "member", False
+
+
+async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
+    level, name, _ = await _resolve_user_level(
+        dispatcher, group_id, user_id, sender_role_hint)
+    return level, name
 # Role cache (per-group, 60s TTL)
 _bot_role_cache = {}
 _bot_role_cache_ttl = 60
@@ -100,8 +109,6 @@ async def get_bot_role(dispatcher, group_id):
             return role, role
     except Exception as e:
         log.error('get_bot_role failed g=%s: %s', group_id, e)
-    if cached:
-        return cached['role'], cached['role']
     return 'member', 'member'
 async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info):
     """Unified permission check.
@@ -115,7 +122,13 @@ async def check_permission(dispatcher, group_id, user_id, sender_role, cmd_info)
     """
     owner = dispatcher.config.get("bot_owner")
     bot_qq = dispatcher.config.get("bot_qq")
-    caller_level, caller_name = await get_user_level(dispatcher, group_id, user_id, sender_role)
+    caller_level, caller_name, caller_verified = await _resolve_user_level(
+        dispatcher, group_id, user_id, sender_role)
+    privileged = any(cmd_info.get(key) for key in (
+        "owner_only", "bot_owner_only", "bot_owner", "admin_only",
+    ))
+    if privileged and not caller_verified:
+        return False, "暂时无法核验你的群身份，请稍后再试"
     # Some QQ operations are owner-only for the bot account itself, such as group special titles.
     # Caller privilege cannot bypass QQ's real group-role restriction.
     if cmd_info.get("bot_owner_required"):
@@ -160,8 +173,14 @@ async def can_moderate_target(dispatcher, group_id, actor_id, target_id, actor_r
     bot_qq = dispatcher.config.get("bot_qq")
     if target_id in {owner, bot_qq}:
         return False, "这个目标受保护"
-    actor_level, _ = await get_user_level(dispatcher, group_id, actor_id, actor_role)
-    target_level, _ = await get_user_level(dispatcher, group_id, target_id, "member")
+    actor_level, _, actor_verified = await _resolve_user_level(
+        dispatcher, group_id, actor_id, actor_role)
+    if not actor_verified:
+        return False, "暂时无法核验操作人的群身份"
+    target_level, _, target_verified = await _resolve_user_level(
+        dispatcher, group_id, target_id, "member")
+    if not target_verified:
+        return False, "暂时无法核验目标成员的群身份"
     # QQ never allows operating on the group owner, regardless of internal levels.
     if target_level == LEVEL_GOWNER:
         return False, "不能操作群主"
