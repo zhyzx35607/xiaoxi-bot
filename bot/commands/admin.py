@@ -16,7 +16,7 @@ from ..permission import (
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
 )
 from ..utils import atomic_write_json
-from .common import CONFIG_PATH, _load, _save
+from .common import CONFIG_PATH, _load, _save, resolve_scoped_group_targets
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -597,25 +597,13 @@ async def cmd_welcome(d, group_id, user_id, args, role, sender_card, message):
                        "入群欢迎状态: " + status_text + "\n当前模板: " + w.get("template", ""))
 
 async def cmd_enable(d, group_id, user_id, args, role, sender_card, message):
+    target_groups, error = resolve_scoped_group_targets(
+        d, group_id, user_id, args, allow_all=True)
+    if error:
+        await d._reply(group_id, user_id, error)
+        return
     cfg = _load()
     groups = cfg.setdefault("groups", {})
-    # Determine target groups
-    target_groups = []
-    if not group_id:
-        if args.strip():
-            target_groups = [g.strip() for g in args.split() if g.strip().isdigit()]
-        if not target_groups:
-            target_groups = list(cfg.get("groups", {}).keys())
-    else:
-        target_groups = [str(group_id)]
-        if args.strip():
-            extra = [g.strip() for g in args.split() if g.strip().isdigit()]
-            for g in extra:
-                if g not in target_groups:
-                    target_groups.append(g)
-    if not target_groups:
-        await d._reply(group_id, user_id, "这样用：/enable [群号1 群号2 ...]")
-        return
     enabled_list = []
     for gid in target_groups:
         if gid not in groups:
@@ -635,25 +623,13 @@ async def cmd_enable(d, group_id, user_id, args, role, sender_card, message):
     await d._reply(group_id, user_id, msg + "，我来了")
 
 async def cmd_disable(d, group_id, user_id, args, role, sender_card, message):
+    target_groups, error = resolve_scoped_group_targets(
+        d, group_id, user_id, args, allow_all=True, require_configured=True)
+    if error:
+        await d._reply(group_id, user_id, error)
+        return
     cfg = _load()
     groups = cfg.setdefault("groups", {})
-    # Determine target groups
-    target_groups = []
-    if not group_id:
-        if args.strip():
-            target_groups = [g.strip() for g in args.split() if g.strip().isdigit()]
-        if not target_groups:
-            target_groups = list(cfg.get("groups", {}).keys())
-    else:
-        target_groups = [str(group_id)]
-        if args.strip():
-            extra = [g.strip() for g in args.split() if g.strip().isdigit()]
-            for g in extra:
-                if g not in target_groups:
-                    target_groups.append(g)
-    if not target_groups:
-        await d._reply(group_id, user_id, "这样用：/disable [群号1 群号2 ...]")
-        return
     disabled_list = []
     for gid in target_groups:
         if gid in groups:

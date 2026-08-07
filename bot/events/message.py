@@ -782,20 +782,23 @@ class PrivateMessageMixin:
                 await self._reply(None, user_id, "群组:\n" + "\n".join(lines))
             elif parts2[0] in ("enable", "disable") and len(parts2) >= 2:
                 gid = parts2[1]
-                enabled = parts2[0] == "enable"
-                groups = self.config.setdefault("groups", {})
-                if gid not in groups:
-                    groups[gid] = json.loads(json.dumps(self.config.get("group_defaults", {})))
-                groups[gid]["enabled"] = enabled
-                await asyncio.to_thread(save_group_config, self)
-                await self._reply(None, user_id, f"群 {gid} 已经{'开了' if enabled else '关了'}")
+                await self._run_command(
+                    parts2[0], gid, None, user_id, "member", sender_name, message)
 
         elif cmd == "memory" and args.strip():
             parts2 = args.split()
             if parts2[0] == "clear" and len(parts2) >= 2:
-                from ..ai import clear_group_memory
-                clear_group_memory(self, parts2[1])
-                await self._reply(None, user_id, f"群 {parts2[1]} 的记忆清掉了")
+                gid = parts2[1]
+                if not gid.isdigit() or gid not in self.config.get("groups", {}):
+                    await self._reply(None, user_id, "要清理的群号无效或尚未配置")
+                    return
+                from ..services.confirmations import create_confirmation
+                code = create_confirmation(
+                    None, user_id, "__clear_group_data__",
+                    {"group_ids": [gid], "scopes": ["memory"]},
+                    "清理群 {} 的 AI 记忆".format(gid),
+                )
+                await self._reply(None, user_id, "确认清理记忆请在一分钟内发送 /确认 {}".format(code))
             else:
                 from ..ai import _load_memory
                 mem = _load_memory(parts2[0], self.config)
@@ -812,13 +815,17 @@ class PrivateMessageMixin:
         elif cmd == "sticker" and args.strip():
             parts2 = args.split()
             if parts2[0] == "clear" and len(parts2) >= 2:
-                import os as _os
-                sticker_path = _os.path.join(_ROOT, "data", "stickers", f"group_{parts2[1]}.json")
-                if _os.path.exists(sticker_path):
-                    _os.remove(sticker_path)
-                    await self._reply(None, user_id, f"群 {parts2[1]} 表情包已清除")
-                else:
-                    await self._reply(None, user_id, f"群 {parts2[1]} 无表情包记录")
+                gid = parts2[1]
+                if not gid.isdigit() or gid not in self.config.get("groups", {}):
+                    await self._reply(None, user_id, "要清理的群号无效或尚未配置")
+                    return
+                from ..services.confirmations import create_confirmation
+                code = create_confirmation(
+                    None, user_id, "__clear_group_data__",
+                    {"group_ids": [gid], "scopes": ["stickers"]},
+                    "清理群 {} 的表情包记录".format(gid),
+                )
+                await self._reply(None, user_id, "确认清理表情包请在一分钟内发送 /确认 {}".format(code))
             else:
                 import os as _os
                 sticker_path = _os.path.join(_ROOT, "data", "stickers", f"group_{parts2[0]}.json")

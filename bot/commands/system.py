@@ -18,8 +18,9 @@ from ..permission import (
     LEVEL_GOWNER, LEVEL_ADMIN, LEVEL_MEMBER,
 )
 from ..events.context import _service_state
+from ..services.confirmations import create_confirmation
 from ..utils import atomic_write_json
-from .common import CONFIG_PATH, _load, _save
+from .common import CONFIG_PATH, _load, _save, resolve_scoped_group_targets
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -444,69 +445,20 @@ async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
     await d._reply(group_id, user_id, "用法：/安全 status | /安全 log | /安全 url on/off | /安全 gray on/off | /安全 punish on/off | /安全 ban 秒数")
 
 async def cmd_clear_ai(d, group_id, user_id, args, role, sender_card, message):
-    import glob as _glob2
-    # Determine target groups
-    target_groups = []
-    if not group_id:
-        # Private message: args required or clear all
-        if args.strip():
-            target_groups = [g.strip() for g in args.split() if g.strip().isdigit()]
-        if not target_groups:
-            # Clear ALL configured groups
-            target_groups = list(d.config.get("groups", {}).keys())
-    else:
-        # Group message: args are optional extra groups, always include current
-        target_groups = [str(group_id)]
-        if args.strip():
-            extra = [g.strip() for g in args.split() if g.strip().isdigit()]
-            for g in extra:
-                if g not in target_groups:
-                    target_groups.append(g)
-    cleared = []
-    for gid in target_groups:
-        # 1. Clear AI chat memory
-        from ..ai import clear_group_memory
-        clear_group_memory(d, gid)
-        # 2. Clear stickers
-        import os as _os3
-        sticker_path = _os3.path.join(_os3.path.dirname(_os3.path.dirname(_os3.path.abspath(__file__))),
-                                    "data", "stickers", f"group_{gid}.json")
-        if _os3.path.exists(sticker_path):
-            _os3.remove(sticker_path)
-        # 3. Clear blacklist entries for this group
-        from ..guard import load_blacklist, save_blacklist
-        bl = load_blacklist()
-        prefix = f"{gid}_"
-        removed = [k for k in bl if k.startswith(prefix)]
-        for k in removed:
-            del bl[k]
-        if removed:
-            save_blacklist(bl)
-        # 4. Clear R18 warnings for this group
-        try:
-            from ..guard import load_warnings, save_warnings
-            w = load_warnings()
-            removed_w = [k for k in w if k.startswith(prefix)]
-            for k in removed_w:
-                del w[k]
-            if removed_w:
-                save_warnings(w)
-        except Exception as error:
-            log.warning("R18 warning cleanup failed for group=%s: %s", gid, error)
-        # 5. Clear user memories for this group
-        user_mem_dir = _os3.path.join(_os3.path.dirname(_os3.path.dirname(_os3.path.abspath(__file__))),
-                                    "data", "memories")
-        pattern = _os3.path.join(user_mem_dir, f"group_{gid}_u*.json")
-        for f in _glob2.glob(pattern):
-            _os3.remove(f)
-        cleared.append(gid)
-    if not group_id:
-        await d._reply(None, user_id, f"清完了，一共 {len(cleared)} 个群：{', '.join(cleared)}")
-    else:
-        msg = f"清完了，一共 {len(cleared)} 个群"
-        if len(cleared) > 1:
-            msg += f"：{', '.join(cleared)}"
-        await d._reply(group_id, user_id, msg)
+    target_groups, error = resolve_scoped_group_targets(
+        d, group_id, user_id, args, allow_all=True, require_configured=True)
+    if error:
+        await d._reply(group_id, user_id, error)
+        return
+    code = create_confirmation(
+        group_id, user_id, "__clear_group_data__", {"group_ids": target_groups},
+        "清理 {} 个群的机器人数据".format(len(target_groups)),
+    )
+    await d._reply(
+        group_id, user_id,
+        "这会先创建私有备份，再清除记忆、表情、黑名单和警告。"
+        "确认执行请在一分钟内发送 /确认 {}".format(code),
+    )
 
 async def cmd_list(d, group_id, user_id, args, role, sender_card, message):
     cfg = d.config

@@ -1,6 +1,10 @@
 """Grouped NapCat capability commands with feature and permission gates."""
 
+import asyncio
+import ipaddress
 import json
+import socket
+from urllib.parse import urlparse
 
 from ..permission import (
     LEVEL_ADMIN,
@@ -8,6 +12,7 @@ from ..permission import (
     LEVEL_MASTER,
     LEVEL_SUPER,
     can_moderate_target,
+    get_bot_role,
     get_group_config,
     get_user_level,
     save_group_config,
@@ -17,6 +22,7 @@ from ..services.confirmations import (
     create_confirmation,
     execute_confirmation,
 )
+from .uapi_extra import _image_url, _safe_public_url
 
 _CATEGORY_ALIASES = {
     "消息": "message", "群管": "management", "待办": "todo", "相册": "album",
@@ -40,6 +46,71 @@ def _reply_id(message):
 
 async def _level(dispatcher, group_id, user_id, role):
     return (await get_user_level(dispatcher, group_id, user_id, role))[0]
+
+
+async def _require_write_permission(dispatcher, group_id, user_id, level):
+    if group_id:
+        if level < LEVEL_ADMIN:
+            await dispatcher._reply(group_id, user_id, "这个写操作需要群管理身份")
+            return False
+        bot_role, _ = await get_bot_role(dispatcher, group_id)
+        if bot_role not in ("admin", "owner"):
+            await dispatcher._reply(group_id, user_id, "我现在不是管理员，做不了这个")
+            return False
+        return True
+    if level < LEVEL_SUPER:
+        await dispatcher._reply(None, user_id, "这个写操作只有最高主人能用")
+        return False
+    return True
+
+
+async def _validated_public_url(value):
+    url = _safe_public_url(value)
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if len(url) > 2048 or parsed.username or parsed.password:
+        return ""
+    try:
+        addresses = await asyncio.to_thread(
+            socket.getaddrinfo, parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except (OSError, UnicodeError):
+        return ""
+    if not addresses:
+        return ""
+    for address in addresses:
+        try:
+            if not ipaddress.ip_address(address[4][0]).is_global:
+                return ""
+        except (IndexError, TypeError, ValueError):
+            return ""
+    return url
+
+
+async def _album_image_url(dispatcher, value, message):
+    candidates = []
+    direct = _image_url(value, message)
+    if direct:
+        candidates.append(direct)
+    reply_id = _reply_id(message)
+    if reply_id:
+        try:
+            result = await dispatcher.client.get_msg(reply_id)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            result = None
+        if isinstance(result, dict) and result.get("status") == "ok":
+            replied = (result.get("data") or {}).get("message", [])
+            reply_url = _image_url("", replied)
+            if reply_url:
+                candidates.append(reply_url)
+    for candidate in candidates:
+        validated = await _validated_public_url(candidate)
+        if validated:
+            return validated
+    return ""
 
 
 def _feature_enabled(dispatcher, group_id, category, level):
@@ -108,6 +179,8 @@ async def cmd_message_center(d, group_id, user_id, args, role, sender_card, mess
     elif sub == "语音文字" and len(parts) >= 2:
         result = await d.client.fetch_ptt_text(parts[1])
     elif sub == "闪传" and len(parts) >= 2:
+        if not await _require_write_permission(d, group_id, user_id, level):
+            return
         result = await d.client.send_flash_msg(parts[1], group_id=group_id,
                                                user_id=None if group_id else user_id)
     else:
@@ -126,6 +199,9 @@ async def cmd_todo_center(d, group_id, user_id, args, role, sender_card, message
     parts = args.strip().split()
     sub = parts[0] if parts else "帮助"
     message_id = parts[1] if len(parts) > 1 else _reply_id(message)
+    if sub in ("添加", "创建", "完成", "取消"):
+        if not await _require_write_permission(d, group_id, user_id, level):
+            return
     if sub in ("添加", "创建") and message_id:
         result = await d.client.set_group_todo(group_id, message_id=message_id)
     elif sub == "完成" and message_id:
@@ -145,31 +221,67 @@ async def cmd_album_center(d, group_id, user_id, args, role, sender_card, messag
     if not group_id:
         await d._reply(None, user_id, "群相册只能在群里用")
         return
-    parts = args.strip().split(maxsplit=4)
-    sub = parts[0] if parts else "列表"
+    command = args.strip().split(maxsplit=1)
+    sub = command[0] if command else "列表"
+    rest = command[1] if len(command) > 1 else ""
     if sub == "列表":
         result = await d.client.get_group_album_list(group_id)
-    elif sub == "内容" and len(parts) >= 2:
-        result = await d.client.get_group_album_media_list(group_id, parts[1])
-    elif sub == "上传" and len(parts) >= 4 and level >= LEVEL_ADMIN:
-        result = await d.client.upload_group_album_image(group_id, parts[1], parts[2], parts[3])
-    elif sub == "评论" and len(parts) >= 5 and level >= LEVEL_ADMIN:
-        result = await d.client.comment_group_album_media(group_id, parts[1], parts[2], parts[3])
-    elif sub == "点赞" and len(parts) >= 3:
-        result = await d.client.set_group_album_media_like(group_id, parts[1], parts[2],
-                                                           parts[3] if len(parts) > 3 else "")
-    elif sub == "删除" and len(parts) >= 3 and level >= LEVEL_ADMIN:
-        params = {"group_id": str(group_id), "album_id": str(parts[1]), "lloc": str(parts[2])}
-        if level >= LEVEL_SUPER:
-            result = await d.client.call("del_group_album_media", params)
-        else:
-            code = create_confirmation(group_id, user_id, "del_group_album_media", params,
-                                       "删除群相册媒体 {}".format(parts[2]))
-            await d._reply(group_id, user_id, "要删的话发 /确认 {}，一分钟内有效".format(code))
+    elif sub == "内容" and rest:
+        result = await d.client.get_group_album_media_list(group_id, rest.split()[0])
+    elif sub == "上传":
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 2:
+            result = None
+        elif not await _require_write_permission(d, group_id, user_id, level):
             return
+        else:
+            image_url = await _album_image_url(
+                d, parts[2] if len(parts) > 2 else "", message)
+            if not image_url:
+                await d._reply(group_id, user_id, "只接受公开 http/https 图片URL，或回复一张图片上传；不支持服务器本地路径")
+                return
+            result = await d.client.upload_group_album_image(
+                group_id, parts[0], parts[1], image_url)
+    elif sub == "评论":
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 3:
+            result = None
+        elif not await _require_write_permission(d, group_id, user_id, level):
+            return
+        else:
+            result = await d.client.comment_group_album_media(
+                group_id, parts[0], parts[1], parts[2][:500])
+    elif sub == "点赞":
+        parts = rest.split(maxsplit=2)
+        if len(parts) < 2:
+            result = None
+        elif not await _require_write_permission(d, group_id, user_id, level):
+            return
+        else:
+            result = await d.client.set_group_album_media_like(
+                group_id, parts[0], parts[1], parts[2] if len(parts) > 2 else "")
+    elif sub == "删除":
+        parts = rest.split(maxsplit=1)
+        if len(parts) < 2:
+            result = None
+        elif not await _require_write_permission(d, group_id, user_id, level):
+            return
+        else:
+            params = {"group_id": str(group_id), "album_id": str(parts[0]), "lloc": str(parts[1])}
+            if level >= LEVEL_SUPER:
+                result = await d.client.call("del_group_album_media", params)
+            else:
+                code = create_confirmation(group_id, user_id, "del_group_album_media", params,
+                                           "删除群相册媒体 {}".format(parts[1]))
+                await d._reply(group_id, user_id, "要删的话发 /确认 {}，一分钟内有效".format(code))
+                return
     else:
+        result = None
+    if result is None:
         await d._reply(group_id, user_id,
-            "/相册 列表\n/相册 内容 <album_id>\n/相册 上传 <album_id> <相册名> <图片路径或URL>\n/相册 点赞 <album_id> <batch_id> [lloc]\n/相册 删除 <album_id> <lloc>",
+            "/相册 列表\n/相册 内容 <album_id>\n/相册 上传 <album_id> <相册名> [公开图片URL]（也可回复图片）\n"
+            "/相册 评论 <album_id> <lloc> <评论内容>\n/相册 点赞 <album_id> <batch_id> [lloc]\n"
+            "/相册 删除 <album_id> <lloc>",
             force_forward=True, kind="help", title="群相册功能", role_hint=role)
         return
     await d._reply(group_id, user_id, _format_result(result), title="群相册结果", role_hint=role)
@@ -268,7 +380,16 @@ async def cmd_friend_center(d, group_id, user_id, args, role, sender_card, messa
     elif sub == "备注" and len(parts) >= 3:
         result = await d.client.set_friend_remark(parts[1], parts[2])
     elif sub == "删除" and len(parts) >= 2:
-        result = await d.client.delete_friend(parts[1], both=True)
+        if not parts[1].isdigit():
+            await d._reply(group_id, user_id, "好友 QQ 号只能写数字")
+            return
+        code = create_confirmation(
+            group_id, user_id, "delete_friend",
+            {"user_id": parts[1], "temp_block": False, "temp_both_del": True},
+            "双向删除好友 {}".format(parts[1]),
+        )
+        await d._reply(group_id, user_id, "确认删除的话请在一分钟内发送 /确认 {}".format(code))
+        return
     elif sub == "可疑申请":
         result = await d.client.get_doubt_friends_add_request()
     else:
@@ -311,6 +432,8 @@ async def cmd_interaction_center(d, group_id, user_id, args, role, sender_card, 
     if parts and parts[0] == "群分享" and group_id:
         result = await d.client.ark_share_group(group_id)
     elif parts and parts[0] == "闪传" and len(parts) >= 2:
+        if not await _require_write_permission(d, group_id, user_id, level):
+            return
         result = await d.client.send_flash_msg(parts[1], group_id=group_id,
                                                user_id=None if group_id else user_id)
     else:

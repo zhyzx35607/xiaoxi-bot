@@ -448,7 +448,15 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
 class AgentCommandPermissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_command_is_group_owner_scoped(self):
         from bot.permission import check_permission
-        dispatcher = type("Dispatcher", (), {"config": {"bot_owner": 999, "bot_qq": 888}})()
+        client = type("Client", (), {
+            "get_group_member_info": AsyncMock(side_effect=lambda _group, user: {
+                "status": "ok", "data": {"role": "owner" if user == 102 else "member"},
+            }),
+        })()
+        dispatcher = type("Dispatcher", (), {
+            "config": {"bot_owner": 999, "bot_qq": 888},
+            "client": client,
+        })()
         allowed, error = await check_permission(dispatcher, 300, 101, "member", {"owner_only": True})
         self.assertFalse(allowed)
         self.assertIn("群主", error)

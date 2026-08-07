@@ -1,8 +1,10 @@
 ﻿"""Short-lived confirmation records for destructive NapCat actions."""
 
+import asyncio
 import json
 import os
 import secrets
+import tarfile
 import threading
 import time
 
@@ -127,6 +129,31 @@ async def execute_confirmation(dispatcher, code, user_id, group_id, role):
         action = item.get("action")
         params = sanitize_persistent_value(item.get("params") or {})
         description = item.get("description")
+        if action == "__clear_group_data__":
+            raw_targets = params.get("group_ids")
+            raw_scopes = params.get("scopes", ["memory", "stickers", "guard"])
+            targets = list(dict.fromkeys(
+                str(value) for value in raw_targets
+                if str(value).isdigit()
+            )) if isinstance(raw_targets, list) else []
+            scopes = list(dict.fromkeys(str(value) for value in raw_scopes)) \
+                if isinstance(raw_scopes, list) else []
+            configured = {str(value) for value in dispatcher.config.get("groups", {})}
+            valid_scope = (
+                targets
+                and all(value in configured for value in targets)
+                and scopes
+                and set(scopes).issubset({"memory", "stickers", "guard"})
+                and (
+                    (group_id and targets == [str(group_id)])
+                    or (not group_id and user_id == dispatcher.config.get("bot_owner"))
+                )
+            )
+            if not valid_scope:
+                data.pop(str(code), None)
+                _save_unlocked(data)
+                return False, "清理目标校验失败，操作已取消"
+            params = {"group_ids": targets, "scopes": scopes}
         data.pop(str(code), None)
         _save_unlocked(data)
     if action == "__agent_plan__":
@@ -135,6 +162,16 @@ async def execute_confirmation(dispatcher, code, user_id, group_id, role):
         if result.get("success"):
             return True, str(result.get("message") or "Agent 方案已确认并执行")[:3500]
         return False, "Agent 方案执行失败：" + sanitize_for_memory(str(result.get("reason") or "未知原因"))[:500]
+    if action == "__clear_group_data__":
+        from .group_data import clear_group_data, prepare_group_data_clear
+        try:
+            prepare_group_data_clear(params["group_ids"], params["scopes"])
+            result = await asyncio.to_thread(
+                clear_group_data, dispatcher, params["group_ids"], params["scopes"])
+        except (OSError, ValueError, tarfile.TarError):
+            return False, "清理失败，操作备份或数据写入未完成"
+        return True, "已清理 {} 个群，操作备份：{}".format(
+            len(result["group_ids"]), result["backup_name"])
     result = await dispatcher.client.call(action, params)
     if isinstance(result, dict) and result.get("status") == "ok":
         return True, "执行好了：" + str(description or action)
