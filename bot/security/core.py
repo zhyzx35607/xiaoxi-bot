@@ -4,7 +4,9 @@ import logging
 import os
 import re
 import time
+from urllib.parse import urlsplit, urlunsplit
 
+from app.logging_setup import sanitize_log_message
 from ..permission import get_bot_role, get_user_level, LEVEL_ADMIN
 from ..utils import atomic_write_json
 
@@ -57,6 +59,31 @@ def save_security_events(events):
     atomic_write_json(_LOG_PATH, events, indent=2)
 
 
+def _sanitize_security_detail(detail, limit=500):
+    """Keep audit details useful without retaining URL credentials or payloads."""
+    text = str(detail or "")
+
+    def strip_url(match):
+        raw_url = match.group(0)
+        try:
+            parsed = urlsplit(raw_url)
+            return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+        except ValueError:
+            return "<url>"
+
+    text = _URL_RE.sub(strip_url, text)
+    return sanitize_log_message(text, limit=limit)
+
+
+def _gray_tip_metadata(event):
+    """Extract stable identifiers only; never persist the full OneBot event."""
+    allowed = (
+        "notice_type", "sub_type", "group_id", "user_id", "sender_id",
+        "operator_id", "message_id", "target_id", "time",
+    )
+    return {key: event[key] for key in allowed if key in event}
+
+
 def record_security_event(dispatcher, event_type, group_id, user_id, detail, action="logged"):
     cfg = _global_security_config(dispatcher)
     events = load_security_events()
@@ -65,7 +92,7 @@ def record_security_event(dispatcher, event_type, group_id, user_id, detail, act
         "type": event_type,
         "group_id": int(group_id or 0),
         "user_id": int(user_id or 0),
-        "detail": str(detail or "")[:500],
+        "detail": _sanitize_security_detail(detail),
         "action": action,
     })
     max_entries = int(cfg.get("max_log_entries", 200))
@@ -201,7 +228,6 @@ async def handle_gray_tip(dispatcher, event):
     group_id = event.get("group_id", 0)
     user_id = event.get("user_id") or event.get("sender_id") or event.get("operator_id") or 0
     message_id = event.get("message_id", 0)
-    detail = str(event)[:500]
-    log.warning("Gray tip event logged: group=%s user=%s msg_id=%s detail=%s",
-              group_id, user_id, message_id, detail)
-    record_security_event(dispatcher, "gray_tip", group_id, user_id, detail, "logged")
+    metadata = _gray_tip_metadata(event)
+    log.warning("Gray tip event logged: group=%s user=%s msg_id=%s", group_id, user_id, message_id)
+    record_security_event(dispatcher, "gray_tip", group_id, user_id, metadata, "logged")

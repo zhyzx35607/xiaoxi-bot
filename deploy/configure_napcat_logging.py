@@ -22,11 +22,13 @@ def update_config(path):
         "fileLog": False,
         "fileLogLevel": "warn",
     }
-    if all(config.get(key) == value for key, value in desired.items()):
+    mode = stat.S_IMODE(path.stat().st_mode)
+    settings_ok = all(config.get(key) == value for key, value in desired.items())
+    mode_ok = os.name == "nt" or mode == 0o600
+    if settings_ok and mode_ok:
         return False
 
     config.update(desired)
-    mode = stat.S_IMODE(path.stat().st_mode)
     fd, temporary = tempfile.mkstemp(prefix=".napcat-log-", suffix=".json", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -34,7 +36,7 @@ def update_config(path):
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temporary, mode)
+        os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -53,7 +55,10 @@ def main():
 
     names = ["napcat.json"]
     if str(args.account).isdigit():
-        names.append("napcat_{}.json".format(args.account))
+        names.extend((
+            "napcat_{}.json".format(args.account),
+            "onebot11_{}.json".format(args.account),
+        ))
     changed = 0
     for name in names:
         path = Path(args.config_dir) / name

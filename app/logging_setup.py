@@ -11,8 +11,12 @@ _HEADER_SECRET_PATTERN = re.compile(
     r"(?:bearer\s+)?([^\"'\r\n,}]+)"
 )
 _SECRET_PATTERN = re.compile(
-    r"(?i)([\"']?(?:access_?token|token|password|passkey|api_?key)"
-    r"[\"']?\s*[:=]\s*[\"']?)([^\"'\s,&}]+)"
+    r"(?i)([\"']?(?:access_?token|token|password|passkey|api[-_]?key|x[-_]?api[-_]?key|client[-_]?key|sessdata)"
+    r"[\"']?\s*[:=]\s*[\"']?)([^\"'\s,&}#?]+)"
+)
+_URL_QUERY_SECRET_PATTERN = re.compile(
+    r"(?i)([?&#](?:access_token|token|password|passkey|api[-_]?key|x[-_]?api[-_]?key|"
+    r"client[-_]?key|authorization|cookie|sessdata)(?:=[^&#\s]*)?)"
 )
 _LONG_ID_PATTERN = re.compile(r"(?<!\d)\d{5,12}(?!\d)")
 _CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -23,6 +27,11 @@ _PAYLOAD_PATTERN = re.compile(
 
 def sanitize_log_message(message, limit=4000):
     text = _CONTROL_PATTERN.sub("", str(message).replace("\r", ""))
+    text = _URL_QUERY_SECRET_PATTERN.sub(
+        lambda match: match.group(0).split("=", 1)[0] + "=<redacted>"
+        if "=" in match.group(0) else match.group(0),
+        text,
+    )
     text = _HEADER_SECRET_PATTERN.sub(r"\1<redacted>", text)
     text = _SECRET_PATTERN.sub(r"\1<redacted>", text)
     text = _LONG_ID_PATTERN.sub("<id>", text)
@@ -81,7 +90,7 @@ def setup_logging(base_dir):
                 os.path.join(log_dir, "chat.log"),
                 maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
             )
-            chat_handler.setFormatter(logging.Formatter(
+            chat_handler.setFormatter(RedactingFormatter(
                 "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
             ))
         chat_log.addHandler(chat_handler)

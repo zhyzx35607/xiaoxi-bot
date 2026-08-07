@@ -145,6 +145,7 @@ def migrate_config(config):
         "deepseek_timeout_seconds": 20,
         "sigmai_fallback_delay_seconds": 6,
         "connect_timeout_seconds": 5,
+        "startup_connect_timeout_seconds": 30,
         "reconnect_max_delay_seconds": 60,
         "ai_concurrency": 1,
         "search_concurrency": 1,

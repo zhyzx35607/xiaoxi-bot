@@ -1,5 +1,6 @@
 """Runtime reliability and recovery regression tests."""
 
+import asyncio
 import importlib
 import importlib.util
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from bot import bilibili, scheduler
+from bot.security import core as security_core
 import main as main_module
 from main import load_config, migrate_config
 
@@ -80,6 +82,7 @@ class ContentConfigMigrationTests(unittest.TestCase):
         self.assertNotIn("count", config["acg_images"])
         self.assertNotIn("batch_size", config["acg_images"])
         self.assertNotIn("times", config["hotboard_push"])
+        self.assertEqual(config["runtime"]["startup_connect_timeout_seconds"], 30)
 
     def test_roleplay_story_generation_migrates_to_bounded_defaults(self):
         config, migrated = migrate_config({
@@ -91,6 +94,96 @@ class ContentConfigMigrationTests(unittest.TestCase):
         self.assertEqual(config["roleplay"]["story_response_max_tokens"], 2000)
         self.assertEqual(config["roleplay"]["max_history_chars"], 12000)
 
+
+class SecurityAuditTests(unittest.TestCase):
+    def test_security_event_details_strip_urls_and_credentials(self):
+        dispatcher = type("Dispatcher", (), {"config": {}})()
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "security_events.json")
+            with patch.object(security_core, "_LOG_PATH", path):
+                security_core.record_security_event(
+                    dispatcher,
+                    "url",
+                    10001,
+                    20002,
+                    "https://example.invalid/path?access_token=secret#frag | level=3",
+                )
+                entry = security_core.load_security_events()[0]
+
+        self.assertNotIn("secret", entry["detail"])
+        self.assertNotIn("?access_token", entry["detail"])
+        self.assertNotIn("#frag", entry["detail"])
+        self.assertIn("https://example.invalid/path", entry["detail"])
+
+    def test_gray_tip_persists_identifiers_without_raw_event(self):
+        dispatcher = type("Dispatcher", (), {"config": {}})()
+        event = {
+            "notice_type": "notify",
+            "sub_type": "gray-tip",
+            "group_id": 10001,
+            "user_id": 20002,
+            "message_id": 30003,
+            "raw_message": "private message should not persist",
+            "token": "secret-token",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "security_events.json")
+            with patch.object(security_core, "_LOG_PATH", path):
+                asyncio.run(security_core.handle_gray_tip(dispatcher, event))
+                entry = security_core.load_security_events()[0]
+
+        self.assertIn("gray_tip", entry["type"])
+        self.assertNotIn("private message should not persist", entry["detail"])
+        self.assertNotIn("secret-token", entry["detail"])
+        self.assertNotIn("raw_message", entry["detail"])
+
+
+class StartupConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_returns_when_connection_becomes_ready(self):
+        from app.bootstrap import _wait_for_startup_connection
+
+        class Client:
+            is_connected = False
+
+            async def wait_until_connected(self, timeout=None):
+                await asyncio.sleep(0)
+                self.is_connected = True
+                return True
+
+        async def run():
+            await asyncio.sleep(10)
+
+        client = Client()
+        client_task = asyncio.create_task(run())
+        try:
+            self.assertTrue(await _wait_for_startup_connection(client, client_task, 1))
+        finally:
+            client_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await client_task
+
+    async def test_wait_allows_reconnect_after_startup_timeout(self):
+        from app.bootstrap import _wait_for_startup_connection
+
+        class Client:
+            is_connected = False
+
+            async def wait_until_connected(self, timeout=None):
+                await asyncio.sleep(0)
+                return False
+
+        async def run():
+            await asyncio.sleep(10)
+
+        client = Client()
+        client_task = asyncio.create_task(run())
+        try:
+            self.assertFalse(await _wait_for_startup_connection(client, client_task, 1))
+            self.assertFalse(client_task.done())
+        finally:
+            client_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await client_task
 
 class NapCatWatchdogTests(unittest.TestCase):
     def test_prefers_bot_websocket_port(self):
