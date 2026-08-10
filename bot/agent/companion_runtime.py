@@ -286,7 +286,6 @@ class CompanionRuntime:
 
     def _build_prompt(self, reason, payload, now, roleplay_hint=""):
         dt = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M")
-        state = self.state()
         return ("你是最高主人私聊中的长期陪伴 bot。你只能输出 JSON，不要输出 Markdown。\n"
                 "你要像一个有连续情绪、记忆和关系状态的人，但不要声称拥有真实意识。\n"
                 "当前时间：{}；触发原因：{}；触发数据：{}\n角色扮演状态：{}\n{}\n"
