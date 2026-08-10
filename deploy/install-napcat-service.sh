@@ -82,6 +82,18 @@ if [[ ! -x "${napcat_root}/opt/QQ/qq" ]]; then
   install -d -o "${napcat_user}" -g "${napcat_user}" -m 0750 "${napcat_root}"
   cp -a "${legacy_napcat_root}/." "${napcat_root}/"
 fi
+
+# The bundled launcher records the original installation root in a file URL.
+# Rewrite that one generated path after copying the client so the isolated
+# service can load NapCat from /opt/napcat without touching the rollback copy.
+napcat_loader="${napcat_root}/opt/QQ/resources/app/loadNapCat.js"
+if [[ -f "${napcat_loader}" ]]; then
+  sed -i \
+    -e 's#file:////root/Napcat/#file:////opt/napcat/#g' \
+    -e 's#//root/Napcat/#/opt/napcat/#g' \
+    -e 's#/root/Napcat/#/opt/napcat/#g' \
+    "${napcat_loader}"
+fi
 if [[ ! -d "${napcat_home}/.config/QQ" ]]; then
   if [[ ! -d "${legacy_qq_config}" ]]; then
     echo "legacy QQ profile was not found at ${legacy_qq_config}" >&2

@@ -24,3 +24,4 @@ RestrictRealtime=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
 CapabilityBoundingSet=
+ReadWritePaths=/run/napcat-login-watchdog
