@@ -23,5 +23,7 @@ LockPersonality=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX
-CapabilityBoundingSet=
+# The request file belongs to the napcat watchdog (0600 in a 0700 directory).
+# Keep the helper otherwise capability-free, but allow it to remove that file.
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
 ReadWritePaths=/run/napcat-login-watchdog
