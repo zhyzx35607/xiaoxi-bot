@@ -39,13 +39,14 @@ monolith modules.
 5. Run compile and full tests with `/opt/qqbot/venv/bin/python`.
 6. Upload the same files to `/opt/qqbot`.
 7. Fetch and reset the server repository to the tested commit.
-8. Install and restart `napcat.service`, then install the persistent
-   `napcat-login-watchdog.service` and restart `qqbot.service`.
-9. Confirm `qqbot.service`, `napcat.service`, and `napcat-login-watchdog.service` are active, the Git worktree is clean, 114 commands are
+8. Install and restart `napcat.service`, enable `napcat-restart.path`, then
+   install the persistent `napcat-login-watchdog.service` and restart `qqbot.service`.
+9. Confirm `qqbot.service`, `napcat.service`, `napcat-login-watchdog.service`, and
+   `napcat-restart.path` are active, the Git worktree is clean, 114 commands are
    registered, and OneBot WebSocket connects.
-10. Confirm the watchdog can invoke `systemctl restart napcat.service` under its
-    sandbox, then inspect recent journal entries for exceptions and confirm NapCat message
-    bodies are not present in journald.
+10. Confirm the watchdog can create a restart request and that
+    `napcat-restart.path` invokes the restricted restart service, then inspect recent
+    journal entries for exceptions and confirm NapCat message bodies are not present in journald.
 
 ## Rollback
 

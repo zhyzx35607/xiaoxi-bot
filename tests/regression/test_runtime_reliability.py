@@ -222,6 +222,31 @@ class NapCatWatchdogTests(unittest.TestCase):
         self.assertNotIn("secret-token", sanitized)
         self.assertIn("access_token=<redacted>", sanitized)
 
+    def test_restart_is_requested_without_running_systemctl(self):
+        script_path = Path(__file__).parents[2] / "deploy" / "napcat-login-watchdog.py"
+        spec = importlib.util.spec_from_file_location("napcat_login_watchdog_restart", script_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            request_path = Path(directory) / "restart.request"
+            state_path.write_text(json.dumps({
+                "failures": 1, "last_restart": 0,
+            }), encoding="utf-8")
+            with patch.object(module, "STATE_PATH", state_path), patch.object(
+                module, "RESTART_REQUEST_PATH", request_path
+            ), patch.object(
+                module, "check_online", new=AsyncMock(return_value=False)
+            ):
+                asyncio.run(module.run_check())
+
+            self.assertTrue(request_path.is_file())
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["failures"], 0)
+            self.assertGreater(state["last_restart"], 0)
+
 
 
 class RuntimeTemporaryFileTests(unittest.TestCase):
@@ -240,6 +265,20 @@ class RuntimeTemporaryFileTests(unittest.TestCase):
                     self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
                     self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
                 os.remove(path)
+
+    def test_unusable_configured_temp_directory_falls_back_to_data(self):
+        from bot.storage import runtime_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            unusable = Path(directory) / "not-a-directory"
+            unusable.write_text("occupied", encoding="utf-8")
+            with patch.object(runtime_paths, "_PROJECT_ROOT", root), patch.dict(
+                os.environ, {"QQBOT_TMP_DIR": str(unusable)}
+            ):
+                resolved = runtime_paths.runtime_temp_dir()
+
+        self.assertEqual(resolved, str(root / "data" / "tmp"))
 
     def test_runtime_diagnostics_use_persistent_configured_directory(self):
         from bot.storage.runtime_paths import runtime_diagnostic_path

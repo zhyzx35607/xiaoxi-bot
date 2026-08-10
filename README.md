@@ -332,4 +332,4 @@ bot/
 - New ACG images require `UAPI_API_KEY`; the persistent collector pauses without a key and resumes without losing a pending delivery.
 - B站官方接口出现 `-352` 或 `-412` 风控后默认暂停 30 分钟，可通过 `bilibili.risk_cooldown_seconds` 调整。
 - 配置文件和 `config.json.last-good` 会使用 `0600` 权限保存，环境变量中的密钥不会写回配置文件。
-- 生产环境建议使用 `deploy/qqbot.service`、`deploy/napcat.service` 和常驻 `deploy/napcat-login-watchdog.service`，另配备份清理 timer，由 systemd 管理完整进程树。生产服务默认关闭聊天正文文件日志，并通过 NapCat 输出过滤器阻止消息正文和 token 进入 journald。
+- 生产环境建议使用 `deploy/qqbot.service`、以专用 `napcat` 用户运行的 `deploy/napcat.service`、常驻 `deploy/napcat-login-watchdog.service` 和受限的 `deploy/napcat-restart.path`，另配备份清理 timer，由 systemd 管理完整进程树。生产服务默认关闭聊天正文文件日志，并通过 NapCat 输出过滤器阻止消息正文和 token 进入 journald。

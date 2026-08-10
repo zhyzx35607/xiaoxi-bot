@@ -15,41 +15,37 @@ class HealthServiceMixin:
         runtime = self.config.get("runtime", {})
         if not runtime.get("enable_scheduler", False):
             return
-        if self._scheduler_task is None:
+        if self._scheduler_task is None or self._scheduler_task.done():
             from .scheduler import scheduler_loop
             self._scheduler_task = asyncio.create_task(scheduler_loop(self))
 
     async def stop_scheduler(self):
-        if self._scheduler_task and not self._scheduler_task.done():
-            self._scheduler_task.cancel()
-            try:
-                await asyncio.wait_for(self._scheduler_task, timeout=2)
-            except asyncio.CancelledError:
-                pass
-            except asyncio.TimeoutError:
-                log.warning("Timed out waiting for scheduler to stop")
-        self._scheduler_task = None
+        await self._stop_service_task("_scheduler_task", "scheduler")
 
     def start_bili_push(self):
         """Start the UP主 new-video polling loop (idles when nothing watched)."""
-        if self._bili_push_task is None:
+        if self._bili_push_task is None or self._bili_push_task.done():
             from ..bilibili import push_loop
             self._bili_push_task = asyncio.create_task(push_loop(self))
 
     async def stop_bili_push(self):
-        if self._bili_push_task and not self._bili_push_task.done():
-            self._bili_push_task.cancel()
-            try:
-                await asyncio.wait_for(self._bili_push_task, timeout=2)
-            except asyncio.CancelledError:
-                pass
-            except asyncio.TimeoutError:
-                log.warning("Timed out waiting for bili push loop to stop")
-        self._bili_push_task = None
+        await self._stop_service_task("_bili_push_task", "bili push loop")
+
+    async def _stop_service_task(self, attribute, name):
+        task = getattr(self, attribute, None)
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+            _, pending = await asyncio.wait({task}, timeout=2)
+            if pending:
+                log.warning("Timed out waiting for %s to stop", name)
+                return
+        setattr(self, attribute, None)
 
     def start_rss_guard(self):
         """Periodic RSS watchdog: logs growth, gracefully restarts before OOM."""
-        if self._rss_guard_task is None:
+        if self._rss_guard_task is None or self._rss_guard_task.done():
             self._rss_guard_task = asyncio.create_task(self._rss_guard_loop())
         self._start_rss_thread_watch()
 
@@ -108,15 +104,14 @@ class HealthServiceMixin:
         stop_event = getattr(self, "_rss_watch_stop", None)
         if stop_event:
             stop_event.set()
-        if self._rss_guard_task and not self._rss_guard_task.done():
-            self._rss_guard_task.cancel()
-            try:
-                await asyncio.wait_for(self._rss_guard_task, timeout=2)
-            except asyncio.CancelledError:
-                pass
-            except asyncio.TimeoutError:
-                pass
-        self._rss_guard_task = None
+        await self._stop_service_task("_rss_guard_task", "RSS guard")
+        thread = getattr(self, "_rss_watch_thread", None)
+        if thread and thread.is_alive():
+            await asyncio.to_thread(thread.join, 2)
+            if thread.is_alive():
+                log.warning("Timed out waiting for RSS watch thread to stop")
+            else:
+                self._rss_watch_thread = None
 
     @staticmethod
     def _read_rss_kb():
@@ -195,10 +190,20 @@ class HealthServiceMixin:
     async def stop_background_tasks(self):
         tasks = [t for t in self._background_tasks if not t.done()]
         if not tasks:
+            self._background_tasks.clear()
             return
         for task in tasks:
             task.cancel()
-        try:
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5)
-        except asyncio.TimeoutError:
-            log.warning("Timed out waiting for %d background tasks", len(tasks))
+        done, pending = await asyncio.wait(tasks, timeout=5)
+        self._background_tasks.difference_update(done)
+        if pending:
+            log.warning("Timed out waiting for %d background tasks", len(pending))
+            for task in pending:
+                task.cancel()
+            final_done, final_pending = await asyncio.wait(pending, timeout=1)
+            self._background_tasks.difference_update(final_done)
+            if final_pending:
+                log.error(
+                    "%d background tasks ignored cancellation and remain tracked",
+                    len(final_pending),
+                )
