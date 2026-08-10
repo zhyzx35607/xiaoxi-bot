@@ -1551,6 +1551,38 @@ class BiliPushWatermarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["confirmed_by"], "history_after_timeout")
 
+    async def test_timeout_confirmation_retries_for_delayed_history(self):
+        from bot import bilibili
+
+        class Client:
+            def __init__(self):
+                self.history_calls = 0
+
+            async def get_group_msg_history(self, group_id, count=30):
+                self.history_calls += 1
+                messages = []
+                if self.history_calls >= 4:
+                    messages = [{
+                        "user_id": 222,
+                        "raw_message": "https://www.bilibili.com/video/BV_delayed",
+                    }]
+                return {"status": "ok", "data": {"messages": messages}}
+
+            async def send_group_msg(self, group_id, message):
+                return {"status": "timeout", "error_kind": "timeout"}
+
+        class Stub:
+            config = {"bot_qq": 222}
+            client = Client()
+
+        with patch("bot.bilibili.asyncio.sleep", new=AsyncMock()) as sleep:
+            result = await bilibili._send_group_confirmed(
+                Stub(), 100, [], "BV_delayed", "bili video")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(Stub.client.history_calls, 4)
+        self.assertEqual(sleep.await_count, 3)
+
     async def test_unconfirmed_timeout_does_not_advance_watermark(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._setup(tmp)

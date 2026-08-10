@@ -7,11 +7,16 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=root
-Environment=HOME=/root
+User=napcat
+Group=napcat
+WorkingDirectory=/var/lib/napcat
+Environment=HOME=/var/lib/napcat
+Environment=XDG_CONFIG_HOME=/var/lib/napcat/.config
+Environment=XDG_CACHE_HOME=/var/lib/napcat/.cache
+Environment=XDG_DATA_HOME=/var/lib/napcat/.local/share
 Environment=TZ=Asia/Shanghai
 Environment=PYTHONUNBUFFERED=1
-Environment=NAPCAT_BINARY=/root/Napcat/opt/QQ/qq
+Environment=NAPCAT_BINARY=/opt/napcat/opt/QQ/qq
 EnvironmentFile=-/etc/napcat.env
 ExecStart=/usr/bin/python3 /opt/qqbot/deploy/napcat_log_filter.py
 Restart=on-failure
@@ -23,14 +28,22 @@ KillMode=control-group
 SendSIGKILL=yes
 SuccessExitStatus=0 143
 UMask=0077
+StateDirectory=napcat
+StateDirectoryMode=0700
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/napcat /opt/napcat
+ProtectClock=true
+ProtectHostname=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
+RestrictNamespaces=true
 LockPersonality=true
 RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

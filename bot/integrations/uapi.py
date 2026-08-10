@@ -62,6 +62,8 @@ _cache = {}
 _state = None
 _missing_key_log_ts = {}
 _MISSING_KEY_LOG_INTERVAL = 3600
+_RATE_LIMIT_COOLDOWN_DEFAULT = 60.0
+_RATE_LIMIT_COOLDOWN_MAX = 300.0
 
 
 def _log_missing_key(path):
@@ -348,6 +350,54 @@ def _retry_after_seconds(headers, attempt):
     return min(8.0, 1.0 * (2 ** attempt))
 
 
+def _rate_limit_cooldown_seconds(headers):
+    values = _header_map(headers)
+    raw = values.get("retry-after", "").strip()
+    if raw:
+        try:
+            delay = float(raw)
+        except ValueError:
+            try:
+                delay = parsedate_to_datetime(raw).timestamp() - time.time()
+            except (TypeError, ValueError, OverflowError):
+                delay = _RATE_LIMIT_COOLDOWN_DEFAULT
+        return max(_RATE_LIMIT_COOLDOWN_DEFAULT,
+                   min(_RATE_LIMIT_COOLDOWN_MAX, delay))
+    reset = values.get("x-ratelimit-reset", "").strip()
+    if reset:
+        try:
+            value = float(reset)
+            delay = value - time.time() if value > 1000000000 else value
+            return max(_RATE_LIMIT_COOLDOWN_DEFAULT,
+                       min(_RATE_LIMIT_COOLDOWN_MAX, delay))
+        except ValueError:
+            pass
+    return _RATE_LIMIT_COOLDOWN_DEFAULT
+
+
+def _rate_limit_cooldowns(dispatcher):
+    cooldowns = getattr(dispatcher, "_uapi_rate_limit_cooldowns", None)
+    if cooldowns is None:
+        cooldowns = {}
+        dispatcher._uapi_rate_limit_cooldowns = cooldowns
+    return cooldowns
+
+
+def _rate_limit_cooldown_remaining(dispatcher, path):
+    until = float(_rate_limit_cooldowns(dispatcher).get(path, 0) or 0)
+    remaining = until - time.monotonic()
+    if remaining <= 0:
+        _rate_limit_cooldowns(dispatcher).pop(path, None)
+        return 0.0
+    return remaining
+
+
+def _start_rate_limit_cooldown(dispatcher, path, headers):
+    delay = _rate_limit_cooldown_seconds(headers)
+    _rate_limit_cooldowns(dispatcher)[path] = time.monotonic() + delay
+    return delay
+
+
 async def _json_request_unlocked(dispatcher, method, path, params=None, json_body=None,
                                  kind="user", timeout=8, use_cache=False):
     if use_cache:
@@ -466,6 +516,10 @@ async def uapi_get_binary(dispatcher, path, params=None, kind="user",
 
 
 async def _uapi_resolve_image_url_unlocked(dispatcher, path, params=None, timeout=8):
+    cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
+    if cooldown > 0:
+        log.debug("uapi %s rate-limit cooldown active for %.1fs", path, cooldown)
+        return None
     if not await _budget_available(dispatcher, "user", path):
         log.info("uapi: budget blocked %s kind=user", path)
         return None
@@ -487,6 +541,14 @@ async def _uapi_resolve_image_url_unlocked(dispatcher, path, params=None, timeou
                                               response.status, response.headers)
                 if response.status == 401 and index + 1 < len(attempts):
                     continue
+                if response.status == 429:
+                    delay = _start_rate_limit_cooldown(
+                        dispatcher, path, response.headers)
+                    log.warning(
+                        "uapi %s rate limited; cooling down for %.1fs",
+                        path, delay,
+                    )
+                    return None
                 if response.status in (301, 302, 303, 307, 308):
                     return response.headers.get("Location")
                 content_type = response.headers.get("Content-Type", "")

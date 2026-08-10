@@ -55,6 +55,54 @@ class PermissionFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("目标", error)
 
 
+class SecurityCheckFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_unverified_sender_role_prevents_auto_punishment(self):
+        from bot.security.core import _can_punish
+
+        client = type("Client", (), {
+            "get_group_member_info": AsyncMock(side_effect=RuntimeError("offline")),
+        })()
+        dispatcher = _Dispatcher({
+            "bot_owner": 1, "bot_qq": 2,
+            "groups": {"100": {}}, "group_defaults": {},
+        }, client)
+
+        allowed, reason = await _can_punish(
+            dispatcher, 100, 9, "admin")
+
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "user_role_unverified")
+
+    async def test_url_checker_exception_stops_bot_processing_without_punishment(self):
+        from bot.security.core import check_message_urls
+
+        client = type("Client", (), {
+            "check_url_safely": AsyncMock(side_effect=RuntimeError("offline")),
+            "delete_msg": AsyncMock(),
+            "set_group_ban": AsyncMock(),
+        })()
+        dispatcher = _Dispatcher({
+            "bot_owner": 1, "bot_qq": 2, "security": {},
+            "groups": {"100": {}}, "group_defaults": {},
+        }, client)
+
+        with patch("bot.security.core.record_security_event") as record:
+            blocked = await check_message_urls(
+                dispatcher, 100, 9, "see https://example.invalid", 55)
+
+        self.assertTrue(blocked)
+        client.delete_msg.assert_not_awaited()
+        client.set_group_ban.assert_not_awaited()
+        self.assertEqual(record.call_args.args[1], "url_check_failed")
+
+    def test_unverified_url_results_are_not_treated_as_safe(self):
+        from bot.security.core import is_url_check_risky
+
+        self.assertIsNone(is_url_check_risky(None)[0])
+        self.assertIsNone(is_url_check_risky({"status": "failed"})[0])
+        self.assertIsNone(is_url_check_risky({"status": "ok", "data": {}})[0])
+
+
 class GroupScopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_group_commands_reject_cross_group_targets(self):
         from bot.commands import admin, system

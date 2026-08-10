@@ -5,12 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=napcat
+Group=napcat
 WorkingDirectory=/opt/qqbot
 Environment=PYTHONPATH=/opt/qqbot
 Environment=NAPCAT_WATCHDOG_PORT=3001
 Environment=NAPCAT_WATCHDOG_LOOP=1
 Environment=NAPCAT_WATCHDOG_INTERVAL=30
+Environment=NAPCAT_CONFIG_DIR=/opt/napcat/opt/QQ/resources/app/app_launcher/napcat/config
+Environment=NAPCAT_WATCHDOG_STATE_PATH=/run/napcat-login-watchdog/state.json
+Environment=NAPCAT_RESTART_REQUEST_PATH=/run/napcat-login-watchdog/restart.request
 EnvironmentFile=-/etc/napcat.env
 ExecStart=/opt/qqbot/venv/bin/python /opt/qqbot/deploy/napcat-login-watchdog.py
 Restart=on-failure
@@ -18,6 +22,8 @@ RestartSec=15
 TimeoutStopSec=10
 Nice=19
 UMask=0077
+RuntimeDirectory=napcat-login-watchdog
+RuntimeDirectoryMode=0700
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -37,7 +43,7 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
 AmbientCapabilities=
-ReadWritePaths=/run
+ReadWritePaths=/run/napcat-login-watchdog
 
 [Install]
 WantedBy=multi-user.target

@@ -29,11 +29,13 @@ QQBOT_DISABLE_FILE_LOG=1 python -m unittest discover -v
 ## 首次安装或升级服务
 
 ```bash
-sudo bash /opt/qqbot/deploy/install-qqbot-service.sh /opt/qqbot
 sudo bash /opt/qqbot/deploy/install-napcat-service.sh /opt/qqbot
+sudo bash /opt/qqbot/deploy/install-qqbot-service.sh /opt/qqbot
 ```
 
-安装脚本会创建系统用户、停止正在运行的 `qqbot.service` 后迁移并脱敏配置、安装 systemd 单元，启用常驻 `napcat-login-watchdog.service` 和备份保留定时器，最后恢复服务。NapCat 服务通过过滤器仅向 journald 输出生命周期、警告和错误信息，普通聊天事件会被抑制，敏感字段会被脱敏。
+NapCat 安装脚本会创建无登录权限的 `napcat` 用户，把旧的 `/root/Napcat` 程序和 `/root/.config/QQ` 登录状态一次性复制到 `/opt/napcat` 与 `/var/lib/napcat`，原目录保留作为回滚点。NapCat 和登录 watchdog 都以 `napcat` 用户运行；watchdog 只能写入重启请求文件，由受限的 systemd path/service 单元执行重启。
+
+QQ Bot 安装脚本会创建 `qqbot` 用户、停止正在运行的服务后迁移并脱敏配置、安装 systemd 单元，启用常驻 watchdog 和备份保留定时器，最后恢复服务。NapCat 输出过滤器只向 journald 保留生命周期、警告和错误信息，普通聊天事件会被抑制，敏感字段会被脱敏。
 
 ## 检查
 
@@ -41,12 +43,15 @@ sudo bash /opt/qqbot/deploy/install-napcat-service.sh /opt/qqbot
 systemctl status qqbot.service --no-pager
 systemctl status napcat.service --no-pager
 systemctl status napcat-login-watchdog.service --no-pager
+systemctl status napcat-restart.path --no-pager
 journalctl -u qqbot.service -n 100 --no-pager
 journalctl -u napcat.service -n 100 --no-pager
 journalctl -u napcat-login-watchdog.service -n 100 --no-pager
+journalctl -u napcat-restart.service -n 100 --no-pager
 systemd-analyze security qqbot.service
 systemd-analyze security napcat.service
 systemd-analyze security napcat-login-watchdog.service
+systemd-analyze security napcat-restart.service
 ```
 
 ## 回滚

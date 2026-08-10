@@ -168,7 +168,6 @@ class AgentWorker:
         if not companion or not owner_id or not settings.get("companion_enabled", True):
             return "disabled"
         now = time.time()
-        state = companion.state()
         reason, payload = companion._due_reason(now)
         high_priority = reason in {"event", "followup"}
         if is_quiet_hours(settings, datetime.fromtimestamp(now)) and not high_priority:

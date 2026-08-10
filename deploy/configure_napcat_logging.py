@@ -48,7 +48,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config-dir",
-        default="/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/config",
+        default="/opt/napcat/opt/QQ/resources/app/app_launcher/napcat/config",
     )
     parser.add_argument("--account", default=os.getenv("NAPCAT_QUICK_ACCOUNT", ""))
     args = parser.parse_args()

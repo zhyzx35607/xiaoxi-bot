@@ -7,7 +7,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 from app.logging_setup import sanitize_log_message
-from ..permission import get_bot_role, get_user_level, LEVEL_ADMIN
+from ..permission import LEVEL_ADMIN, _resolve_user_level, get_bot_role
 from ..utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
@@ -140,16 +140,20 @@ def _flatten_status_values(value):
 
 def is_url_check_risky(result):
     if not isinstance(result, dict):
-        return False, "empty"
+        return None, "invalid_response"
     if result.get("status") not in ("ok", "async"):
-        return False, "api_not_ok"
+        return None, "api_not_ok"
     data = result.get("data", result)
     if isinstance(data, dict) and "level" in data:
         try:
             level = int(data.get("level"))
         except (TypeError, ValueError):
-            level = 0
-        return level == 3, "level={}".format(level)
+            return None, "invalid_level"
+        if level >= 3:
+            return True, "level={}".format(level)
+        if level >= 0:
+            return False, "level={}".format(level)
+        return None, "invalid_level"
     text = " ".join(_flatten_status_values(data)).lower()
     risky_words = (
         "unsafe", "danger", "dangerous", "malicious", "phishing", "fraud",
@@ -162,7 +166,7 @@ def is_url_check_risky(result):
         return True, text[:160]
     if any(word in text for word in safe_words):
         return False, text[:160]
-    return False, text[:160] or "unknown"
+    return None, text[:160] or "unknown"
 
 
 async def _can_punish(dispatcher, group_id, user_id, sender_role):
@@ -170,7 +174,10 @@ async def _can_punish(dispatcher, group_id, user_id, sender_role):
     bot_qq = dispatcher.config.get("bot_qq")
     if user_id in (owner, bot_qq):
         return False, "protected_user"
-    user_level, _ = await get_user_level(dispatcher, group_id, user_id, sender_role)
+    user_level, _, verified = await _resolve_user_level(
+        dispatcher, group_id, user_id, sender_role)
+    if not verified:
+        return False, "user_role_unverified"
     if user_level >= LEVEL_ADMIN:
         return False, "sender_is_admin"
     bot_role, _ = await get_bot_role(dispatcher, group_id)
@@ -210,8 +217,19 @@ async def check_message_urls(dispatcher, group_id, user_id, raw, message_id, sen
             result = await dispatcher.client.check_url_safely(url)
         except Exception as e:
             log.warning("URL safety check failed: %s", e)
-            continue
+            reason = "api_error"
+            record_security_event(
+                dispatcher, "url_check_failed", group_id, user_id,
+                url + " | " + reason, "message_ignored",
+            )
+            return True
         risky, reason = is_url_check_risky(result)
+        if risky is None:
+            record_security_event(
+                dispatcher, "url_check_failed", group_id, user_id,
+                url + " | " + reason, "message_ignored",
+            )
+            return True
         if not risky:
             continue
         action = await punish_security_violation(

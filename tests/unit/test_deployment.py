@@ -194,6 +194,25 @@ class ServiceInstallScriptTests(unittest.TestCase):
         script = (ROOT / "deploy" / "install-napcat-service.sh").read_text(encoding="utf-8")
         self.assertIn("-name 'onebot11_*.json'", script)
         self.assertIn('chmod 0600 "${config_file}"', script)
+        self.assertIn("useradd --system", script)
+        self.assertIn("/opt/napcat", script)
+        self.assertNotIn('source "${environment_file}"', script)
+
+    def test_napcat_services_drop_runtime_root_privileges(self):
+        service = (ROOT / "deploy" / "napcat.service").read_text(encoding="utf-8")
+        watchdog = (ROOT / "deploy" / "napcat-login-watchdog.service").read_text(
+            encoding="utf-8"
+        )
+        restart = (ROOT / "deploy" / "napcat-restart.service").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("User=napcat", service)
+        self.assertIn("User=napcat", watchdog)
+        self.assertNotIn("User=root", service)
+        self.assertNotIn("User=root", watchdog)
+        self.assertIn("systemctl restart napcat.service", restart)
+        self.assertIn("CapabilityBoundingSet=", restart)
 
     def test_journald_has_bounded_retention(self):
         config = (ROOT / "deploy" / "qqbot-journald.conf").read_text(encoding="utf-8")

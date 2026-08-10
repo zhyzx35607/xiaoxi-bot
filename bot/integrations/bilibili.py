@@ -258,11 +258,12 @@ async def _send_group_confirmed(dispatcher, group_id, segments, marker, kind):
     status = result.get("status") if isinstance(result, dict) else result
     error_kind = result.get("error_kind") if isinstance(result, dict) else ""
     if status == "timeout" or error_kind == "timeout":
-        await asyncio.sleep(2)
-        if await _recent_bot_message_contains(dispatcher, group_id, marker):
-            log.info("%s timeout confirmed through history: g=%s marker=%s",
-                     kind, group_id, marker)
-            return {"status": "ok", "confirmed_by": "history_after_timeout"}
+        for delay in (1, 2, 4):
+            await asyncio.sleep(delay)
+            if await _recent_bot_message_contains(dispatcher, group_id, marker):
+                log.info("%s timeout confirmed through history: g=%s marker=%s",
+                         kind, group_id, marker)
+                return {"status": "ok", "confirmed_by": "history_after_timeout"}
     raise RuntimeError("{} send not confirmed: {}".format(kind, str(result)[:240]))
 
 

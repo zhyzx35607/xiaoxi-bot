@@ -54,7 +54,7 @@ def _command_from_environment():
     account = os.getenv("NAPCAT_QUICK_ACCOUNT", "").strip()
     if not account.isdigit():
         raise RuntimeError("NAPCAT_QUICK_ACCOUNT must be set to a numeric account id")
-    binary = os.getenv("NAPCAT_BINARY", "/root/Napcat/opt/QQ/qq")
+    binary = os.getenv("NAPCAT_BINARY", "/opt/napcat/opt/QQ/qq")
     if not os.path.isfile(binary):
         raise RuntimeError("NapCat QQ binary does not exist")
     return ["/usr/bin/xvfb-run", "-a", binary, "--no-sandbox", "-q", account]

@@ -108,10 +108,17 @@ install -m 0644 "${project_root}/deploy/qqbot-journald.conf" /etc/systemd/journa
 systemctl restart systemd-journald.service
 install -m 0644 "${service_source}" /etc/systemd/system/qqbot.service
 install -m 0644 "${project_root}/deploy/napcat-login-watchdog.service" /etc/systemd/system/napcat-login-watchdog.service
+install -m 0644 "${project_root}/deploy/napcat-restart.service" /etc/systemd/system/napcat-restart.service
+install -m 0644 "${project_root}/deploy/napcat-restart.path" /etc/systemd/system/napcat-restart.path
 install -m 0644 "${project_root}/deploy/qqbot-backup-prune.service" /etc/systemd/system/qqbot-backup-prune.service
 install -m 0644 "${project_root}/deploy/qqbot-backup-prune.timer" /etc/systemd/system/qqbot-backup-prune.timer
 systemctl daemon-reload
-systemctl enable --now napcat-login-watchdog.service
+if id -u napcat >/dev/null 2>&1 && [[ -x /opt/napcat/opt/QQ/qq ]]; then
+  systemctl enable --now napcat-restart.path
+  systemctl enable --now napcat-login-watchdog.service
+else
+  echo "NapCat has not been migrated; run install-napcat-service.sh before enabling the watchdog" >&2
+fi
 systemctl enable --now qqbot-backup-prune.timer
 if [[ ${QQBOT_SKIP_RESTART:-0} != 1 ]]; then
   systemctl restart qqbot.service

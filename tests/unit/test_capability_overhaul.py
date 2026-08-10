@@ -179,3 +179,43 @@ class UApiEnhancementTests(unittest.TestCase):
                 status = uapi.credits_remaining({})
         self.assertEqual(status["rate_limit"], 100)
         self.assertEqual(status["rate_remaining"], 88)
+
+    def test_image_resolver_cools_down_after_rate_limit(self):
+        from bot.integrations import uapi
+
+        class Response:
+            status = 429
+            headers = {"Retry-After": "120"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                return Response()
+
+        class Client:
+            session = Session()
+
+        class Stub:
+            config = {}
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            uapi, "_STATE_PATH", os.path.join(directory, "uapi.json")
+        ):
+            uapi.reset_state_for_test()
+            dispatcher = Stub()
+            first = asyncio.run(uapi.uapi_resolve_image_url(dispatcher, "/random/image"))
+            second = asyncio.run(uapi.uapi_resolve_image_url(dispatcher, "/random/image"))
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(Stub.client.session.calls, 1)

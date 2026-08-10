@@ -3,7 +3,6 @@ import glob
 import json
 import os
 import re
-import subprocess
 import time
 import urllib.parse
 import uuid
@@ -12,7 +11,10 @@ from pathlib import Path
 import websockets
 
 
-_CONFIG_DIR = Path("/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/config")
+_CONFIG_DIR = Path(os.getenv(
+    "NAPCAT_CONFIG_DIR",
+    "/opt/napcat/opt/QQ/resources/app/app_launcher/napcat/config",
+))
 
 
 def _default_config_path():
@@ -24,7 +26,14 @@ def _default_config_path():
 
 
 CONFIG_PATH = _default_config_path()
-STATE_PATH = Path("/run/napcat-login-watchdog.json")
+STATE_PATH = Path(os.getenv(
+    "NAPCAT_WATCHDOG_STATE_PATH",
+    "/run/napcat-login-watchdog/state.json",
+))
+RESTART_REQUEST_PATH = Path(os.getenv(
+    "NAPCAT_RESTART_REQUEST_PATH",
+    "/run/napcat-login-watchdog/restart.request",
+))
 PREFERRED_PORT = int(os.getenv("NAPCAT_WATCHDOG_PORT", "3001"))
 FAILURES_BEFORE_RESTART = 2
 RESTART_COOLDOWN_SECONDS = 300
@@ -39,9 +48,17 @@ def load_state():
 
 
 def save_state(state):
+    STATE_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary_path = STATE_PATH.with_suffix(".tmp")
     temporary_path.write_text(json.dumps(state), encoding="utf-8")
     os.replace(temporary_path, STATE_PATH)
+
+
+def request_restart():
+    RESTART_REQUEST_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary_path = RESTART_REQUEST_PATH.with_suffix(".tmp")
+    temporary_path.write_text(str(int(time.time())), encoding="ascii")
+    os.replace(temporary_path, RESTART_REQUEST_PATH)
 
 
 def get_websocket_url():
@@ -123,18 +140,11 @@ async def run_check():
         save_state(state)
         return False
 
-    result = await asyncio.to_thread(
-        subprocess.run,
-        ["systemctl", "restart", "napcat.service"],
-        check=False,
-        timeout=90,
-    )
+    request_restart()
     state["last_restart"] = now
     state["failures"] = 0
     save_state(state)
-    if result.returncode:
-        raise SystemExit(result.returncode)
-    print("Restarted napcat.service to trigger automatic login")
+    print("Requested napcat.service restart through systemd path unit")
     return False
 
 
