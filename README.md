@@ -34,7 +34,7 @@
 - B站功能：群里发 B站视频链接/BV号/b23 短链（包括 QQ 分享卡片），自动解析出标题、封面、播放量等信息，并尽量把视频本体发出来（免登录官方接口，超限自动降级为只发信息）
 - UP 主推送：每个群可以盯几个 B站 UP 主，新投稿约 1 分钟内推到群里（Bot 是管理会顺便 @全体）
 - Galgame 资源查询：通过 TouchGal 官方 API 搜索作品、识别平台并返回官方详情/资源页，不发送网盘直链；群内可按群开关自动识别。
-- Scheduled content: four ACG packages are randomized inside 08-11, 12-15, 16-19, and 20-23; two evidence-based Weibo digests are randomized inside 10-13 and 19-22. Each ACG package contains exactly 20 images.
+- 定时内容：每天在 08-11、12-15、16-19、20-23 四个时段各随机发送一组 ACG 图片，在 10-13、19-22 两个时段各随机发送一份有来源的微博摘要；每组 ACG 图片固定 20 张。
 
 **AI 工具调用：**
 - AI 聊天时能自己调用只读工具查群信息、查天气热榜等（最多连调 2 轮）
@@ -66,6 +66,18 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### 工作区约定
+
+本机只保留一个正式的 `xiaoxi-bot/` checkout。角色扮演、NapCat 和协议参考项目放在同级 `references/` 中，各自保留独立 Git 状态，不复制进主仓库：
+
+```text
+qqbot/
+├── xiaoxi-bot/
+└── references/
+```
+
+审计快照、部署包和临时 clone 放到系统临时目录，用完即删。完整约定和本机、GitHub、服务器三方核对命令见 `docs/workspace.md`。
+
 配置就靠环境变量，密钥不要写进 config.json：
 
 ```bash
@@ -96,14 +108,14 @@ python main.py
 用 systemd 托管更稳：
 
 ```bash
-sudo cp qqbot.service /etc/systemd/system/
+sudo cp deploy/qqbot.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now qqbot.service
 ```
 
 config.json 里可以按群开关各种功能，调整 AI 插话的积极性、频率限制等等。用到的时候看看文件里的注释就行。
 
-ACG images are selected from `i.mukyu.ru` with `r18=0` and collected into a persistent pool. A scheduled delivery waits until 20 unique images are ready, then sends one merged-forward package; recently sent URLs become eligible again after seven days. Switching providers clears the legacy UApiS pool before new collection starts.
+ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定时任务收齐 20 张不重复图片后，以一组合并转发发送；已发送 URL 在 7 天后可重新入选。切换图片服务时会先清除旧 UApiS 图片池。
 
 ## 命令一览
 
@@ -241,29 +253,6 @@ ACG images are selected from `i.mukyu.ru` with `r18=0` and collected into a pers
 
 另外踢人/禁言类命令在执行时还会过 `can_moderate_target`：目标不能是 bot 主人或机器人账号（受保护），且操作者等级必须严格高于目标等级（super 除外）。
 
-## 代码结构
-
-```
-main.py                    入口，负责启动、配置迁移、信号处理
-bot/
- ├── client.py             OneBot WS 连接、所有 API 调用
- ├── dispatcher.py         事件调度中心，AI 插话决策也在这
- ├── commands.py           所有 / 命令的处理逻辑
- ├── ai.py                 SigmaI/DeepSeek 调用、人设、记忆、联网搜索
- ├── natural_triggers.py   自然语言触发（不带 / 的命令）
- ├── notice_handler.py     群事件：加群退群、戳一戳、违禁词等
- ├── permission.py         权限判断
- ├── guard.py              黑名单和 R18 警告
- ├── security.py           链接安全和灰条审计
- ├── request_handler.py    好友/加群申请的存取
- ├── media.py              消息解析：图片 OCR、转发、语音、文件
- ├── memory.py             从聊天里提取用户信息
- ├── scheduler.py          定时任务（群打卡、ACG 图、热榜推送）
- ├── uapi.py               uapis.cn 客户端（积分预算：每天 100，预留 30 给自动任务，每月 1 号重置）
- ├── bilibili.py           B站解析/下载 + UP 主新视频/新动态推送（配 SESSDATA 后走关注动态流，60 秒轮询）
- └── utils.py              原子化写 JSON 的工具
-```
-
 ## 数据存哪
 
 都在 `data/` 下面，已经在 `.gitignore` 里忽略了：
@@ -296,7 +285,7 @@ data/
 - `memory_expire_hours`（顶层，可选，默认 72）：群聊工作记忆条目的过期小时数，已实际生效。
 - `sticker_mode.max_stickers`（默认 50）：每个聊天上下文收集的表情包上限，已实际生效。
 
-## 目录结构（重构后）
+## 项目结构
 
 ```text
 main.py                    稳定入口，委托给 app.bootstrap
@@ -334,7 +323,7 @@ bot/
 
 - 定时任务默认使用 `Asia/Shanghai` 时区，可通过 `runtime.scheduler_timezone` 调整。
 - OneBot WebSocket 离线时，签到、ACG、热榜和 B站推送会跳过本轮，恢复连接后只执行未来任务。
-- New ACG images use Mukyu `simple_json` metadata plus same-origin `/i/...` URLs and do not consume UApiS credits. Scheduled collection always requests `r18=0`.
+- 新 ACG 图片使用 Mukyu `simple_json` 元数据和同源 `/i/...` URL，不消耗 UApiS 积分；定时收集始终请求 `r18=0`。
 - B站官方接口出现 `-352` 或 `-412` 风控后默认暂停 30 分钟，可通过 `bilibili.risk_cooldown_seconds` 调整。
 - 配置文件和 `config.json.last-good` 会使用 `0600` 权限保存，环境变量中的密钥不会写回配置文件。
 - 生产环境建议使用 `deploy/qqbot.service`、以专用 `napcat` 用户运行的 `deploy/napcat.service`、常驻 `deploy/napcat-login-watchdog.service` 和受限的 `deploy/napcat-restart.path`，另配备份清理 timer，由 systemd 管理完整进程树。生产服务默认关闭聊天正文文件日志，并通过 NapCat 输出过滤器阻止消息正文和 token 进入 journald。

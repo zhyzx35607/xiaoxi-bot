@@ -24,7 +24,7 @@ QQBOT_DISABLE_FILE_LOG=1 python -m unittest discover -v
 - journald：最多使用 `192 MB`，保留 `7` 天，单个日志文件最多保留 `1` 天。
 - PID：`/run/qqbot/bot.pid`。
 - 密钥：`/etc/qqbot.env`，不进入 Git 或 JSON 配置。
-- 备份：`/root/qqbot-backups`，至少保留最新 `20` 份，只清理超过 `30` 天的普通文件。
+- 备份：`/root/qqbot-backups`，至少保留最新 `5` 份，只清理超过 `30` 天的普通文件。
 
 ## 首次安装或升级服务
 

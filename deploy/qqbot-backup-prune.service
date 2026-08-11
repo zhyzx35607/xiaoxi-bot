@@ -5,7 +5,7 @@ ConditionPathIsDirectory=/root/qqbot-backups
 [Service]
 Type=oneshot
 User=root
-ExecStart=/usr/bin/python3 /opt/qqbot/deploy/prune_qqbot_backups.py --directory /root/qqbot-backups --keep 20 --max-age-days 30 --apply
+ExecStart=/usr/bin/python3 /opt/qqbot/deploy/prune_qqbot_backups.py --directory /root/qqbot-backups --keep 5 --max-age-days 30 --apply
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

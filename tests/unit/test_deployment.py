@@ -170,6 +170,22 @@ class BackupRetentionTests(unittest.TestCase):
 
             self.assertEqual(selected, [files[2], files[3]])
 
+    def test_default_keeps_five_newest_files(self):
+        now = 2_000_000_000
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = []
+            for index in range(6):
+                path = root / "backup-{}.tar.gz".format(index)
+                path.write_text("backup", encoding="utf-8")
+                timestamp = now - (40 + index) * 86400
+                os.utime(path, (timestamp, timestamp))
+                files.append(path)
+
+            selected = self.module.select_for_pruning(root, now=now)
+
+            self.assertEqual(selected, [files[5]])
+
 
 class ServiceInstallScriptTests(unittest.TestCase):
     def test_config_migration_stops_service_and_preserves_runtime_owner(self):
