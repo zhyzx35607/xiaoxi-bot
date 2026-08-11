@@ -5,7 +5,11 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from bot.commands.random_image import _parse_random_image_args, cmd_random_image
+from bot.commands.random_image import (
+    RANDOM_IMAGE_HELP,
+    _parse_random_image_args,
+    cmd_random_image,
+)
 from bot.integrations import mukyu
 from bot.integrations.mukyu import MukyuError, MukyuImage
 from bot.permission import LEVEL_MASTER, LEVEL_MEMBER
@@ -99,6 +103,17 @@ class MukyuClientTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RandomImageCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direct_help_lists_every_supported_filter(self):
+        dispatcher = type("Dispatcher", (), {"_reply": AsyncMock()})()
+        await cmd_random_image(dispatcher, 100, 200, "help", "member", "", [])
+        text = dispatcher._reply.await_args.args[2]
+        for value in (
+                "标签关系", "横图", "竖图", "方图", "高清", "超清",
+                "收藏=1000", "非AI", "AI", "插画", "漫画", "动图",
+                "全年龄", "R18", "混合"):
+            self.assertIn(value, text)
+        self.assertEqual(text, RANDOM_IMAGE_HELP)
+
     def test_argument_ranges_are_parsed(self):
         parsed = _parse_random_image_args(
             "标签=初音ミク,ボーカロイド 且 竖图 超清 非AI 插画 R18")
@@ -141,6 +156,24 @@ class RandomImageCommandTests(unittest.IsolatedAsyncioTestCase):
                 dispatcher, 100, 200, "R18 竖图", "member", "", [])
         self.assertEqual(fetch.await_args.kwargs["r18"], 1)
         self.assertEqual(send.await_args.args[1][0]["data"]["file"], image.url)
+
+    async def test_send_timeout_does_not_emit_false_failure_message(self):
+        image = MukyuImage(
+            url="https://i.mukyu.ru/i/123.jpg", image_id=123, x_restrict=0,
+            width=1000, height=1000, extension="jpg", ai_type=0, illust_type=0,
+        )
+        send = AsyncMock(return_value={"status": "timeout", "error_kind": "timeout"})
+        dispatcher = type("Dispatcher", (), {
+            "config": {}, "_reply": AsyncMock(),
+            "client": type("Client", (), {"send_group_msg": send})(),
+        })()
+        with patch("bot.commands.random_image.get_user_level", new=AsyncMock(
+                return_value=(LEVEL_MEMBER, "member"))), patch(
+                "bot.commands.random_image.fetch_random_image",
+                new=AsyncMock(return_value=image)):
+            await cmd_random_image(
+                dispatcher, 100, 200, "标签=初音ミク", "member", "", [])
+        dispatcher._reply.assert_not_awaited()
 
 
 class PublicUrlValidationTests(unittest.IsolatedAsyncioTestCase):

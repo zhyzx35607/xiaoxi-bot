@@ -670,6 +670,23 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
             timeout=60,
         )
 
+    async def test_media_messages_use_extended_timeout(self):
+        client = OneBotClient({
+            "ws_url": "ws://127.0.0.1:3001", "token": "",
+            "bot_qq": 222, "runtime": {"api_timeout_seconds": 6},
+        })
+        image = [{"type": "image", "data": {"file": "https://example.com/a.jpg"}}]
+        with patch.object(client, "call", new=AsyncMock(
+                return_value={"status": "ok"})) as call_mock:
+            await client.send_group_msg(100, image)
+        call_mock.assert_awaited_once_with(
+            "send_group_msg", {"group_id": 100, "message": image}, timeout=60)
+        with patch.object(client, "call", new=AsyncMock(
+                return_value={"status": "ok"})) as call_mock:
+            await client.send_private_msg(200, image)
+        call_mock.assert_awaited_once_with(
+            "send_private_msg", {"user_id": 200, "message": image}, timeout=60)
+
     async def test_history_omits_unknown_message_sequence_and_caches_incompatibility(self):
         client = OneBotClient({
             "ws_url": "ws://127.0.0.1:3001", "token": "",

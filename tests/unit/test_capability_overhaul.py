@@ -72,6 +72,39 @@ class LongOutputTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GroupHelpCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_random_image_help_uses_full_filter_reference(self):
+        from bot.commands.random_image import RANDOM_IMAGE_HELP
+        from bot.commands.system import cmd_help
+        from bot.permission import LEVEL_SUPER
+
+        replies = []
+        dispatcher = type("Dispatcher", (), {})()
+        dispatcher.commands = {
+            "随机图": {"help": "随机图片 /随机图 [标签与范围]"},
+        }
+        dispatcher.config = {"bot_owner": 100, "bot_qq": 200}
+
+        async def reply(*args, **kwargs):
+            replies.append((args, kwargs))
+
+        dispatcher._reply = reply
+        with patch("bot.commands.system.get_user_level", new=AsyncMock(
+                return_value=(LEVEL_SUPER, "super"))), patch(
+                "bot.commands.system.get_bot_role", new=AsyncMock(
+                    return_value=("owner", "owner"))):
+            await cmd_help(dispatcher, 100, 100, "随机图", "owner", "主人", [])
+
+        self.assertEqual(len(replies), 1)
+        self.assertIn(RANDOM_IMAGE_HELP, replies[0][0][2])
+
+    async def test_undocumented_command_gets_explicit_format_fallback(self):
+        from bot.commands.system import _help_command_text
+
+        text = _help_command_text(
+            "群信息", {"help": "查看群信息"}, "owner", 100)
+        self.assertIn("格式：/群信息 [参数]", text)
+        self.assertIn("格式示例：/群信息 [参数]", text)
+
     async def test_group_help_renders_for_super_owner(self):
         from bot.commands.system import cmd_help
         from bot.permission import LEVEL_SUPER

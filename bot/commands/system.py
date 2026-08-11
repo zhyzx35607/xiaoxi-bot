@@ -21,6 +21,7 @@ from ..events.context import _service_state
 from ..services.confirmations import create_confirmation
 from ..utils import atomic_write_json
 from .common import CONFIG_PATH, _load, _save, resolve_scoped_group_targets
+from .random_image import RANDOM_IMAGE_HELP
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -154,6 +155,7 @@ COMMAND_DETAILS = {
     "calc": "/calc <算式>\n计算器。例：/calc 3*(4+5)",
     "translate": "/translate <文本>\n英译中。例：/translate hello world",
     "生图": "/生图 <描述>\nAI 画一张图。例：/生图 夕阳下的猫",
+    "随机图": RANDOM_IMAGE_HELP,
     "info": "/info [@人]\n看群成员资料，不写人名看自己。",
     "history": "/history [条数]\n看本群最近消息记录，默认 10 条。",
     "ocr": "/ocr\n回复一张图片，识别图上的文字。",
@@ -179,10 +181,20 @@ COMMAND_DETAILS = {
     "approve": "/approve — 通过待处理的加群/好友申请\n/reject — 拒绝\n总主人私聊使用。",
 }
 
+_COMMAND_DETAIL_ALIASES = {
+    "weather": "天气",
+    "热搜": "热榜",
+    "pixiv图": "随机图",
+    "unban": "ban",
+    "头衔": "title",
+    "reject": "approve",
+    "disable": "enable",
+}
+
 _HELP_CATEGORIES = {
     "聊天与互动": {"help", "like", "点赞信息", "戳", "表情回应", "已读", "转发", "转发摘要", "mytitle", "头衔"},
     "娱乐与查询": {"weather", "天气", "热榜", "热搜", "一言", "答案之书", "每日新闻", "必应壁纸", "epic免费", "fortune", "rank", "calc", "translate", "gal", "galgame", "游戏资源"},
-    "图片与媒体": {"图片描述", "ocr", "生图"},
+    "图片与媒体": {"图片描述", "ocr", "生图", "随机图"},
     "群资料与成员": {"群信息", "成员", "成员列表", "陌生人信息", "info", "群荣誉", "禁言列表", "精华列表", "history"},
     "文件与内容": {"群文件", "文件状态", "文件链接", "删除文件", "新建文件夹", "删除文件夹", "移动文件", "重命名文件", "精华", "删精华", "公告", "删公告", "setgroupavatar"},
     "群管理": {"kick", "ban", "unban", "allban", "welcome", "badword", "安全", "全体", "title"},
@@ -193,7 +205,8 @@ _HELP_CATEGORIES = {
 _PRIVATE_VISIBLE = {
     "help", "like", "点赞信息", "陌生人信息", "weather", "天气", "热榜", "热搜", "一言",
     "答案之书", "每日新闻", "必应壁纸", "epic免费", "fortune", "calc", "translate", "ocr",
-    "图片描述", "生图", "gal", "galgame", "游戏资源", "health", "积分", "私聊ai",
+    "图片描述", "生图", "随机图", "pixiv图", "gal", "galgame", "游戏资源",
+    "health", "积分", "私聊ai",
 }
 
 
@@ -218,7 +231,19 @@ def _help_visible(info, level, group_id):
 
 
 def _help_command_text(name, info, bot_role, group_id):
-    detail = COMMAND_DETAILS.get(name) or info.get("help") or "暂无详细说明"
+    detail_name = _COMMAND_DETAIL_ALIASES.get(name, name)
+    detail = COMMAND_DETAILS.get(detail_name)
+    if not detail:
+        summary = str(info.get("help") or "暂无详细说明").strip()
+        match = re.search(r"(/[^\n，。；]+)", summary)
+        if match:
+            usage = match.group(1).strip()
+            description = (summary[:match.start()] + summary[match.end():]).strip(" ：，。；")
+        else:
+            usage = "/{} [参数]".format(name)
+            description = summary
+        detail = "格式：{}\n说明：{}\n格式示例：{}".format(
+            usage, description or summary, usage)
     usage = detail.strip()
     permission = _help_permission_label(info)
     scope = "群聊" if group_id else "私聊"

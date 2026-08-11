@@ -417,12 +417,30 @@ class OneBotClient:
             message = [{"type": "text", "data": {"text": message}}]
         else:
             log.debug("[SEND] group=%s payload_type=%s", group_id, type(message).__name__)
-        return await self.call("send_group_msg", {"group_id": group_id, "message": message})
+        params = {"group_id": group_id, "message": message}
+        if self._message_contains_media(message):
+            return await self.call(
+                "send_group_msg", params, timeout=max(self._api_timeout, 60))
+        return await self.call("send_group_msg", params)
 
     async def send_private_msg(self, user_id, message):
         if isinstance(message, str):
             message = [{"type": "text", "data": {"text": message}}]
-        return await self.call("send_private_msg", {"user_id": user_id, "message": message})
+        params = {"user_id": user_id, "message": message}
+        if self._message_contains_media(message):
+            return await self.call(
+                "send_private_msg", params, timeout=max(self._api_timeout, 60))
+        return await self.call("send_private_msg", params)
+
+    @staticmethod
+    def _message_contains_media(message):
+        if not isinstance(message, list):
+            return False
+        return any(
+            isinstance(segment, dict)
+            and str(segment.get("type") or "").lower() in {"image", "record", "video", "file"}
+            for segment in message
+        )
 
     async def send_msg(self, message_type, user_id=None, group_id=None, message=None):
         if isinstance(message, str):
