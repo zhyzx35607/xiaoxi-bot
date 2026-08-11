@@ -494,7 +494,16 @@ async def cmd_history(d, group_id, user_id, args, role, sender_card, message):
             pass
     r = await d.client.get_group_msg_history(group_id, count)
     if r.get("status") != "ok":
-        await d._reply(group_id, user_id, "获取历史消息失败：" + str(r.get("msg") or r.get("wording") or r)[:200])
+        buffer = list(getattr(d, "_group_msg_buffer", {}).get(group_id, []))
+        if buffer:
+            lines = ["NapCat 历史接口不可用，显示机器人进程内最近消息"]
+            for _, raw_msg, _, name in buffer[-min(count, 15):]:
+                clean = re.sub(r"\[CQ:[^\]]+\]", "", str(raw_msg or "")).strip()
+                if clean:
+                    lines.append("  {}: {}".format(name or "群友", clean[:60]))
+            await d._reply(group_id, user_id, "\n".join(lines)[:2000])
+            return
+        await d._reply(group_id, user_id, "当前 NapCat 版本无法无游标读取历史消息，且进程内暂无可用缓存")
         return
     data = r.get("data", {})
     messages = data.get("messages") if isinstance(data, dict) else []

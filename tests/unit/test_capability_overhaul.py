@@ -219,3 +219,63 @@ class UApiEnhancementTests(unittest.TestCase):
         self.assertIsNone(first)
         self.assertIsNone(second)
         self.assertEqual(Stub.client.session.calls, 1)
+
+    def test_rate_limit_streak_is_persisted_and_backoff_grows(self):
+        from bot.integrations import uapi
+
+        dispatcher = type("Dispatcher", (), {})()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            uapi, "_STATE_PATH", os.path.join(directory, "uapi.json")
+        ), patch.object(uapi.time, "time", return_value=1000):
+            uapi.reset_state_for_test()
+            first = uapi._start_rate_limit_cooldown(dispatcher, "/random/image", {})
+            uapi._load_state()["rate_limit_endpoints"]["/random/image"]["until"] = 1000
+            second = uapi._start_rate_limit_cooldown(dispatcher, "/random/image", {})
+            uapi.reset_state_for_test()
+            restored = uapi._load_state()["rate_limit_endpoints"]["/random/image"]
+        self.assertEqual(first, 60)
+        self.assertEqual(second, 120)
+        self.assertEqual(restored["streak"], 2)
+
+    def test_json_requests_enter_shared_cooldown_after_rate_limit(self):
+        from bot.integrations import uapi
+
+        class Response:
+            status = 429
+            headers = {"Retry-After": "120"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def request(self, *args, **kwargs):
+                self.calls += 1
+                return Response()
+
+        class Client:
+            def __init__(self):
+                self.session = Session()
+
+        class Stub:
+            config = {}
+
+            def __init__(self):
+                self.client = Client()
+
+        dispatcher = Stub()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            uapi, "_STATE_PATH", os.path.join(directory, "uapi.json")
+        ):
+            uapi.reset_state_for_test()
+            first = asyncio.run(uapi.uapi_get(dispatcher, "/misc/hotboard"))
+            second = asyncio.run(uapi.uapi_get(dispatcher, "/misc/hotboard"))
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(dispatcher.client.session.calls, 1)

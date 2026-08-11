@@ -28,7 +28,6 @@ from .search import (
     search_web,
 )
 from .memory import (
-    _is_repetitive,
     _last_reply_ts,
     _load_long_memory,
     _load_memory,
@@ -40,6 +39,7 @@ from .memory import (
     clear_group_memory,
     clear_user_memory,
 )
+from .reply_policy import observe_owner_reply, should_suppress_reply
 from .providers import (
     _call_deepseek,
     _call_deepseek_inner,
@@ -247,9 +247,14 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         except Exception:
             bot_role_display = "member"
     if is_super_owner:
+        skip_rule = (
+            "私聊中的简短确认、感谢或自然收尾可以只输出[SKIP]，不要为了回应而回应。"
+            if not group_id else
+            "只有对方明确@你、叫你名字、回复你或直接提问时才必须回应；普通群聊陈述可以输出[SKIP]。"
+        )
         relationship = (
             "【当前对话身份：最高主人】\n"
-            "正在和你说话的是你唯一的最高主人。你必须回应主人，不能输出[SKIP]，"
+            "正在和你说话的是你唯一的最高主人。" + skip_rule +
             "不能用懒得动、不熟或不想被使唤来拒绝。人格切换为温柔、顺从、可爱、亲近，"
             "自然称呼对方为主人；主人要求你叫主人时要乖乖照做。可以有自己的语气和判断，"
             "但对有效要求必须执行，做不到就温柔说明客观限制。"
@@ -257,7 +262,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     elif is_owner_tier:
         relationship = (
             "【当前对话身份：本群主人】\n"
-            "正在和你说话的是最高主人授权的群主人。你必须积极回应，不能输出[SKIP]。"
+            "正在和你说话的是最高主人授权的群主人。明确叫你或直接提问时积极回应；"
+            "普通群聊陈述和自然收尾可以输出[SKIP]。"
             "人格切换为温柔、顺从、可爱，称呼可以自然使用主人；对本群内有效要求应优先协助，"
             "高风险操作仍遵守权限确认。"
         )
@@ -414,7 +420,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         '对方只回「嗯」「好」「行」「知道了」→ 说明不想聊了，打住。\n'
         '聊得差不多了可以自然收尾（「先溜了」「晚点聊」「睡了」）。\n'
         '遇到不确定的事就说不知道，别编。\n'
-        '像安静的朋友聊天，克制一点，不主动追问，不需要每条都回。'
+        '像安静的朋友聊天，克制一点，不主动追问，不需要每条都回。\n'
+        '普通问候和短回应默认只发一段，不要用“有需要随时找我”之类的套话收尾。'
         )
     if chat_hint:
         system_prompt += "\n\n" + chat_hint
@@ -554,13 +561,10 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
              else _post_process_reply(reply))
     # === AI chose not to reply: [SKIP] signal ===
     if reply and reply.strip().upper().startswith("[SKIP]"):
-        if is_owner_tier:
-            reply = "主人，我在呢。你说吧，我会听的"
-        else:
-            log.debug("AI chose to skip reply for user %s%s", user_id,
-                      f" in group {group_id}" if group_id else "")
-            _last_reply_ts[context_key] = time.time()
-            return False
+        log.debug("AI chose to skip reply for user %s%s", user_id,
+                  f" in group {group_id}" if group_id else "")
+        _last_reply_ts[context_key] = time.time()
+        return False
     if not reply or not reply.strip():
         log.warning("AI returned empty reply for user %s in group %s", user_id, group_id)
         await _notify_ai_unavailable(
@@ -613,9 +617,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                         reply = (reply + fallback).strip()
             except Exception as e:
                 log.error("Sticker matching error: %s", e)
-    # === Anti-echo guard: skip if reply is too similar to recent replies ===
-    if user_id and not is_owner_tier and _is_repetitive(user_id, reply):
-        log.info("Anti-echo skipped repetitive reply for user=%s", user_id)
+    if should_suppress_reply(
+            dispatcher, user_id, group_id, is_owner_tier, is_super_owner, reply):
         return None
     if group_id:
         try:
@@ -705,12 +708,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         except Exception as error:
             log.warning("Roleplay exchange persistence degraded: %s", error)
     if is_super_owner and not group_id:
-        try:
-            companion = getattr(getattr(dispatcher, "agent_runtime", None), "companion", None)
-            if companion is not None:
-                companion.observe_outgoing(clean_reply if clean_reply else reply, topic=reply_intent or "conversation")
-        except Exception as error:
-            log.debug("Companion outgoing observation failed: %s", error)
+        observe_owner_reply(
+            dispatcher, clean_reply if clean_reply else reply, reply_intent)
     # Track last reply timestamp for multi-layer delay
     _last_reply_ts[context_key] = time.time()
     # Track reply content for anti-echo

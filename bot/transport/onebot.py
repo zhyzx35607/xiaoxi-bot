@@ -754,27 +754,45 @@ class OneBotClient:
             self._member_cache[cache_key] = {"data": result, "ts": time.time()}
         return result
 
-    async def get_group_msg_history(self, group_id, count=20, message_seq="0",
+    async def _get_message_history(self, action, target_key, target_id, count,
+                                   message_seq, reverse_order, disable_get_url,
+                                   parse_mult_msg, quick_reply):
+        if message_seq is None and time.time() < getattr(
+                self, "_history_api_unavailable_until", 0):
+            return {
+                "status": "failed", "retcode": 1200,
+                "message": "当前 NapCat 版本不支持无游标历史查询",
+                "data": {"messages": []},
+            }
+        params = {
+            target_key: target_id,
+            "count": max(1, min(int(count), 20)),
+            "reverse_order": bool(reverse_order), "reverseOrder": bool(reverse_order),
+            "disable_get_url": bool(disable_get_url),
+            "parse_mult_msg": bool(parse_mult_msg), "quick_reply": bool(quick_reply),
+        }
+        if message_seq is not None:
+            params["message_seq"] = int(message_seq)
+        result = await self.call(action, params)
+        error_text = str(result.get("message") or result.get("msg") or result.get("wording") or "")
+        if (message_seq is None and result.get("status") != "ok"
+                and "undefined" in error_text.lower() and "不存在" in error_text):
+            self._history_api_unavailable_until = time.time() + 600
+        return result
+
+    async def get_group_msg_history(self, group_id, count=20, message_seq=None,
                                     reverse_order=False, disable_get_url=True,
                                     parse_mult_msg=False, quick_reply=False):
-        return await self.call("get_group_msg_history", {
-            "group_id": group_id, "message_seq": str(message_seq),
-            "count": max(1, min(int(count), 20)),
-            "reverse_order": bool(reverse_order), "reverseOrder": bool(reverse_order),
-            "disable_get_url": bool(disable_get_url),
-            "parse_mult_msg": bool(parse_mult_msg), "quick_reply": bool(quick_reply),
-        })
+        return await self._get_message_history(
+            "get_group_msg_history", "group_id", group_id, count, message_seq,
+            reverse_order, disable_get_url, parse_mult_msg, quick_reply)
 
-    async def get_friend_msg_history(self, user_id, message_seq="0", count=20,
+    async def get_friend_msg_history(self, user_id, message_seq=None, count=20,
                                      reverse_order=False, disable_get_url=True,
                                      parse_mult_msg=False, quick_reply=False):
-        return await self.call("get_friend_msg_history", {
-            "user_id": user_id, "message_seq": str(message_seq),
-            "count": max(1, min(int(count), 20)),
-            "reverse_order": bool(reverse_order), "reverseOrder": bool(reverse_order),
-            "disable_get_url": bool(disable_get_url),
-            "parse_mult_msg": bool(parse_mult_msg), "quick_reply": bool(quick_reply),
-        })
+        return await self._get_message_history(
+            "get_friend_msg_history", "user_id", user_id, count, message_seq,
+            reverse_order, disable_get_url, parse_mult_msg, quick_reply)
 
     async def get_recent_contact(self, count=10):
         return await self.call("get_recent_contact", {"count": max(1, min(int(count), 30))})

@@ -76,3 +76,18 @@ class AgentJsonStore:
             return records, records
 
         return self.update(relative, [], append)
+
+    def append_bounded_unique(self, relative, value, *, key, limit=200):
+        """Append once for a stable key while preserving bounded storage."""
+        def append(records):
+            if not isinstance(records, list):
+                records = []
+            marker = value.get(key) if isinstance(value, dict) else None
+            if marker is not None and any(
+                    isinstance(item, dict) and item.get(key) == marker
+                    for item in records):
+                return records, False
+            records = (records + [value])[-max(1, int(limit)):]
+            return records, True
+
+        return self.update(relative, [], append)

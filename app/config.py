@@ -150,6 +150,10 @@ def migrate_config(config):
         "ai_concurrency": 1,
         "search_concurrency": 1,
         "vision_concurrency": 1,
+        "media_timeout_seconds": 12,
+        "image_ocr_max_attempts": 2,
+        "owner_private_merge_seconds": 5,
+        "owner_reply_similarity_cooldown_seconds": 300,
         "non_explicit_judge_cooldown": 180,
         "enable_long_memory_compress": False,
         "enable_scheduler": False,
@@ -440,8 +444,8 @@ def migrate_config(config):
         "group_enabled": True,
         "private_enabled": True,
         "proactive_enabled": True,
-        "owner_daily_limit": 12,
-        "owner_hourly_limit": 3,
+        "owner_daily_limit": 2,
+        "owner_hourly_limit": 1,
         "group_daily_limit": 3,
         "topic_cooldown_seconds": 1800,
         "rejection_mute_seconds": 43200,
@@ -468,7 +472,8 @@ def migrate_config(config):
         "worker_enabled": True,
         "worker_interval_seconds": 30,
         "companion_enabled": True,
-        "companion_min_gap_seconds": 1800,
+        "companion_min_gap_seconds": 21600,
+        "companion_idle_seconds": 28800,
         "companion_max_tokens": 700,
         "companion_temperature": 0.85,
         "companion_outbox_max_attempts": 3,
@@ -504,5 +509,14 @@ def migrate_config(config):
         agent.setdefault("companion_temperature", 0.85)
         agent.setdefault("companion_outbox_max_attempts", 3)
         agent.setdefault("owner_group_direct_reply", True)
+        migrated = True
+    if int(agent.get("schema_version", 0) or 0) < 5:
+        agent["schema_version"] = 5
+        agent["owner_daily_limit"] = min(
+            2, max(1, int(agent.get("owner_daily_limit", 2) or 2)))
+        agent["owner_hourly_limit"] = 1
+        agent["companion_min_gap_seconds"] = max(
+            21600, int(agent.get("companion_min_gap_seconds", 21600) or 21600))
+        agent.setdefault("companion_idle_seconds", 28800)
         migrated = True
     return config, migrated

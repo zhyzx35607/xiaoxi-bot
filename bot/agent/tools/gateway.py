@@ -52,6 +52,14 @@ class AgentToolGateway:
         if tool_name in NATIVE_TOOL_DESCRIPTIONS:
             return await execute_native(
                 self.dispatcher.agent_runtime, agent_event, tool_name, arguments)
+        if tool_name in {"ocr_image", "ocr_image_enhanced", "get_image_ocr"}:
+            image = str(arguments.get("image") or "").strip()
+            if not image:
+                return {
+                    "ok": False,
+                    "error": "invalid_tool_arguments",
+                    "argument": "image",
+                }
         if tool_name in SAFE_ACTIONS:
             return await napcat_read(self.dispatcher, agent_event, tool_name, **arguments)
         tool = self._load().get(tool_name)

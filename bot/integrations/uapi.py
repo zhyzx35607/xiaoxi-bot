@@ -63,7 +63,7 @@ _state = None
 _missing_key_log_ts = {}
 _MISSING_KEY_LOG_INTERVAL = 3600
 _RATE_LIMIT_COOLDOWN_DEFAULT = 60.0
-_RATE_LIMIT_COOLDOWN_MAX = 300.0
+_RATE_LIMIT_COOLDOWN_MAX = 21600.0
 
 
 def _log_missing_key(path):
@@ -110,6 +110,7 @@ def _load_state():
         "rate_limit": data.get("rate_limit"),
         "rate_remaining": data.get("rate_remaining"),
         "rate_reset": data.get("rate_reset"),
+        "rate_limit_endpoints": data.get("rate_limit_endpoints", {}),
     }
     return _state
 
@@ -241,6 +242,11 @@ def _record_response(config, path, kind, status, headers):
     values = _header_map(headers)
     _update_official_quota(headers)
     state = _load_state()
+    if 200 <= int(status) < 300:
+        endpoints = state.setdefault("rate_limit_endpoints", {})
+        if path in endpoints:
+            endpoints.pop(path, None)
+            _save_state()
     for header, field in (("x-ratelimit-limit", "rate_limit"),
                           ("x-ratelimit-remaining", "rate_remaining"),
                           ("x-ratelimit-reset", "rate_reset")):
@@ -376,30 +382,46 @@ def _rate_limit_cooldown_seconds(headers):
 
 
 def _rate_limit_cooldowns(dispatcher):
-    cooldowns = getattr(dispatcher, "_uapi_rate_limit_cooldowns", None)
-    if cooldowns is None:
-        cooldowns = {}
-        dispatcher._uapi_rate_limit_cooldowns = cooldowns
-    return cooldowns
+    state = _load_state()
+    cooldowns = state.setdefault("rate_limit_endpoints", {})
+    return cooldowns if isinstance(cooldowns, dict) else {}
 
 
 def _rate_limit_cooldown_remaining(dispatcher, path):
-    until = float(_rate_limit_cooldowns(dispatcher).get(path, 0) or 0)
-    remaining = until - time.monotonic()
+    record = _rate_limit_cooldowns(dispatcher).get(path, {})
+    if not isinstance(record, dict):
+        record = {"until": record}
+    until = float(record.get("until", 0) or 0)
+    remaining = until - time.time()
     if remaining <= 0:
         _rate_limit_cooldowns(dispatcher).pop(path, None)
+        _save_state()
         return 0.0
     return remaining
 
 
 def _start_rate_limit_cooldown(dispatcher, path, headers):
-    delay = _rate_limit_cooldown_seconds(headers)
-    _rate_limit_cooldowns(dispatcher)[path] = time.monotonic() + delay
+    cooldowns = _rate_limit_cooldowns(dispatcher)
+    previous = cooldowns.get(path, {})
+    streak = int(previous.get("streak", 0) or 0) + 1 if isinstance(previous, dict) else 1
+    server_delay = _rate_limit_cooldown_seconds(headers)
+    exponential_delay = _RATE_LIMIT_COOLDOWN_DEFAULT * (2 ** min(streak - 1, 8))
+    delay = min(_RATE_LIMIT_COOLDOWN_MAX, max(server_delay, exponential_delay))
+    cooldowns[path] = {
+        "until": time.time() + delay,
+        "streak": streak,
+        "updated_at": time.time(),
+    }
+    _save_state()
     return delay
 
 
 async def _json_request_unlocked(dispatcher, method, path, params=None, json_body=None,
                                  kind="user", timeout=8, use_cache=False):
+    cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
+    if cooldown > 0:
+        log.debug("uapi %s rate-limit cooldown active for %.1fs", path, cooldown)
+        return None
     if use_cache:
         cached = _cache_get(path, params)
         if cached is not None:
@@ -428,9 +450,14 @@ async def _json_request_unlocked(dispatcher, method, path, params=None, json_bod
                         if response.status == 401 and auth_index + 1 < len(auth_attempts):
                             log.warning("uapi %s rejected configured key; retrying free endpoint as visitor", path)
                             break
-                        if response.status == 429 and retry_index < 2:
-                            delay = _retry_after_seconds(response.headers, retry_index)
-                            log.warning("uapi %s rate limited; retrying in %.1fs", path, delay)
+                        if response.status == 429:
+                            delay = _start_rate_limit_cooldown(
+                                dispatcher, path, response.headers)
+                            log.warning(
+                                "uapi %s rate limited; cooling down for %.1fs",
+                                path, delay,
+                            )
+                            return None
                         elif response.status != 200:
                             log.warning("uapi %s -> HTTP %s", path, response.status)
                             return None
@@ -489,6 +516,14 @@ async def _uapi_get_binary_unlocked(dispatcher, path, params=None, kind="user",
                                               response.status, response.headers)
                 if response.status == 401 and index + 1 < len(attempts):
                     continue
+                if response.status == 429:
+                    delay = _start_rate_limit_cooldown(
+                        dispatcher, path, response.headers)
+                    log.warning(
+                        "uapi %s rate limited; cooling down for %.1fs",
+                        path, delay,
+                    )
+                    return None
                 if response.status != 200:
                     log.warning("uapi %s -> HTTP %s", path, response.status)
                     return None

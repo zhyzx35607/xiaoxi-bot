@@ -151,7 +151,7 @@ async def handle_group_decrease(dispatcher, event):
     ]
     await dispatcher.client.send_group_msg(group_id, msg_segments)
 async def handle_group_admin(dispatcher, event):
-    """Monitor admin changes - currently logs but bot role is always queried in real-time."""
+    """Monitor bot admin changes and notify the owner on capability loss."""
     group_id = event.get("group_id", 0)
     user_id = event.get("user_id", 0)
     sub_type = event.get("sub_type", "")
@@ -160,8 +160,27 @@ async def handle_group_admin(dispatcher, event):
     if user_id == bot_qq:
         new_role = "admin" if sub_type == "set" else "member"
         log.info("Bot admin status changed: g=%s role=%s", group_id, new_role)
-        # Bot role is queried in real-time on each command, so no cache to update
-        # Just log for awareness
+        if new_role != "member":
+            return
+        owner_id = int(dispatcher.config.get("bot_owner") or 0)
+        if not owner_id:
+            return
+        now = time.time()
+        notices = getattr(dispatcher, "_bot_admin_loss_notices", None)
+        if not isinstance(notices, dict):
+            notices = {}
+            dispatcher._bot_admin_loss_notices = notices
+        if now - float(notices.get(group_id, 0) or 0) < 6 * 3600:
+            return
+        notices[group_id] = now
+        try:
+            await dispatcher.client.send_private_msg(
+                owner_id,
+                "机器人在群 {} 的管理员身份已被取消，禁言、踢人、群公告等管理功能将暂时不可用。".format(
+                    group_id),
+            )
+        except Exception as error:
+            log.warning("Bot admin loss notification failed g=%s: %s", group_id, error)
 
 
 async def handle_group_recall(dispatcher, event):

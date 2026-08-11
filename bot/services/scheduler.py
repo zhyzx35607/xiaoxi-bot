@@ -441,6 +441,20 @@ def _schedule_windows(config, key, defaults):
     return result or list(defaults)
 
 
+def _log_hotboard_empty(dispatcher, board):
+    now = time.monotonic()
+    timestamps = getattr(dispatcher, "_hotboard_empty_log_ts", None)
+    if timestamps is None:
+        timestamps = {}
+        dispatcher._hotboard_empty_log_ts = timestamps
+    last = float(timestamps.get(board, 0) or 0)
+    if now - last >= 3600:
+        timestamps[board] = now
+        log.info("hotboard push deferred: board=%s no data", board)
+    else:
+        log.debug("hotboard push deferred: board=%s no data", board)
+
+
 def _random_timestamp_for_window(day, window, timezone_name):
     zone = _timezone(timezone_name)
     start_hour, start_minute = _parse_clock(window[0])
@@ -726,13 +740,15 @@ async def _acg_collector_loop(dispatcher):
                 await asyncio.sleep(30)
                 continue
             try:
-                await _collect_one_acg_image(dispatcher)
+                collected = await _collect_one_acg_image(dispatcher)
                 await _try_send_acg_delivery(dispatcher)
             except Exception as error:
                 log.warning("ACG collector iteration failed: %s", error)
                 await asyncio.sleep(15)
                 continue
             interval = max(1, min(30, int(cfg.get("collector_interval_seconds", 1) or 1)))
+            if not collected:
+                interval = max(interval, 10)
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         pass
@@ -763,7 +779,7 @@ async def _daily_hotboard_push(dispatcher):
                                     params={"type": board}, kind="auto")
         items = (data or {}).get("list") if isinstance(data, dict) else None
         if not items:
-            log.info("hotboard push deferred: board=%s no data", board)
+            _log_hotboard_empty(dispatcher, board)
             all_delivered = False
             continue
         digest = await build_detailed_hotboard(dispatcher, board, items)
@@ -861,7 +877,8 @@ async def scheduler_loop(dispatcher):
                 except Exception as error:
                     completed = False
                     log.warning("Scheduled job %s failed: %s", name, error, exc_info=True)
-                await asyncio.sleep(65 if completed else 300)
+                retry_delay = 900 if name == "hotboard" and not completed else 300
+                await asyncio.sleep(65 if completed else retry_delay)
             else:
                 chunk = min(1800, wait_seconds - 30)
                 await asyncio.sleep(chunk if chunk > 0 else 60)

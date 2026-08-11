@@ -1,7 +1,9 @@
 # bot/media.py - NapCat media helpers
+import asyncio
 import html
 import logging
 import re
+import time
 
 log = logging.getLogger("qqbot")
 
@@ -41,6 +43,39 @@ def _flatten_message_text(message):
     return _clean_text(" ".join(parts))
 
 
+def _runtime_int(dispatcher, key, default, minimum, maximum):
+    try:
+        value = int(dispatcher.config.get("runtime", {}).get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+async def resolve_image_reference(dispatcher, seg, timeout=None):
+    """Resolve an image segment once, preferring its inline public URL."""
+    data = _seg_data(seg)
+    inline_url = str(data.get("url") or "").strip()
+    if inline_url.startswith(("http://", "https://")):
+        return inline_url
+    file_id = str(data.get("file") or data.get("file_id") or "").strip()
+    if not file_id:
+        return ""
+    if timeout is None:
+        timeout = _runtime_int(dispatcher, "media_timeout_seconds", 12, 3, 30)
+    try:
+        result = await dispatcher.client.call(
+            "get_image", {"file": file_id}, timeout=timeout)
+    except Exception as error:
+        log.debug("Image reference lookup failed: %s", error)
+        return ""
+    if not isinstance(result, dict) or result.get("status") != "ok":
+        return ""
+    payload = result.get("data")
+    payload = payload if isinstance(payload, dict) else {}
+    resolved = str(payload.get("url") or payload.get("file") or "").strip()
+    return resolved if resolved.startswith(("http://", "https://")) else ""
+
+
 async def extract_message_context(dispatcher, group_id, message, raw_message="", max_items=5):
     """Build a concise media context for AI from NapCat/OneBot message segments."""
     if isinstance(message, str) or not message:
@@ -73,16 +108,17 @@ async def describe_image_with_ocr(dispatcher, group_id, seg):
     file_id = data.get("file") or data.get("file_id") or ""
     sub_type = data.get("sub_type", "")
     summary = _clean_text(data.get("summary", ""))
-    # Skip vision/OCR for stickers/emojis (sub_type != "0")
-    if file_id and str(sub_type) != "0":
-        return ""
+    timeout = _runtime_int(dispatcher, "media_timeout_seconds", 12, 3, 30)
+    deadline = time.monotonic() + timeout
     parts = []
     has_good_desc = False
-    if file_id:
+    image_url = await resolve_image_reference(dispatcher, seg, timeout=timeout)
+    cache_key = str(file_id or image_url)
+    if cache_key:
         # Check dispatcher cache first (populated by _enhance_image_cache)
         cache = getattr(dispatcher, "_image_desc_cache", None)
-        if cache and file_id in cache:
-            cached = cache[file_id]
+        if cache and cache_key in cache:
+            cached = cache[cache_key]
             cached_desc = cached if isinstance(cached, str) else cached.get("desc", "")
             if cached_desc:
                 parts.append("图片：" + _clean_text(cached_desc)[:120])
@@ -90,25 +126,39 @@ async def describe_image_with_ocr(dispatcher, group_id, seg):
         else:
             try:
                 from .ai import describe_image
-                desc = await describe_image(dispatcher, group_id, file_id, sub_type, summary)
+                remaining = max(0.1, deadline - time.monotonic())
+                desc = await asyncio.wait_for(describe_image(
+                    dispatcher, group_id, file_id, sub_type, summary,
+                    image_url=image_url, lookup_timeout=remaining,
+                    image_lookup_done=True, fallback_to_summary=False),
+                    timeout=remaining)
                 if desc and desc not in ("[图片]", "[表情/贴纸]"):
                     parts.append("图片：" + _clean_text(desc)[:120])
                     has_good_desc = True
-                elif desc:
-                    parts.append("图片：" + _clean_text(desc)[:120])
+                    if not hasattr(dispatcher, "_image_desc_cache"):
+                        dispatcher._image_desc_cache = {}
+                    dispatcher._image_desc_cache[cache_key] = {
+                        "desc": _clean_text(desc)[:500],
+                        "ts": time.time(),
+                    }
+            except asyncio.TimeoutError:
+                log.debug("Image description timed out within media budget")
             except Exception:
                 log.exception("Image description failed")
-    elif summary:
-        parts.append("图片：" + summary[:120])
 
-    # Only run OCR if vision API didn't give a good description
-    if not has_good_desc:
-        image_ref = data.get("url") or file_id
+    # Stickers benefit from vision descriptions, but OCR is reserved for normal images.
+    if not has_good_desc and str(sub_type or "0") == "0":
+        image_ref = image_url or file_id
         if image_ref:
-            for api_name in ("ocr_image", "ocr_image_enhanced"):
+            max_attempts = _runtime_int(
+                dispatcher, "image_ocr_max_attempts", 2, 0, 2)
+            for api_name in ("ocr_image", "ocr_image_enhanced")[:max_attempts]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
                 try:
-                    api = getattr(dispatcher.client, api_name)
-                    result = await api(image_ref)
+                    result = await dispatcher.client.call(
+                        api_name, {"image": image_ref}, timeout=remaining)
                     if result.get("status") != "ok":
                         continue
                     ocr_text = _extract_ocr_text(result.get("data"))
@@ -118,7 +168,11 @@ async def describe_image_with_ocr(dispatcher, group_id, seg):
                 except Exception as error:
                     log.debug("OCR provider failed: api=%s error=%s", api_name, error)
                     continue
-    return "；".join(parts)
+    if parts:
+        return "；".join(dict.fromkeys(parts))
+    if summary:
+        return "图片：" + summary[:120]
+    return "图片：[表情/贴纸]" if str(sub_type or "0") != "0" else "图片：[图片]"
 
 
 def _extract_ocr_text(data):

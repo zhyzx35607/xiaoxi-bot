@@ -30,9 +30,8 @@ async def cmd_image_description(d, group_id, user_id, args, role, sender_card, m
     if not image_seg:
         await d._reply(group_id, user_id, "请发送图片时带 /图片描述，或者回复图片使用")
         return
-    data = image_seg.get("data", {})
-    from ..ai import describe_image
-    desc = await describe_image(d, group_id, data.get("file", ""), data.get("sub_type", "0"), data.get("summary", ""))
+    from ..media import describe_image_with_ocr
+    desc = await describe_image_with_ocr(d, group_id, image_seg)
     await d._reply(group_id, user_id, desc or "没有识别出图片内容")
 
 async def cmd_message_reaction(d, group_id, user_id, args, role, sender_card, message):

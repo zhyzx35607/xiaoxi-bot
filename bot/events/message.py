@@ -324,15 +324,8 @@ class GroupMessageMixin:
                 user_id=user_id, sender_name=sender_card,
             )
             if user_id == self.config.get("bot_owner") and not raw.startswith(prefix):
-                try:
-                    self.agent_runtime.companion.observe_owner_message(
-                        raw, source="private_message")
-                except Exception:
-                    log.exception("Owner companion observation failed")
-            if user_id == self.config.get("bot_owner") and not raw.startswith(prefix):
-                if await self.agent_runtime.handle_event(self, event, explicit=True):
-                    return
-                await self._handle_owner_private(user_id, message, raw, sender, message_id)
+                await self._queue_owner_private_message(
+                    event, user_id, message, raw, sender, message_id)
             elif user_id == self.config.get("bot_owner"):
                 await self._handle_owner_private(user_id, message, raw, sender, message_id)
             else:                # Non-owner private chat → AI auto-reply (no @ trigger needed)
@@ -573,6 +566,102 @@ class GroupMessageMixin:
 
 
 class PrivateMessageMixin:
+    async def _queue_owner_private_message(
+            self, event, user_id, message, raw, sender, message_id):
+        """Debounce rapid owner messages into one contextual reply."""
+        runtime = self.config.get("runtime", {})
+        try:
+            delay = float(runtime.get("owner_private_merge_seconds", 5))
+        except (TypeError, ValueError):
+            delay = 5.0
+        delay = max(0.0, min(10.0, delay))
+        self._owner_last_incoming_at = time.time()
+        async with self._owner_private_buffer_lock:
+            self._owner_private_buffer.append({
+                "event": dict(event),
+                "user_id": user_id,
+                "message": message,
+                "raw": raw,
+                "sender": sender,
+                "message_id": message_id,
+            })
+            self._owner_private_buffer = self._owner_private_buffer[-10:]
+            task = self._owner_private_flush_task
+            if task is not None and not task.done():
+                task.cancel()
+            task = asyncio.create_task(self._flush_owner_private_messages(delay))
+            self._owner_private_flush_task = task
+            self._background_tasks.add(task)
+
+            def _done(completed):
+                self._background_tasks.discard(completed)
+                if completed.cancelled():
+                    return
+                error = completed.exception()
+                if error:
+                    log.exception(
+                        "Owner private debounce failed",
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+
+            task.add_done_callback(_done)
+
+    async def _flush_owner_private_messages(self, delay):
+        await asyncio.sleep(delay)
+        async with self._owner_private_buffer_lock:
+            batch = self._owner_private_buffer
+            self._owner_private_buffer = []
+            self._owner_private_flush_task = None
+        if not batch:
+            return
+        latest = batch[-1]
+        raws = [str(item.get("raw") or "").strip() for item in batch]
+        merged_raw = "\n".join(item for item in raws if item)[:4000]
+        merged_message = []
+        for item in batch:
+            value = item.get("message")
+            if isinstance(value, list):
+                merged_message.extend(value)
+        event = dict(latest["event"])
+        event["raw_message"] = merged_raw
+        event["message"] = merged_message or latest["message"]
+        try:
+            self.agent_runtime.companion.observe_owner_message(
+                merged_raw, source="private_message")
+        except Exception:
+            log.exception("Owner companion observation failed")
+        if await self.agent_runtime.handle_event(self, event, explicit=True):
+            return
+        await self._handle_owner_private(
+            latest["user_id"], event["message"], merged_raw,
+            latest["sender"], latest["message_id"])
+
+    def _owner_reply_is_repetitive(self, reply, *, now=None):
+        text = re.sub(r"[\s，。！？!?,.~～😊🙂]+", "", str(reply or "")).lower()
+        if not text:
+            return True
+        now = float(now or time.time())
+        runtime = self.config.get("runtime", {})
+        try:
+            cooldown = int(runtime.get(
+                "owner_reply_similarity_cooldown_seconds", 300))
+        except (TypeError, ValueError):
+            cooldown = 300
+        cooldown = max(30, min(3600, cooldown))
+        import difflib
+        for timestamp, previous in list(self._owner_recent_replies):
+            if now - float(timestamp) > cooldown:
+                continue
+            if text == previous or difflib.SequenceMatcher(
+                    None, previous, text).ratio() >= 0.82:
+                return True
+        return False
+
+    def _record_owner_reply(self, reply, *, now=None):
+        text = re.sub(r"[\s，。！？!?,.~～😊🙂]+", "", str(reply or "")).lower()
+        if text:
+            self._owner_recent_replies.append((float(now or time.time()), text))
+
     async def _handle_owner_private(self, user_id, message, raw, sender, message_id):
         """Handle private messages from bot owner: commands first, then AI chat."""
         # The highest owner must never be silently dropped by a stale blacklist entry.
@@ -584,6 +673,12 @@ class PrivateMessageMixin:
 
         # Check for command prefix first
         if raw.startswith(prefix):
+            async with self._owner_private_buffer_lock:
+                task = self._owner_private_flush_task
+                if task is not None and not task.done():
+                    task.cancel()
+                self._owner_private_flush_task = None
+                self._owner_private_buffer = []
             parts = raw[len(prefix):].split(maxsplit=1)
             cmd = parts[0].lower()
             args = parts[1] if len(parts) > 1 else ""
@@ -1098,37 +1193,6 @@ class PrivateMessageMixin:
         }
 
     async def _get_image_context(self, group_id, message):
-        """Return accurate image context. Cache hit → instant. Cache miss → wait for vision API."""
-        import html as _html
-        contexts = []
-        for seg in message:
-            if seg.get("type") != "image":
-                continue
-            data = seg.get("data", {}) if isinstance(seg.get("data"), dict) else {}
-            file_id = data.get("file", "")
-            summary = data.get("summary", "")
-            sub_type = data.get("sub_type", "0")
-
-            # Priority 1: cached vision API result (accurate, fast)
-            cache = getattr(self, "_image_desc_cache", None)
-            if cache and file_id in cache:
-                cached = cache[file_id]
-                desc = cached if isinstance(cached, str) else cached.get("desc", "")
-                if desc:
-                    contexts.append("图片：" + desc[:120])
-                    continue
-
-            # Priority 2: call vision API (blocks, but accurate)
-            from ..ai import describe_image
-            desc = await describe_image(self, group_id, file_id, sub_type, summary)
-            if desc and desc not in ("[图片]", "[表情/贴纸]"):
-                if not hasattr(self, "_image_desc_cache"):
-                    self._image_desc_cache = {}
-                self._image_desc_cache[file_id] = {"desc": desc, "ts": time.time()}
-                contexts.append("图片：" + desc[:120])
-            elif summary:
-                # Priority 3: QQ summary as fallback when vision API fails
-                contexts.append("图片：" + _html.unescape(summary)[:120])
-            else:
-                contexts.append("[图片]")
-        return "\n".join(contexts) if contexts else ""
+        """Build group image context through the shared private/group media path."""
+        from ..media import extract_message_context
+        return await extract_message_context(self, group_id, message)

@@ -3,7 +3,7 @@
 from datetime import datetime
 from .models import AgentDecision, AgentEvent, IdentityLevel
 
-DEFAULTS = {"enabled": True, "group_enabled": True, "private_enabled": True, "proactive_enabled": True, "owner_daily_limit": 6, "group_daily_limit": 3, "topic_cooldown_seconds": 1800, "quiet_start": 23, "quiet_end": 9, "member_passive_only": True}
+DEFAULTS = {"enabled": True, "group_enabled": True, "private_enabled": True, "proactive_enabled": True, "owner_daily_limit": 2, "owner_hourly_limit": 1, "group_daily_limit": 3, "topic_cooldown_seconds": 1800, "quiet_start": 23, "quiet_end": 9, "member_passive_only": True}
 
 def agent_config(config):
     result = dict(DEFAULTS)

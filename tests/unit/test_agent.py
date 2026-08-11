@@ -27,6 +27,28 @@ class AgentIdentityTests(unittest.TestCase):
         self.assertFalse(identity.is_super_owner)
 
 
+class AgentEventDeduplicationTests(unittest.TestCase):
+    def test_repeated_event_id_is_persisted_once(self):
+        with tempfile.TemporaryDirectory() as root:
+            runtime = AgentRuntime({"bot_owner": 100, "agent": {}}, root)
+            event = {
+                "user_id": 100, "message_type": "private", "message_id": 55,
+                "time": 1234, "raw_message": "同一条消息",
+            }
+            runtime.observe(event, explicit=True)
+            runtime.observe(event, explicit=True)
+            records = runtime.store.read("events/owner_100.json", [])
+            self.assertEqual(len(records), 1)
+
+    def test_timeline_deduplicates_kind_and_event_id(self):
+        with tempfile.TemporaryDirectory() as root:
+            runtime = AgentRuntime({"bot_owner": 100}, root)
+            metadata = {"event_id": "evt-1"}
+            runtime.timeline.add("owner:100", "agent_reply", "第一次", metadata=metadata)
+            runtime.timeline.add("owner:100", "agent_reply", "重复写入", metadata=metadata)
+            self.assertEqual(len(runtime.timeline.list("owner:100")), 1)
+
+
 class AgentPolicyTests(unittest.TestCase):
     def test_quiet_window_crosses_midnight(self):
         settings = {"quiet_start": 23, "quiet_end": 9}
@@ -597,6 +619,8 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await runtime.handle_event(dispatcher, event, explicit=True))
         self.assertEqual(len(calls), 1)
         self.assertEqual(dispatcher.client.sent[0][0], 300)
+        self.assertEqual(
+            runtime.proactive._state("group:300").get("sent", []), [])
 
     def test_private_owner_router_remains_independently_disabled(self):
         config = {

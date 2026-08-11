@@ -221,6 +221,18 @@ def _history_record_text(record):
     return "\n".join(str(part) for part in parts if part is not None)
 
 
+class BiliDeliveryDeferred(RuntimeError):
+    """The same item is still inside its bounded retry backoff."""
+
+
+def _delivery_retry_state(dispatcher):
+    state = getattr(dispatcher, "_bili_delivery_retries", None)
+    if state is None:
+        state = {}
+        dispatcher._bili_delivery_retries = state
+    return state
+
+
 async def _recent_bot_message_contains(dispatcher, group_id, marker):
     """Best-effort confirmation for sends whose API response was uncertain."""
     if not marker:
@@ -248,12 +260,20 @@ async def _recent_bot_message_contains(dispatcher, group_id, marker):
 
 async def _send_group_confirmed(dispatcher, group_id, segments, marker, kind):
     """Send once and verify ambiguous timeouts through recent group history."""
+    retry_state = _delivery_retry_state(dispatcher)
+    retry_key = "{}:{}:{}".format(kind, group_id, marker)
+    retry = retry_state.get(retry_key, {})
+    now = time.time()
+    if float(retry.get("next_retry_at", 0) or 0) > now:
+        raise BiliDeliveryDeferred("delivery retry backoff active")
     if await _recent_bot_message_contains(dispatcher, group_id, marker):
+        retry_state.pop(retry_key, None)
         log.info("%s already present in group history: g=%s marker=%s",
                  kind, group_id, marker)
         return {"status": "ok", "confirmed_by": "history"}
     result = await dispatcher.client.send_group_msg(int(group_id), segments)
     if isinstance(result, dict) and result.get("status") == "ok":
+        retry_state.pop(retry_key, None)
         return result
     status = result.get("status") if isinstance(result, dict) else result
     error_kind = result.get("error_kind") if isinstance(result, dict) else ""
@@ -261,10 +281,20 @@ async def _send_group_confirmed(dispatcher, group_id, segments, marker, kind):
         for delay in (1, 2, 4):
             await asyncio.sleep(delay)
             if await _recent_bot_message_contains(dispatcher, group_id, marker):
+                retry_state.pop(retry_key, None)
                 log.info("%s timeout confirmed through history: g=%s marker=%s",
                          kind, group_id, marker)
                 return {"status": "ok", "confirmed_by": "history_after_timeout"}
-    raise RuntimeError("{} send not confirmed: {}".format(kind, str(result)[:240]))
+    attempts = int(retry.get("attempts", 0) or 0) + 1
+    delay = min(900, 30 * (2 ** min(attempts - 1, 5)))
+    retry_state[retry_key] = {
+        "attempts": attempts,
+        "next_retry_at": time.time() + delay,
+        "last_status": status or error_kind or "failed",
+    }
+    raise RuntimeError(
+        "{} send not confirmed; retry in {}s: {}".format(
+            kind, delay, str(result)[:200]))
 
 
 # ---------- B站 anonymous session (buvid cookie + wbi keys) ----------
@@ -777,6 +807,8 @@ async def poll_dynamics_once(dispatcher):
                     confirmed_max = max(confirmed_max, int(d["ts"] or 0))
                     state_changed = True
                     await asyncio.sleep(1)
+                except BiliDeliveryDeferred:
+                    break
                 except Exception as e:
                     log.warning("bili dynamic announce failed g=%s: %s", gid, e)
                     break
@@ -813,6 +845,8 @@ async def poll_dynamics_once(dispatcher):
                     announced_bvids.append(video["bvid"])
                     announced_max = max(announced_max, video["created"])
                     await asyncio.sleep(1)
+                except BiliDeliveryDeferred:
+                    break
                 except Exception as e:
                     log.warning("bili announce failed g=%s: %s", gid, e)
                     break
@@ -911,6 +945,8 @@ async def poll_once(dispatcher):
                     announced_max = max(announced_max,
                                         int(video.get("created", 0) or 0))
                     await asyncio.sleep(1)
+                except BiliDeliveryDeferred:
+                    break
                 except Exception as e:
                     log.warning("bili announce failed g=%s: %s", gid, e)
                     break

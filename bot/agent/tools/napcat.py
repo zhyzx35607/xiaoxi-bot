@@ -77,6 +77,18 @@ def _bound_arguments(agent_event, method, params):
             normalized["group_id"] = int(agent_event.scope.group_id)
     if "user_id" in allowed and "user_id" not in normalized:
         normalized["user_id"] = int(agent_event.identity.user_id)
+    missing = [
+        name for name, parameter in signature.parameters.items()
+        if name != "self"
+        and parameter.kind in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+        and parameter.default is inspect.Parameter.empty
+        and name not in normalized
+    ]
+    if missing:
+        raise ValueError("missing required arguments: {}".format(", ".join(missing)))
     return normalized
 
 
@@ -107,6 +119,12 @@ async def napcat_read(dispatcher, agent_event, tool_name, **params):
         normalized = _bound_arguments(agent_event, method, params)
     except PermissionError as error:
         return {"ok": False, "error": str(error)}
+    except ValueError as error:
+        return {
+            "ok": False,
+            "error": "invalid_tool_arguments",
+            "message": sanitize_for_memory(error)[:300],
+        }
     try:
         result = method(**normalized)
         if inspect.isawaitable(result):

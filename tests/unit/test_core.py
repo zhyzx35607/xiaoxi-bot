@@ -669,6 +669,32 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
             timeout=60,
         )
 
+    async def test_history_omits_unknown_message_sequence_and_caches_incompatibility(self):
+        client = OneBotClient({
+            "ws_url": "ws://127.0.0.1:3001", "token": "",
+            "bot_qq": 222, "runtime": {},
+        })
+        with patch.object(client, "call", new=AsyncMock(return_value={
+                "status": "failed", "message": "消息undefined不存在"})) as call_mock:
+            await client.get_group_msg_history(100, count=10)
+        params = call_mock.await_args.args[1]
+        self.assertNotIn("message_seq", params)
+        second = await client.get_group_msg_history(100, count=10)
+        self.assertEqual(second["data"]["messages"], [])
+        self.assertEqual(call_mock.await_count, 1)
+
+    async def test_bot_admin_loss_notifies_owner_once_per_window(self):
+        from bot.events.notice import handle_group_admin
+
+        client = type("Client", (), {"send_private_msg": AsyncMock()})()
+        dispatcher = type("DispatcherStub", (), {
+            "config": {"bot_qq": 222, "bot_owner": 111}, "client": client,
+        })()
+        event = {"group_id": 333, "user_id": 222, "sub_type": "unset"}
+        await handle_group_admin(dispatcher, event)
+        await handle_group_admin(dispatcher, event)
+        client.send_private_msg.assert_awaited_once()
+
     async def test_bot_qq_has_master_level(self):
         from bot.permission import get_user_level, LEVEL_SUPER
 
@@ -1582,6 +1608,33 @@ class BiliPushWatermarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(Stub.client.history_calls, 4)
         self.assertEqual(sleep.await_count, 3)
+
+    async def test_unconfirmed_item_enters_delivery_backoff(self):
+        from bot import bilibili
+
+        class Client:
+            def __init__(self):
+                self.send_calls = 0
+
+            async def get_group_msg_history(self, group_id, count=30):
+                return {"status": "ok", "data": {"messages": []}}
+
+            async def send_group_msg(self, group_id, message):
+                self.send_calls += 1
+                return {"status": "timeout", "error_kind": "timeout"}
+
+        dispatcher = type("Stub", (), {
+            "config": {"bot_qq": 222},
+            "client": Client(),
+        })()
+        with patch("bot.bilibili.asyncio.sleep", new=AsyncMock()):
+            with self.assertRaises(RuntimeError):
+                await bilibili._send_group_confirmed(
+                    dispatcher, 100, [], "BV_backoff", "bili video")
+            with self.assertRaises(bilibili.BiliDeliveryDeferred):
+                await bilibili._send_group_confirmed(
+                    dispatcher, 100, [], "BV_backoff", "bili video")
+        self.assertEqual(dispatcher.client.send_calls, 1)
 
     async def test_unconfirmed_timeout_does_not_advance_watermark(self):
         with tempfile.TemporaryDirectory() as tmp:

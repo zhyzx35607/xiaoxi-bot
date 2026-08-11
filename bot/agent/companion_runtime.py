@@ -203,12 +203,14 @@ class CompanionRuntime:
             if event.get("last_trigger_key") != key:
                 return "event", event
         bucket = dt.strftime("%Y%m%d%H")
-        if dt.hour in {9, 20} and state.get("last_time_bucket") != bucket:
+        if dt.hour == 20 and state.get("last_time_bucket") != bucket:
             return "time", {"topic": "time-checkin", "hour": dt.hour}
         last_interaction = float(state.get("last_interaction_at", 0) or 0)
         last_outgoing = float(state.get("last_outgoing_at", 0) or 0)
         idle = now - max(last_interaction, last_outgoing)
-        if idle >= 3 * 3600:
+        idle_threshold = max(8 * 3600, int(
+            self.config.get("agent", {}).get("companion_idle_seconds", 8 * 3600)))
+        if idle >= idle_threshold:
             return "idle", {"topic": "idle-companion", "idle_seconds": idle}
         return "none", None
 
@@ -226,7 +228,7 @@ class CompanionRuntime:
             return None
         settings = dispatcher.config.get("agent", {})
         if not force:
-            min_gap = max(300, int(settings.get("companion_min_gap_seconds", 1800)))
+            min_gap = max(21600, int(settings.get("companion_min_gap_seconds", 21600)))
             if now - float(state.get("last_outgoing_at", 0) or 0) < min_gap and reason not in {"event", "followup"}:
                 return None
         roleplay_hint = ""
@@ -253,6 +255,11 @@ class CompanionRuntime:
             }
         if not result or not result.get("message_parts"):
             return None
+        if reason not in {"event", "followup"} and str(
+                result.get("priority") or "normal") != "urgent":
+            result["message_parts"] = result["message_parts"][:1]
+        if reason != "event":
+            result["message_parts"] = [part[:120] for part in result["message_parts"]]
         self._apply_delta(state, result.get("emotion_delta") or {}, now)
         state["last_decision_at"] = now
         if reason == "time":
@@ -289,7 +296,9 @@ class CompanionRuntime:
         return ("你是最高主人私聊中的长期陪伴 bot。你只能输出 JSON，不要输出 Markdown。\n"
                 "你要像一个有连续情绪、记忆和关系状态的人，但不要声称拥有真实意识。\n"
                 "当前时间：{}；触发原因：{}；触发数据：{}\n角色扮演状态：{}\n{}\n"
-                "请决定本轮是否自然地联系主人。没有充分理由时 should_send=false；有理由时 message_parts 为 1-4 段。"
+                "请决定本轮是否自然地联系主人。没有充分理由时 should_send=false；普通关怀只写一段且不超过120字，避免追问、套话和重复表达。"
+                "你没有真实身体、住所和周边环境；严禁声称自己刚吃饭、洗澡、喝茶、在食堂，或描述自己窗外的天气、阳光、雨声、蝉鸣。"
+                "可以关心主人所在地区，但只能说‘如果你那边……’，不能编造‘我这里也……’之类的现实经历。"
                 "重要事件可以更热烈，但不要机械重复。严格返回字段：should_send,priority,topic,message_parts,emotion_delta,memory_candidates,followup,media_request。"
                 "不要在 message_parts 里泄漏这些内部字段。".format(
                     dt, reason, json.dumps(payload or {}, ensure_ascii=False),

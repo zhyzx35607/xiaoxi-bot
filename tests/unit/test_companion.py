@@ -34,6 +34,24 @@ class CompanionMemoryTests(unittest.TestCase):
 
 
 class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
+    def test_prompt_forbids_invented_physical_experiences(self):
+        with tempfile.TemporaryDirectory() as root:
+            runtime = CompanionRuntime({"bot_owner": 100}, Path(root) / "data" / "agent")
+            prompt = runtime._build_prompt("idle", {}, time.time())
+        self.assertIn("严禁声称自己刚吃饭、洗澡、喝茶、在食堂", prompt)
+        self.assertIn("不能编造‘我这里也……’", prompt)
+
+    def test_idle_checkin_waits_at_least_eight_hours(self):
+        with tempfile.TemporaryDirectory() as root:
+            runtime = CompanionRuntime({"bot_owner": 100, "agent": {}}, Path(root) / "data" / "agent")
+            now = time.time()
+            state = runtime.state()
+            state["last_interaction_at"] = now - 7 * 3600
+            state["last_outgoing_at"] = now - 7 * 3600
+            runtime.store.save_state(100, state)
+            self.assertEqual(runtime._due_reason(now)[0], "none")
+            self.assertEqual(runtime._due_reason(now + 2 * 3600)[0], "idle")
+
     async def test_decision_enqueues_message_and_advances_followup(self):
         with tempfile.TemporaryDirectory() as root:
             config = {"bot_owner": 100, "agent": {"companion_min_gap_seconds": 300}}
@@ -61,6 +79,25 @@ class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(future[0]["attempt"], 1)
             self.assertEqual(runtime.state()["mood"], "concerned")
 
+    async def test_normal_message_is_capped_to_one_short_part(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = {"bot_owner": 100, "agent": {"companion_min_gap_seconds": 21600}}
+            runtime = CompanionRuntime(config, Path(root) / "data" / "agent")
+            now = time.time()
+            response = json.dumps({
+                "should_send": True, "priority": "normal", "topic": "checkin",
+                "message_parts": ["甲" * 180, "第二段"], "emotion_delta": {},
+                "memory_candidates": [], "followup": {"enabled": False}, "media_request": {},
+            }, ensure_ascii=False)
+            dispatcher = type("Dispatcher", (), {
+                "config": config, "client": type("Client", (), {"session": None})(),
+                "roleplay": None,
+            })()
+            with patch("bot.agent.companion_runtime._call_deepseek", new=AsyncMock(return_value=response)):
+                result = await runtime.decide(dispatcher, now=now, force=True)
+            self.assertEqual(len(result["message_parts"]), 1)
+            self.assertEqual(len(result["message_parts"][0]), 120)
+
 
 class CompanionOutboxTests(unittest.IsolatedAsyncioTestCase):
     async def test_worker_sends_message_parts_in_order(self):
@@ -86,7 +123,35 @@ class CompanionOutboxTests(unittest.IsolatedAsyncioTestCase):
             with patch("bot.agent.worker_service.asyncio.sleep", new=AsyncMock()):
                 delivered, failed = await AgentWorker(dispatcher)._deliver_companion_outbox()
             self.assertEqual((delivered, failed), (1, 0))
-            self.assertEqual([item[1][0]["data"]["text"] for item in dispatcher.client.sent], ["第一段", "第二段"])
+            self.assertEqual([item[1][0]["data"]["text"] for item in dispatcher.client.sent], ["第一段"])
+
+    async def test_urgent_outbox_keeps_multiple_message_parts(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = {"bot_owner": 100, "agent": {"quiet_start": 23, "quiet_end": 9}}
+            runtime = AgentRuntime(config, root)
+            runtime.companion.store.enqueue(
+                100, "urgent", {"message_parts": ["第一段", "第二段"], "media_request": {}},
+                time.time() - 1, "urgent", "test:urgent")
+
+            class Client:
+                def __init__(self):
+                    self.sent = []
+                    self.session = None
+
+                async def send_private_msg(self, user_id, message):
+                    self.sent.append((user_id, message))
+                    return {"status": "ok"}
+
+            dispatcher = type("Dispatcher", (), {
+                "config": config, "agent_runtime": runtime, "client": Client(),
+            })()
+            with patch("bot.agent.worker_service.asyncio.sleep", new=AsyncMock()):
+                delivered, failed = await AgentWorker(dispatcher)._deliver_companion_outbox()
+            self.assertEqual((delivered, failed), (1, 0))
+            self.assertEqual(
+                [item[1][0]["data"]["text"] for item in dispatcher.client.sent],
+                ["第一段", "第二段"],
+            )
 
 
 class ProviderPriorityTests(unittest.IsolatedAsyncioTestCase):

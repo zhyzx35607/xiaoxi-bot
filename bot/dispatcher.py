@@ -96,6 +96,11 @@ class Dispatcher(
         self._private_consecutive_replies = {}  # user_id -> int; track consecutive bot replies
         self._private_last_reply_ts = {}  # user_id -> timestamp; cooldown between replies
         self._private_urgent_pings = {}  # user_id -> [timestamps]; fast messages during cooldown
+        self._owner_private_buffer = []
+        self._owner_private_flush_task = None
+        self._owner_private_buffer_lock = asyncio.Lock()
+        self._owner_last_incoming_at = 0.0
+        self._owner_recent_replies = deque(maxlen=5)
         self._friend_refresh_lock = asyncio.Lock()
         self._friend_retry_after = 0.0
         runtime = config.get("runtime", {})

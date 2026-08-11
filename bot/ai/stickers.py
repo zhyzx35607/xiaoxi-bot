@@ -61,7 +61,9 @@ def _allow_sticker_send(config, group_id, user_id):
                 _STICKER_DAILY_COUNT.pop(item, None)
     return True
 
-async def describe_image(dispatcher, group_id, file_id, sub_type, summary=""):
+async def describe_image(dispatcher, group_id, file_id, sub_type, summary="",
+                         image_url=None, lookup_timeout=None,
+                         image_lookup_done=False, fallback_to_summary=True):
     """Describe image content. Vision API (Qwen) first, QQ summary as fallback."""
     config = dispatcher.config
     import html as _html
@@ -70,14 +72,15 @@ async def describe_image(dispatcher, group_id, file_id, sub_type, summary=""):
     if summary:
         qq_summary = _html.unescape(summary).strip()
     # Try vision API first
-    image_url = None
-    try:
-        result = await dispatcher.client.call("get_image", {"file": file_id})
-        if result.get("status") == "ok":
-            data = result.get("data", {})
-            image_url = data.get("url") or data.get("file")
-    except Exception as e:
-        log.error("get_image failed: %s", e)
+    if not image_lookup_done and not image_url and file_id:
+        try:
+            result = await dispatcher.client.call(
+                "get_image", {"file": file_id}, timeout=lookup_timeout)
+            if result.get("status") == "ok":
+                data = result.get("data", {})
+                image_url = data.get("url") or data.get("file")
+        except Exception as e:
+            log.error("get_image failed: %s", e)
     if image_url:
         log.info("Vision API sticker analysis started")
         desc = await _call_vision_api(config, image_url, session=dispatcher.client.session)
@@ -85,7 +88,7 @@ async def describe_image(dispatcher, group_id, file_id, sub_type, summary=""):
             log.info("Vision API sticker analysis completed")
             return desc
     # Fallback: use QQ summary if vision API failed or image URL unavailable
-    if qq_summary:
+    if fallback_to_summary and qq_summary:
         log.info("Sticker analysis used QQ summary fallback")
         return qq_summary
     # Ultimate fallback

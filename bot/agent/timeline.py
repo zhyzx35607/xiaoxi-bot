@@ -17,7 +17,13 @@ class AgentTimeline:
             "evidence": str(evidence)[:2000],
             "metadata": metadata if isinstance(metadata, dict) else {},
         }
-        self.store.append_bounded(self._path(scope_key), item, limit=500)
+        event_id = item["metadata"].get("event_id")
+        if event_id:
+            item["dedupe_key"] = "{}:{}".format(item["kind"], event_id)
+            self.store.append_bounded_unique(
+                self._path(scope_key), item, key="dedupe_key", limit=500)
+        else:
+            self.store.append_bounded(self._path(scope_key), item, limit=500)
         return item
 
     def list(self, scope_key, limit=30, kinds=None):

@@ -103,11 +103,22 @@ class AgentWorker:
         max_attempts = max(1, int(self.dispatcher.config.get("agent", {}).get(
             "companion_outbox_max_attempts", 3)))
         for item in companion.store.due_outbox(owner_id, time.time(), limit=10):
+            if time.time() - float(getattr(
+                    self.dispatcher, "_owner_last_incoming_at", 0) or 0) < 15:
+                continue
             try:
                 payload = item.get("payload") or {}
                 parts = payload.get("message_parts") or []
                 if isinstance(parts, str):
                     parts = [parts]
+                parts = parts[:1] if item.get("priority") != "urgent" else parts[:4]
+                combined_text = "\n".join(
+                    str(part).strip() for part in parts if str(part).strip())
+                repetitive = getattr(
+                    self.dispatcher, "_owner_reply_is_repetitive", None)
+                if callable(repetitive) and repetitive(combined_text):
+                    companion.store.mark_outbox(item["id"], "sent")
+                    continue
                 for index, text in enumerate(parts[:4]):
                     if not str(text).strip():
                         continue
@@ -148,6 +159,9 @@ class AgentWorker:
                         else:
                             raise RuntimeError(result.get("message") or result.get("msg") or result)
                 companion.store.mark_outbox(item["id"], "sent")
+                record_reply = getattr(self.dispatcher, "_record_owner_reply", None)
+                if callable(record_reply):
+                    record_reply(combined_text)
                 companion.observe_outgoing("\n".join(str(part) for part in parts), topic=item.get("topic", ""))
                 runtime.proactive.record(self.dispatcher.config, "owner:{}".format(owner_id), topic=item.get("topic", ""))
                 delivered += 1
@@ -169,7 +183,7 @@ class AgentWorker:
             return "disabled"
         now = time.time()
         reason, payload = companion._due_reason(now)
-        high_priority = reason in {"event", "followup"}
+        high_priority = reason == "event"
         if is_quiet_hours(settings, datetime.fromtimestamp(now)) and not high_priority:
             return "quiet_hours"
         allowed, budget_reason = self.dispatcher.agent_runtime.proactive.allowed(

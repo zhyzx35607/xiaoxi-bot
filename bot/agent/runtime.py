@@ -68,11 +68,11 @@ class AgentRuntime:
         event_limit = max(12, min(
             int(self.config.get("agent", {}).get("event_history_limit", 100)), 200))
         event_text = "[敏感内容已省略]" if contains_sensitive_data(agent_event.text) else agent_event.text[:1000]
-        self.store.append_bounded(f"events/{agent_event.scope.key.replace(':', '_')}.json", {
+        self.store.append_bounded_unique(f"events/{agent_event.scope.key.replace(':', '_')}.json", {
             "event_id": agent_event.event_id, "user_id": agent_event.identity.user_id,
             "level": int(agent_event.identity.level), "text": event_text,
             "timestamp": agent_event.timestamp, "decision": decision.reason,
-        }, limit=event_limit)
+        }, key="event_id", limit=event_limit)
         candidate = self.extract_memory_candidate(agent_event)
         if candidate:
             self.memory.add_candidate(candidate)
@@ -349,9 +349,24 @@ class AgentRuntime:
         if not reply:
             return False
         if agent_event.scope.is_private:
+            repetitive = getattr(dispatcher, "_owner_reply_is_repetitive", None)
+            if callable(repetitive) and repetitive(reply):
+                self.timeline.add(
+                    agent_event.scope.key, "reply_suppressed",
+                    "相似回复已抑制", actor_id=agent_event.identity.user_id,
+                    metadata={"event_id": agent_event.event_id})
+                return True
             await dispatcher.client.send_private_msg(agent_event.scope.owner_id, reply)
+            record_reply = getattr(dispatcher, "_record_owner_reply", None)
+            if callable(record_reply):
+                record_reply(reply)
+            companion = getattr(self, "companion", None)
+            if companion is not None:
+                companion.observe_outgoing(reply, topic=plan.get("intent", "conversation"))
         else:
             await dispatcher.client.send_group_msg_with_at(agent_event.scope.group_id, reply, [agent_event.identity.user_id])
-        self.proactive.record(self.config, agent_event.scope.key, topic=plan.get("intent", ""))
+        if decision.reason != "explicit_request":
+            self.proactive.record(
+                self.config, agent_event.scope.key, topic=plan.get("intent", ""))
         self.store.append_bounded("plans/completed.json", {"event_id": agent_event.event_id, "plan": plan, "tool_results": results}, limit=200)
         return True

@@ -83,6 +83,16 @@ class ContentConfigMigrationTests(unittest.TestCase):
         self.assertNotIn("batch_size", config["acg_images"])
         self.assertNotIn("times", config["hotboard_push"])
         self.assertEqual(config["runtime"]["startup_connect_timeout_seconds"], 30)
+        self.assertEqual(config["runtime"]["media_timeout_seconds"], 12)
+        self.assertEqual(config["runtime"]["image_ocr_max_attempts"], 2)
+        self.assertEqual(config["runtime"]["owner_private_merge_seconds"], 5)
+        self.assertEqual(
+            config["runtime"]["owner_reply_similarity_cooldown_seconds"], 300)
+        self.assertEqual(config["agent"]["schema_version"], 5)
+        self.assertEqual(config["agent"]["owner_daily_limit"], 2)
+        self.assertEqual(config["agent"]["owner_hourly_limit"], 1)
+        self.assertEqual(config["agent"]["companion_min_gap_seconds"], 21600)
+        self.assertEqual(config["agent"]["companion_idle_seconds"], 28800)
 
     def test_roleplay_story_generation_migrates_to_bounded_defaults(self):
         config, migrated = migrate_config({
