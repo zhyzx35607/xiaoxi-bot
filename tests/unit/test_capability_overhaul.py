@@ -220,6 +220,39 @@ class UApiEnhancementTests(unittest.TestCase):
         self.assertIsNone(second)
         self.assertEqual(Stub.client.session.calls, 1)
 
+    def test_binary_requests_honor_shared_cooldown(self):
+        from bot.integrations import uapi
+
+        class Response:
+            status = 429
+            headers = {"Retry-After": "120"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+        class Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *args, **kwargs):
+                self.calls += 1
+                return Response()
+
+        dispatcher = type("Dispatcher", (), {
+            "config": {}, "client": type("Client", (), {"session": Session()})(),
+        })()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                uapi, "_STATE_PATH", os.path.join(directory, "uapi.json")):
+            uapi.reset_state_for_test()
+            first = asyncio.run(uapi.uapi_get_binary(dispatcher, "/image/qrcode"))
+            second = asyncio.run(uapi.uapi_get_binary(dispatcher, "/image/qrcode"))
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(dispatcher.client.session.calls, 1)
+
     def test_rate_limit_streak_is_persisted_and_backoff_grows(self):
         from bot.integrations import uapi
 
@@ -279,3 +312,31 @@ class UApiEnhancementTests(unittest.TestCase):
         self.assertIsNone(first)
         self.assertIsNone(second)
         self.assertEqual(dispatcher.client.session.calls, 1)
+
+    def test_json_response_size_is_bounded(self):
+        from bot.integrations import uapi
+
+        class Response:
+            status = 200
+            headers = {"Content-Length": str(2 * 1024 * 1024)}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def json(self, **kwargs):
+                raise AssertionError("oversized body must be rejected before parsing")
+
+        class Session:
+            def request(self, *args, **kwargs):
+                return Response()
+
+        dispatcher = type("Dispatcher", (), {
+            "config": {}, "client": type("Client", (), {"session": Session()})(),
+        })()
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                uapi, "_STATE_PATH", os.path.join(directory, "uapi.json")):
+            uapi.reset_state_for_test()
+            self.assertIsNone(asyncio.run(uapi.uapi_get(dispatcher, "/misc/hotboard")))

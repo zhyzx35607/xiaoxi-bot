@@ -260,7 +260,11 @@ class OneBotClient:
                     self._queue_bytes = 0
                     for echo, fut in list(self._pending.items()):
                         if not fut.done():
-                            fut.set_result({"status": "disconnected"})
+                            fut.set_result({
+                                "status": "failed", "retcode": -1,
+                                "msg": "disconnected", "message": "disconnected",
+                                "error_kind": "disconnected",
+                            })
                     self._pending.clear()
 
                 if self._running:
@@ -292,15 +296,20 @@ class OneBotClient:
                 log.exception("Dispatch error: %s", e)
 
     async def call(self, action, params=None, timeout=None):
-        if not self.is_connected:
-            return {"status": "failed", "msg": "not connected"}
+        ws = self._ws
+        if not self.is_connected or ws is None:
+            return {
+                "status": "failed", "retcode": -1, "msg": "not connected",
+                "message": "not connected", "action": action,
+                "error_kind": "disconnected",
+            }
         echo = str(uuid.uuid4())[:8]
         req = {"action": action, "params": params or {}, "echo": echo}
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         self._pending[echo] = fut
         try:
-            await self._ws.send(json.dumps(req, ensure_ascii=False))
+            await ws.send(json.dumps(req, ensure_ascii=False))
             timeout_seconds = self._api_timeout if timeout is None else max(1, float(timeout))
             result = await asyncio.wait_for(fut, timeout=timeout_seconds)
             normalized = self._normalize_result(action, result)

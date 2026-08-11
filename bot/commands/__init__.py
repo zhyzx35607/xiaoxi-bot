@@ -4,6 +4,7 @@ import sys as _sys
 import types as _types
 
 from .runtime import *  # noqa: F401,F403
+from .random_image import *  # noqa: F401,F403
 from . import runtime as _runtime
 from . import admin as _admin
 from . import common as _common
@@ -11,11 +12,15 @@ from . import fun as _fun
 from . import media as _media
 from . import moderation as _moderation
 from . import queries as _queries
+from . import random_image as _random_image
 from . import roleplay as _roleplay
 from . import registry as _registry
 from . import system as _system
 
-_OWNERS = (_runtime, _admin, _common, _fun, _media, _moderation, _queries, _roleplay, _registry, _system)
+_OWNERS = (
+    _runtime, _admin, _common, _fun, _media, _moderation, _queries,
+    _random_image, _roleplay, _registry, _system,
+)
 
 
 def _export_private(owner):
@@ -34,7 +39,8 @@ class _CompatibilityModule(_types.ModuleType):
     def __setattr__(self, name, value):
         if name not in {
             "_runtime", "_admin", "_common", "_fun", "_media", "_moderation",
-            "_queries", "_roleplay", "_registry", "_system", "_types", "_sys", "_OWNERS",
+            "_queries", "_random_image", "_roleplay", "_registry", "_system",
+            "_types", "_sys", "_OWNERS",
         }:
             for owner in _OWNERS:
                 if hasattr(owner, name):

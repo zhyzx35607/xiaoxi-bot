@@ -32,6 +32,45 @@ async def _wait_for_startup_connection(client, client_task, timeout):
         pass
     return bool(client.is_connected)
 
+
+async def _shutdown_runtime(dispatcher, client, client_task, stop_task=None):
+    """Stop every runtime component and surface client task failures."""
+    if stop_task is not None and not stop_task.done():
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
+    dispatcher.save_runtime_state(force=True)
+    for name, stop in (
+            ("delayed worker", dispatcher.stop_delayed_worker),
+            ("scheduler", dispatcher.stop_scheduler),
+            ("Bilibili push", dispatcher.stop_bili_push),
+            ("RSS guard", dispatcher.stop_rss_guard),
+            ("Agent worker", dispatcher.agent_worker.stop)):
+        try:
+            await stop()
+        except Exception:
+            log.exception("Failed to stop %s", name)
+    try:
+        await client.stop()
+    except Exception:
+        log.exception("Failed to stop OneBot client")
+    try:
+        await dispatcher.stop_background_tasks()
+    except Exception:
+        log.exception("Failed to stop dispatcher background tasks")
+
+    if client_task is None:
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(client_task), timeout=15)
+    except asyncio.TimeoutError:
+        client_task.cancel()
+        try:
+            await asyncio.wait_for(client_task, timeout=5)
+        except asyncio.CancelledError:
+            pass
+        except asyncio.TimeoutError:
+            log.warning("Client task did not exit after cancellation")
+
 async def amain():
     config_path = os.getenv("QQBOT_CONFIG_PATH") or os.path.join(_BASE_DIR, "config.json")
     config = load_config(config_path)
@@ -70,58 +109,43 @@ async def amain():
         except NotImplementedError:
             pass
 
-    client_task = asyncio.create_task(client.run())
-    if client_task.done():
-        log.warning("Client task exited during startup; stopping main loop")
-        return
-    startup_timeout = config.get("runtime", {}).get("startup_connect_timeout_seconds", 30)
+    client_task = stop_task = None
     try:
-        startup_timeout = max(1.0, float(startup_timeout))
-    except (TypeError, ValueError):
-        startup_timeout = 30.0
-    connected = await _wait_for_startup_connection(client, client_task, startup_timeout)
-    if client_task.done():
-        log.warning("Client task exited during startup; stopping main loop")
-        return
-    if connected:
-        log.info("OneBot connection ready; starting background workers")
-    else:
-        log.warning(
-            "OneBot connection not ready after %.0fs; starting background workers while reconnecting",
-            startup_timeout,
-        )
-    dispatcher.start_delayed_worker()
-    dispatcher.start_scheduler()
-    dispatcher.start_bili_push()
-    dispatcher.start_rss_guard()
-    dispatcher.agent_worker.start()
-
-    stop_task = asyncio.create_task(stop_event.wait())
-    done, pending = await asyncio.wait(
-        {stop_task, client_task},
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for task in pending:
-        if task is stop_task:
-            task.cancel()
-    if client_task in done:
-        log.warning("Client task exited; stopping bot")
-    dispatcher.save_runtime_state(force=True)
-    await dispatcher.stop_delayed_worker()
-    await dispatcher.stop_scheduler()
-    await dispatcher.stop_bili_push()
-    await dispatcher.stop_rss_guard()
-    await dispatcher.agent_worker.stop()
-    await client.stop()
-    await dispatcher.stop_background_tasks()
-    try:
-        await asyncio.wait_for(client_task, timeout=15)
-    except asyncio.TimeoutError:
-        client_task.cancel()
+        client_task = asyncio.create_task(client.run())
+        await asyncio.sleep(0)
+        if client_task.done():
+            log.warning("Client task exited during startup")
+            await client_task
+        startup_timeout = config.get("runtime", {}).get("startup_connect_timeout_seconds", 30)
         try:
-            await asyncio.wait_for(client_task, timeout=5)
-        except asyncio.CancelledError:
-            pass
-        except asyncio.TimeoutError:
-            log.warning("Client task did not exit after cancellation")
+            startup_timeout = max(1.0, float(startup_timeout))
+        except (TypeError, ValueError):
+            startup_timeout = 30.0
+        connected = await _wait_for_startup_connection(client, client_task, startup_timeout)
+        if client_task.done():
+            log.warning("Client task exited during startup")
+            await client_task
+        if connected:
+            log.info("OneBot connection ready; starting background workers")
+        else:
+            log.warning(
+                "OneBot connection not ready after %.0fs; starting background workers while reconnecting",
+                startup_timeout,
+            )
+        dispatcher.start_delayed_worker()
+        dispatcher.start_scheduler()
+        dispatcher.start_bili_push()
+        dispatcher.start_rss_guard()
+        dispatcher.agent_worker.start()
+
+        stop_task = asyncio.create_task(stop_event.wait())
+        done, _ = await asyncio.wait(
+            {stop_task, client_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if client_task in done:
+            log.warning("Client task exited; stopping bot")
+            await client_task
+    finally:
+        await _shutdown_runtime(dispatcher, client, client_task, stop_task)
     log.info("Bot stopped")

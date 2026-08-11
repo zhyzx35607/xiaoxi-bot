@@ -1,10 +1,6 @@
 """Grouped NapCat capability commands with feature and permission gates."""
 
-import asyncio
-import ipaddress
 import json
-import socket
-from urllib.parse import urlparse
 
 from ..permission import (
     LEVEL_ADMIN,
@@ -22,7 +18,7 @@ from ..services.confirmations import (
     create_confirmation,
     execute_confirmation,
 )
-from .uapi_extra import _image_url, _safe_public_url
+from .uapi_extra import _image_url, _resolved_public_url
 
 _CATEGORY_ALIASES = {
     "消息": "message", "群管": "management", "待办": "todo", "相册": "album",
@@ -64,32 +60,6 @@ async def _require_write_permission(dispatcher, group_id, user_id, level):
     return True
 
 
-async def _validated_public_url(value):
-    url = _safe_public_url(value)
-    if not url:
-        return ""
-    parsed = urlparse(url)
-    if len(url) > 2048 or parsed.username or parsed.password:
-        return ""
-    try:
-        addresses = await asyncio.to_thread(
-            socket.getaddrinfo, parsed.hostname,
-            parsed.port or (443 if parsed.scheme == "https" else 80),
-            type=socket.SOCK_STREAM,
-        )
-    except (OSError, UnicodeError):
-        return ""
-    if not addresses:
-        return ""
-    for address in addresses:
-        try:
-            if not ipaddress.ip_address(address[4][0]).is_global:
-                return ""
-        except (IndexError, TypeError, ValueError):
-            return ""
-    return url
-
-
 async def _album_image_url(dispatcher, value, message):
     candidates = []
     direct = _image_url(value, message)
@@ -107,7 +77,7 @@ async def _album_image_url(dispatcher, value, message):
             if reply_url:
                 candidates.append(reply_url)
     for candidate in candidates:
-        validated = await _validated_public_url(candidate)
+        validated = await _resolved_public_url(candidate)
         if validated:
             return validated
     return ""

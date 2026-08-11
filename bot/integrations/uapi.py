@@ -64,6 +64,7 @@ _missing_key_log_ts = {}
 _MISSING_KEY_LOG_INTERVAL = 3600
 _RATE_LIMIT_COOLDOWN_DEFAULT = 60.0
 _RATE_LIMIT_COOLDOWN_MAX = 21600.0
+_MAX_JSON_RESPONSE_BYTES = 1024 * 1024
 
 
 def _log_missing_key(path):
@@ -416,6 +417,25 @@ def _start_rate_limit_cooldown(dispatcher, path, headers):
     return delay
 
 
+async def _read_json_bounded(response, max_bytes=_MAX_JSON_RESPONSE_BYTES):
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > max_bytes:
+                raise ValueError("response body exceeds limit")
+        except ValueError as error:
+            if str(error) == "response body exceeds limit":
+                raise
+    content = getattr(response, "content", None)
+    reader = getattr(content, "read", None)
+    if callable(reader):
+        payload = await reader(max_bytes + 1)
+        if len(payload) > max_bytes:
+            raise ValueError("response body exceeds limit")
+        return json.loads(payload.decode("utf-8"))
+    return await response.json(content_type=None)
+
+
 async def _json_request_unlocked(dispatcher, method, path, params=None, json_body=None,
                                  kind="user", timeout=8, use_cache=False):
     cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
@@ -462,7 +482,7 @@ async def _json_request_unlocked(dispatcher, method, path, params=None, json_bod
                             log.warning("uapi %s -> HTTP %s", path, response.status)
                             return None
                         else:
-                            data = await response.json(content_type=None)
+                            data = await _read_json_bounded(response)
                             if use_cache:
                                 _cache_put(path, params, data)
                             return data
@@ -496,6 +516,10 @@ async def uapi_post(dispatcher, path, json_body=None, kind="user", timeout=8):
 
 async def _uapi_get_binary_unlocked(dispatcher, path, params=None, kind="user",
                           max_bytes=6 * 1024 * 1024, timeout=20):
+    cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
+    if cooldown > 0:
+        log.debug("uapi %s rate-limit cooldown active for %.1fs", path, cooldown)
+        return None
     if not await _budget_available(dispatcher, kind, path):
         log.info("uapi: budget blocked %s kind=%s", path, kind)
         return None
@@ -606,6 +630,10 @@ async def uapi_resolve_image_url(dispatcher, path, params=None, timeout=8):
 
 async def uapi_post_form(dispatcher, path, fields, kind="user", timeout=20):
     """POST multipart form data for OCR/NSFW without exposing arbitrary targets."""
+    cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
+    if cooldown > 0:
+        log.debug("uapi %s rate-limit cooldown active for %.1fs", path, cooldown)
+        return None
     if not await _budget_available(dispatcher, kind, path):
         log.info("uapi: budget blocked %s kind=%s", path, kind)
         return None
@@ -623,10 +651,18 @@ async def uapi_post_form(dispatcher, path, fields, kind="user", timeout=20):
                     timeout=aiohttp.ClientTimeout(total=timeout)) as response:
                 await _record_response_locked(
                     dispatcher, path, kind, response.status, response.headers)
+                if response.status == 429:
+                    delay = _start_rate_limit_cooldown(
+                        dispatcher, path, response.headers)
+                    log.warning(
+                        "uapi %s rate limited; cooling down for %.1fs",
+                        path, delay,
+                    )
+                    return None
                 if response.status != 200:
                     log.warning("uapi %s -> HTTP %s", path, response.status)
                     return None
-                return await response.json(content_type=None)
+                return await _read_json_bounded(response)
     except Exception as error:
         log.warning("uapi %s failed: %s", path, error)
         return None

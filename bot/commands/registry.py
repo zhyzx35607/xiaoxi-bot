@@ -7,6 +7,7 @@ from .fun import *  # noqa: F401,F403
 from .media import *  # noqa: F401,F403
 from .moderation import *  # noqa: F401,F403
 from .queries import *  # noqa: F401,F403
+from .random_image import *  # noqa: F401,F403
 from .roleplay import *  # noqa: F401,F403
 from .system import *  # noqa: F401,F403
 from .uapi_extra import *  # noqa: F401,F403
@@ -85,6 +86,8 @@ def register_all(d):
     d.register("点赞信息", cmd_profile_like, "查看机器人点赞统计")
     d.register("health", cmd_health, "查看运行状态")
     d.register("生图", cmd_generate_image, "AI 生成图片 /生图 提示词")
+    d.register("随机图", cmd_random_image, "随机图片 /随机图 [标签与范围]；R18仅最高主人和群主人")
+    d.register("pixiv图", cmd_random_image, "随机图片 /pixiv图 [标签与范围]；R18仅最高主人和群主人")
     d.register("安全", cmd_security, "安全功能 /安全 status|log|url on/off|gray on/off",
                admin_only=True)
     # Admin commands (require bot to be admin/owner)

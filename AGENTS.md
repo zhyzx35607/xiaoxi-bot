@@ -10,7 +10,7 @@
 
 - 群聊和私聊 AI 对话、上下文记忆、联网搜索和图片理解。
 - QQ 群管理、权限分级、内容审核和高风险操作确认。
-- Bilibili、TouchGal、UApiS、NapCat 等外部服务集成。
+- Bilibili、TouchGal、UApiS、Mukyu、NapCat 等外部服务集成。
 - 定时推送、表情包收集、角色扮演和持久化 Agent 工作区。
 - systemd 托管、运行日志、健康检查、备份和回滚。
 
@@ -39,7 +39,7 @@ bot/agent/                 Agent 计划、工具、存储、验证和后台任�
 bot/commands/              命令注册及按领域拆分的命令实现
 bot/events/                消息、通知、请求和路由
 bot/transport/             OneBot WebSocket、动作和消息输出
-bot/integrations/          Bilibili、TouchGal、UApiS、NapCat 等集成
+bot/integrations/          Bilibili、TouchGal、UApiS、Mukyu、NapCat 等集成
 bot/services/              调度、健康检查、确认和延迟回复
 bot/security/              URL 检查和安全审计
 bot/storage/               运行路径和原子持久化

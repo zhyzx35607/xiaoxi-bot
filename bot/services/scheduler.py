@@ -304,6 +304,7 @@ _DEFAULT_HOTBOARD_WINDOWS = [("10:00", "13:00"), ("19:00", "22:00")]
 def _new_acg_state():
     return {
         "version": 2,
+        "provider": "mukyu",
         "recent": {},
         "pool": [],
         "pending_due": False,
@@ -330,7 +331,9 @@ def _load_acg_state():
                 if isinstance(values, list):
                     pool.extend(str(value) for value in values if isinstance(value, str))
         state["pool"] = list(dict.fromkeys(pool))[-200:]
+        state["provider"] = "legacy"
         return state
+    state["provider"] = str(data.get("provider") or "legacy")
     recent = data.get("recent", {})
     if isinstance(recent, dict):
         for url, timestamp in recent.items():
@@ -364,6 +367,19 @@ def _load_acg_state():
 
 def _save_acg_state(state):
     atomic_write_json(_ACG_HISTORY_PATH, state, indent=2)
+
+
+def _ensure_acg_provider(state, dispatcher):
+    provider = "mukyu"
+    if state.get("provider") == provider:
+        return False
+    state["provider"] = provider
+    state["recent"] = {}
+    state["pool"] = []
+    state["delivery"] = None
+    state["last_failure"] = None
+    log.info("ACG image provider changed to %s; cleared legacy image pool", provider)
+    return True
 
 
 def _load_acg_history():
@@ -503,16 +519,33 @@ async def _collect_one_acg_image(dispatcher):
         return False
     async with _state_lock(dispatcher):
         state = _load_acg_state()
+        provider_changed = _ensure_acg_provider(state, dispatcher)
         _prune_recent(state, dispatcher)
         target = _acg_send_count(dispatcher)
         delivery_urls = (state.get("delivery") or {}).get("urls", [])
         if len(state["pool"]) >= target:
             _save_acg_state(state)
             return False
+        if provider_changed:
+            _save_acg_state(state)
         seen = set(state["recent"]) | set(state["pool"]) | set(delivery_urls)
-    from ..integrations.uapi import uapi_resolve_image_url
-    url = await uapi_resolve_image_url(
-        dispatcher, "/random/image", params={"category": "acg", "type": "pc"})
+    from ..integrations.mukyu import MukyuError, fetch_random_image
+    try:
+        image = await fetch_random_image(
+            dispatcher,
+            r18=0,
+            tags=cfg.get("tags") if isinstance(cfg.get("tags"), list) else [],
+            tag_mode=cfg.get("tag_mode", "or"),
+            orientation=cfg.get("orientation", "landscape"),
+            min_pixels=cfg.get("min_pixels", 1000000),
+            min_bookmarks=cfg.get("min_bookmarks", 0),
+            ai_type=cfg.get("ai_type"),
+            illust_type=cfg.get("illust_type"),
+        )
+    except MukyuError as error:
+        log.debug("ACG image collection deferred: %s", error)
+        return False
+    url = image.url
     if not url or url in seen:
         return False
     async with _state_lock(dispatcher):
@@ -563,6 +596,7 @@ async def _try_send_acg_delivery(dispatcher):
         delivery_ttl = max(300, min(int(cfg.get("delivery_ttl_seconds", 7200)), 86400))
         async with _state_lock(dispatcher):
             state = _load_acg_state()
+            _ensure_acg_provider(state, dispatcher)
             _prune_recent(state, dispatcher, now)
             delivery = state.get("delivery")
             if delivery:
@@ -726,6 +760,7 @@ async def _daily_acg_push(dispatcher):
         return True
     async with _state_lock(dispatcher):
         state = _load_acg_state()
+        _ensure_acg_provider(state, dispatcher)
         state["pending_due"] = True
         _save_acg_state(state)
     await _try_send_acg_delivery(dispatcher)

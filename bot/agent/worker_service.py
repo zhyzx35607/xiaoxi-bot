@@ -117,7 +117,9 @@ class AgentWorker:
                 repetitive = getattr(
                     self.dispatcher, "_owner_reply_is_repetitive", None)
                 if callable(repetitive) and repetitive(combined_text):
-                    companion.store.mark_outbox(item["id"], "sent")
+                    companion.store.mark_outbox(
+                        item["id"], "suppressed", "similar to a recent owner reply")
+                    log.info("Companion outbox suppressed repetitive item id=%s", item.get("id"))
                     continue
                 for index, text in enumerate(parts[:4]):
                     if not str(text).strip():

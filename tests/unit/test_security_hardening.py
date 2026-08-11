@@ -299,7 +299,7 @@ class CapabilityWriteTests(unittest.IsolatedAsyncioTestCase):
 
         dispatcher = self._dispatcher("admin")
         with patch.object(
-                capabilities, "_validated_public_url",
+                capabilities, "_resolved_public_url",
                 new=AsyncMock(side_effect=lambda value: value)):
             await capabilities.cmd_album_center(
                 dispatcher, 100, 9,

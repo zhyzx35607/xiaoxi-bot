@@ -327,6 +327,7 @@ class GroupMessageMixin:
                 await self._queue_owner_private_message(
                     event, user_id, message, raw, sender, message_id)
             elif user_id == self.config.get("bot_owner"):
+                await self._flush_owner_private_messages_now()
                 await self._handle_owner_private(user_id, message, raw, sender, message_id)
             else:                # Non-owner private chat → AI auto-reply (no @ trigger needed)
                 await self._handle_private_ai_chat(user_id, message, raw, sender, message_id)
@@ -612,6 +613,21 @@ class PrivateMessageMixin:
             batch = self._owner_private_buffer
             self._owner_private_buffer = []
             self._owner_private_flush_task = None
+        await self._process_owner_private_batch(batch)
+
+    async def _flush_owner_private_messages_now(self):
+        async with self._owner_private_buffer_lock:
+            task = self._owner_private_flush_task
+            if task is not None and task is not asyncio.current_task() and not task.done():
+                task.cancel()
+            self._owner_private_flush_task = None
+            batch = self._owner_private_buffer
+            self._owner_private_buffer = []
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
+        await self._process_owner_private_batch(batch)
+
+    async def _process_owner_private_batch(self, batch):
         if not batch:
             return
         latest = batch[-1]
@@ -673,12 +689,6 @@ class PrivateMessageMixin:
 
         # Check for command prefix first
         if raw.startswith(prefix):
-            async with self._owner_private_buffer_lock:
-                task = self._owner_private_flush_task
-                if task is not None and not task.done():
-                    task.cancel()
-                self._owner_private_flush_task = None
-                self._owner_private_buffer = []
             parts = raw[len(prefix):].split(maxsplit=1)
             cmd = parts[0].lower()
             args = parts[1] if len(parts) > 1 else ""

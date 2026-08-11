@@ -28,6 +28,7 @@
 - 点赞秒回：有人给你点赞，一秒回满（SVIP 回 20 个，普通号回 10 个）
 - 复读机：群友好几个人发同一句话，她概率跟风
 - 表情包：自动收集并用 AI 分析情绪标签，AI 聊天时能自主选择贴合语境的表情包发送
+- 随机图片：通过 Mukyu 图片服务按标签、横竖图、清晰度、AI 类型和作品类型选图；R18/混合范围只对最高主人和群主人开放
 - 点歌：说"来首 xxx"就能搜
 - 娱乐查询：真实天气、各平台热榜（AI 概括 + 可点链接）、一言、答案之书、每日新闻图、必应壁纸、Epic 免费游戏（数据来自 uapis.cn，有每日积分预算控制）
 - B站功能：群里发 B站视频链接/BV号/b23 短链（包括 QQ 分享卡片），自动解析出标题、封面、播放量等信息，并尽量把视频本体发出来（免登录官方接口，超限自动降级为只发信息）
@@ -73,6 +74,7 @@ export DEEPSEEK_API_KEY="sk-xxxxxxxxxxxxxxxx"    # DeepSeek 的 key，后备（�
 export QQBOT_WS_URL="ws://127.0.0.1:3001"        # NapCat 的 WS 地址
 export QQBOT_TOKEN=""                             # OneBot access token；注意：如果 NapCat 的 WS 服务端配了 token 这里就必须填一致，否则会连上就被踢、每秒重连
 export UAPI_API_KEY="uapi-xxxxxxxxxxxxxxxx"        # uapis.cn 的 key，娱乐查询/B站推送备用通道用（没有则这些功能静默停用）
+export MUKYU_API_KEY=""                             # Mukyu 图片服务可选 key；匿名接口可用时可以留空
 export TOUCHGAL_API_TOKEN="tg-xxxxxxxxxxxxxxxx"     # TouchGal API Token；没有时 /gal 可用 status 查看状态
 ```
 
@@ -101,7 +103,7 @@ sudo systemctl enable --now qqbot.service
 
 config.json 里可以按群开关各种功能，调整 AI 插话的积极性、频率限制等等。用到的时候看看文件里的注释就行。
 
-ACG images are collected into a persistent pool. A scheduled delivery waits until 20 unique images are ready, then sends one merged-forward package; recently sent URLs become eligible again after seven days.
+ACG images are selected from `i.mukyu.ru` with `r18=0` and collected into a persistent pool. A scheduled delivery waits until 20 unique images are ready, then sends one merged-forward package; recently sent URLs become eligible again after seven days. Switching providers clears the legacy UApiS pool before new collection starts.
 
 ## 命令一览
 
@@ -132,6 +134,7 @@ ACG images are collected into a persistent pool. A scheduled delivery waits unti
 `/translate 文本` — 翻译
 `/calc 1+2*3` — 计算器
 `/ocr` — 识别图片文字（回复那张图发）
+`/随机图 [标签与范围]`（或 `/pixiv图`）— 随机选一张图片；支持 `标签=初音ミク,ボーカロイド`、`且/或`、`横图/竖图/方图`、`高清/超清`、`非AI/AI`、`插画/漫画/动图`
 `/info @xxx` 或 `/info QQ号` — 查成员资料
 `/history [条数]` — 最近消息
 `/精华列表` — 群精华
@@ -170,6 +173,8 @@ ACG images are collected into a persistent pool. A scheduled delivery waits unti
 `/clearai` — 清本群数据（确认后先备份再清理）；最高主人私聊时需明确写群号或 `all`
 `/b站推送 add/del/list` — 盯 UP 主新投稿（mid 是 UP 主空间网址 space.bilibili.com/ 后面的数字，直接贴空间链接也行；详细用法发 `/help b站推送`）
 `/积分` — 看 uapis 积分额度
+
+最高主人和群主人可在 `/随机图` 后追加 `R18` 或 `混合`；其他身份始终固定为全年龄范围，并且响应元数据会再次校验 `x_restrict=0`。
 
 **群主才能用的（QQ 群主身份）：**
 
@@ -304,7 +309,7 @@ bot/
   commands/                管理、查询、媒体、娱乐、能力分类与动态帮助
   events/                  事件范围、路由、群聊和私聊处理
   transport/               OneBot WebSocket、消息段与长消息输出
-  integrations/            Bilibili、TouchGal、UApiS、NapCat 实现
+  integrations/            Bilibili、TouchGal、UApiS、Mukyu、NapCat 实现
   services/                确认操作、调度、延迟回复、健康检查
   security/                URL 检查和灰字审计
   storage/                 原子 JSON 持久化
@@ -329,7 +334,7 @@ bot/
 
 - 定时任务默认使用 `Asia/Shanghai` 时区，可通过 `runtime.scheduler_timezone` 调整。
 - OneBot WebSocket 离线时，签到、ACG、热榜和 B站推送会跳过本轮，恢复连接后只执行未来任务。
-- New ACG images require `UAPI_API_KEY`; the persistent collector pauses without a key and resumes without losing a pending delivery.
+- New ACG images use Mukyu `simple_json` metadata plus same-origin `/i/...` URLs and do not consume UApiS credits. Scheduled collection always requests `r18=0`.
 - B站官方接口出现 `-352` 或 `-412` 风控后默认暂停 30 分钟，可通过 `bilibili.risk_cooldown_seconds` 调整。
 - 配置文件和 `config.json.last-good` 会使用 `0600` 权限保存，环境变量中的密钥不会写回配置文件。
 - 生产环境建议使用 `deploy/qqbot.service`、以专用 `napcat` 用户运行的 `deploy/napcat.service`、常驻 `deploy/napcat-login-watchdog.service` 和受限的 `deploy/napcat-restart.path`，另配备份清理 timer，由 systemd 管理完整进程树。生产服务默认关闭聊天正文文件日志，并通过 NapCat 输出过滤器阻止消息正文和 token 进入 journald。

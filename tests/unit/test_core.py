@@ -21,6 +21,7 @@ from bot.ai import (
 )
 from bot.client import OneBotClient
 from bot.dispatcher import Dispatcher, _log_chat_message, _read_tail_text
+from bot.integrations.mukyu import MukyuImage
 from bot import scheduler
 
 
@@ -2126,6 +2127,26 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
         stub.client = client
         return stub
 
+    def test_provider_switch_clears_legacy_images_but_keeps_pending_due(self):
+        state = scheduler._new_acg_state()
+        state.update({
+            "provider": "legacy",
+            "recent": {"https://legacy.example/recent.jpg": time.time()},
+            "pool": ["https://legacy.example/pool.jpg"],
+            "pending_due": True,
+            "delivery": {"urls": ["https://legacy.example/delivery.jpg"]},
+            "last_failure": {"reason": "legacy_failure"},
+        })
+        stub = self._stub(type("Client", (), {})())
+
+        self.assertTrue(scheduler._ensure_acg_provider(state, stub))
+        self.assertEqual(state["provider"], "mukyu")
+        self.assertEqual(state["recent"], {})
+        self.assertEqual(state["pool"], [])
+        self.assertTrue(state["pending_due"])
+        self.assertIsNone(state["delivery"])
+        self.assertIsNone(state["last_failure"])
+
     async def test_does_not_send_below_twenty(self):
         from bot import scheduler
         with tempfile.TemporaryDirectory() as tmp:
@@ -2181,10 +2202,12 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
             class Client:
                 is_connected = True
             stub = self._stub(Client())
-            async def same_url(dispatcher, path, params=None):
-                return "u1"
+            async def same_image(dispatcher, **kwargs):
+                return MukyuImage(
+                    url="u1", image_id=1, x_restrict=0, width=1, height=1,
+                    extension="jpg", ai_type=0, illust_type=0)
             with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
-                    patch("bot.uapi.uapi_resolve_image_url", same_url):
+                    patch("bot.integrations.mukyu.fetch_random_image", same_image):
                 state = scheduler._new_acg_state()
                 state["recent"] = {"u1": time.time()}
                 scheduler._save_acg_state(state)

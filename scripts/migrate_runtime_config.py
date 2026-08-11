@@ -14,6 +14,7 @@ SECRET_ENV_KEYS = {
     "sigmai_api_key": ("SIGMAI_API_KEY", "QQBOT_SIGMAI_API_KEY"),
     "agnes_api_key": ("AGNES_API_KEY", "QQBOT_AGNES_API_KEY"),
     "uapi_api_key": ("UAPI_API_KEY", "QQBOT_UAPI_API_KEY"),
+    "mukyu_api_key": ("MUKYU_API_KEY", "QQBOT_MUKYU_API_KEY"),
     "bili_sessdata": ("BILI_SESSDATA", "QQBOT_BILI_SESSDATA"),
     "touchgal_api_token": ("TOUCHGAL_API_TOKEN", "QQBOT_TOUCHGAL_API_TOKEN"),
 }

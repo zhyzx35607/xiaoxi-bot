@@ -195,6 +195,54 @@ class StartupConnectionTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await client_task
 
+    async def test_shutdown_cleans_services_before_propagating_client_failure(self):
+        from app.bootstrap import _shutdown_runtime
+
+        stops = []
+
+        async def stop(name):
+            stops.append(name)
+
+        class Dispatcher:
+            def __init__(self):
+                self.agent_worker = type("Worker", (), {
+                    "stop": lambda _self: stop("agent"),
+                })()
+
+            def save_runtime_state(self, force=False):
+                stops.append("save")
+
+            async def stop_delayed_worker(self):
+                await stop("delayed")
+
+            async def stop_scheduler(self):
+                await stop("scheduler")
+
+            async def stop_bili_push(self):
+                await stop("bili")
+
+            async def stop_rss_guard(self):
+                await stop("rss")
+
+            async def stop_background_tasks(self):
+                await stop("background")
+
+        class Client:
+            async def stop(self):
+                await stop("client")
+
+        async def fail():
+            raise RuntimeError("startup failed")
+
+        task = asyncio.create_task(fail())
+        await asyncio.sleep(0)
+        with self.assertRaisesRegex(RuntimeError, "startup failed"):
+            await _shutdown_runtime(Dispatcher(), Client(), task)
+        self.assertEqual(
+            stops,
+            ["save", "delayed", "scheduler", "bili", "rss", "agent", "client", "background"],
+        )
+
 class NapCatWatchdogTests(unittest.TestCase):
     def test_prefers_bot_websocket_port(self):
         script_path = Path(__file__).parents[2] / "deploy" / "napcat-login-watchdog.py"
@@ -326,7 +374,7 @@ class RuntimeTemporaryFileUploadTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(os.path.exists(client.uploaded_path))
 
 class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
-    async def test_acg_without_key_skips_resolution(self):
+    async def test_acg_collection_uses_mukyu_without_uapi_key(self):
         class Client:
             is_connected = True
 
@@ -343,10 +391,15 @@ class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "acg.json")
-            resolver = AsyncMock(return_value="unused")
-            with patch.object(scheduler, "_ACG_HISTORY_PATH", path),                     patch("bot.uapi.uapi_resolve_image_url", resolver):
-                await scheduler._daily_acg_push(Stub())
-            resolver.assert_not_awaited()
+            image = type("Image", (), {"url": "https://i.mukyu.ru/i/1.jpg"})()
+            resolver = AsyncMock(return_value=image)
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), patch(
+                    "bot.integrations.mukyu.fetch_random_image", resolver):
+                self.assertTrue(await scheduler._collect_one_acg_image(Stub()))
+                state = scheduler._load_acg_state()
+            resolver.assert_awaited_once()
+            self.assertEqual(resolver.await_args.kwargs["r18"], 0)
+            self.assertEqual(state["pool"], ["https://i.mukyu.ru/i/1.jpg"])
 
     async def test_acg_pending_retries_without_key(self):
         sent = []

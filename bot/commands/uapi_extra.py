@@ -1,7 +1,9 @@
 """Additional safe UApiS query commands."""
 
+import asyncio
 import ipaddress
 import json
+import socket
 from urllib.parse import urlparse
 
 
@@ -12,7 +14,13 @@ def _json_text(data):
 def _safe_public_url(value):
     try:
         parsed = urlparse(str(value or "").strip())
-        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            return ""
+        try:
+            if parsed.port not in (None, 80, 443):
+                return ""
+        except ValueError:
             return ""
         host = parsed.hostname.lower()
         if host in ("localhost",) or host.endswith(".local"):
@@ -23,7 +31,8 @@ def _safe_public_url(value):
                 return ""
         except ValueError:
             pass
-        return parsed.geturl()
+        url = parsed._replace(fragment="").geturl()
+        return url if len(url) <= 2048 else ""
     except Exception:
         return ""
 
@@ -42,6 +51,31 @@ def _image_url(args, message):
                 if value:
                     return value
     return ""
+
+
+async def _resolved_public_url(value):
+    url = _safe_public_url(value)
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    try:
+        addresses = await asyncio.to_thread(
+            socket.getaddrinfo, parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except (OSError, UnicodeError):
+        return ""
+    if not addresses:
+        return ""
+    for item in addresses:
+        try:
+            address = ipaddress.ip_address(item[4][0])
+        except (ValueError, IndexError, TypeError):
+            return ""
+        if not address.is_global:
+            return ""
+    return url
 
 
 async def _query(d, group_id, user_id, path, *, params=None, body=None,
@@ -110,7 +144,7 @@ async def cmd_github_lookup(d, group_id, user_id, args, role, sender_card, messa
 
 
 async def cmd_url_status(d, group_id, user_id, args, role, sender_card, message):
-    url = _safe_public_url(args)
+    url = await _resolved_public_url(args)
     if not url:
         await d._reply(group_id, user_id, "只支持公开的 http/https 地址，内网地址不查")
         return
@@ -159,7 +193,7 @@ async def cmd_bili_replies(d, group_id, user_id, args, role, sender_card, messag
 
 
 async def cmd_cloud_ocr(d, group_id, user_id, args, role, sender_card, message):
-    url = _image_url(args, message)
+    url = await _resolved_public_url(_image_url(args, message))
     if not url:
         await d._reply(group_id, user_id, "用法：/云OCR 公开图片URL，或发送带URL的图片")
         return
@@ -169,7 +203,7 @@ async def cmd_cloud_ocr(d, group_id, user_id, args, role, sender_card, message):
 
 
 async def cmd_nsfw_check(d, group_id, user_id, args, role, sender_card, message):
-    url = _image_url(args, message)
+    url = await _resolved_public_url(_image_url(args, message))
     if not url:
         await d._reply(group_id, user_id, "用法：/图片审核 公开图片URL")
         return

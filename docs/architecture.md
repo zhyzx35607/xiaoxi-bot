@@ -20,7 +20,7 @@ bot/
 ├── commands/          registry plus capability, admin, query, media and system domains
 ├── events/            context gates, routing, messages, notices, requests
 ├── transport/         OneBot WebSocket, actions, segments, long-output delivery
-├── integrations/      Bilibili, TouchGal, UApiS, and NapCat implementations
+├── integrations/      Bilibili, TouchGal, UApiS, Mukyu, and NapCat implementations
 ├── services/          confirmations, scheduler, delayed replies, health/RSS guard
 ├── security/          URL checks and gray-tip audit implementation
 ├── storage/           atomic JSON persistence

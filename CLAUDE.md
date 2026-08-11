@@ -122,6 +122,7 @@ The owner can issue cross-group commands from private chat by prefixing with a g
 | `VISION_API_BASE_URL` | `vision_api.base_url` | |
 | `VISION_API_MODEL` | `vision_api.model` | |
 | `UAPI_API_KEY` / `QQBOT_UAPI_API_KEY` | `uapi_api_key` | uapis.cn Bearer key (fun commands, B站 fallback) |
+| `MUKYU_API_KEY` / `QQBOT_MUKYU_API_KEY` | `mukyu_api_key` | Optional key for the Mukyu random image service |
 | `BILI_SESSDATA` / `QQBOT_BILI_SESSDATA` | `bili_sessdata` | Optional B站 login cookie; makes official endpoints risk-control-free (near-100% reliable UP主 polling, zero credits). Expiry detected via nav `code=-101`, falls back to anonymous |
 | `QQBOT_CONSOLE_LOG` | — | Enable console logging if `1`/`true`/`yes` |
 
@@ -152,7 +153,7 @@ Tests cover: chat logging, tail reader, API result normalization, NapCat tool ga
 - An RSS watchdog (`dispatcher.start_rss_guard`) logs memory growth and triggers a graceful SIGTERM restart at `runtime.rss_restart_mb` (default 700 MB, below the current systemd `MemoryMax=1G`).
 - `tmp/` holds transient video/image downloads; files are deleted right after sending.
 - Bilibili push state advances only after a confirmed send. Ambiguous timeouts are checked against recent group history before the next retry.
-- ACG content uses a persistent 20-image pool with seven-day URL deduplication. Random daily windows and pending per-group deliveries persist in `data/acg_history.json`.
+- ACG content uses Mukyu safe-only image metadata (`r18=0`) and same-origin image URLs, with a persistent 20-image pool and seven-day URL deduplication. Random daily windows and pending per-group deliveries persist in `data/acg_history.json`.
 
 
 ## Runtime reliability rules

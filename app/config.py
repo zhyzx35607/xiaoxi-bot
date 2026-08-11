@@ -31,6 +31,8 @@ def apply_env_overrides(config):
         "QQBOT_AGNES_API_KEY": "agnes_api_key",
         "UAPI_API_KEY": "uapi_api_key",
         "QQBOT_UAPI_API_KEY": "uapi_api_key",
+        "MUKYU_API_KEY": "mukyu_api_key",
+        "QQBOT_MUKYU_API_KEY": "mukyu_api_key",
         "BILI_SESSDATA": "bili_sessdata",
         "QQBOT_BILI_SESSDATA": "bili_sessdata",
         "TOUCHGAL_API_TOKEN": "touchgal_api_token",
@@ -217,6 +219,19 @@ def migrate_config(config):
             uapi[key] = value
             migrated = True
 
+    mukyu_defaults = {
+        "enabled": True,
+        "base_url": "https://i.mukyu.ru",
+        "timeout_seconds": 20,
+        "max_json_bytes": 262144,
+        "command_cooldown_seconds": 10,
+    }
+    mukyu = config.setdefault("mukyu_images", {})
+    for key, value in mukyu_defaults.items():
+        if key not in mukyu:
+            mukyu[key] = value
+            migrated = True
+
     voice_reply_defaults = {
         "enabled": False,
         "probability": 0.08,
@@ -234,10 +249,18 @@ def migrate_config(config):
 
     acg_defaults = {
         "enabled": False,
+        "provider": "mukyu",
         "send_count": 20,
         "minimum_count": 20,
         "dedupe_days": 7,
-        "collector_interval_seconds": 1,
+        "collector_interval_seconds": 5,
+        "tags": [],
+        "tag_mode": "or",
+        "orientation": "landscape",
+        "min_pixels": 1000000,
+        "min_bookmarks": 0,
+        "ai_type": None,
+        "illust_type": None,
         "max_delivery_attempts": 3,
         "retry_base_seconds": 300,
         "retry_max_seconds": 1800,
@@ -256,6 +279,13 @@ def migrate_config(config):
         if key not in acg:
             acg[key] = value
             migrated = True
+    if str(acg.get("provider") or "").strip().lower() != "mukyu":
+        acg["provider"] = "mukyu"
+        migrated = True
+    interval = max(5, int(acg.get("collector_interval_seconds", 5) or 5))
+    if acg.get("collector_interval_seconds") != interval:
+        acg["collector_interval_seconds"] = interval
+        migrated = True
 
     hotboard_defaults = {
         "enabled": False,
@@ -512,11 +542,9 @@ def migrate_config(config):
         migrated = True
     if int(agent.get("schema_version", 0) or 0) < 5:
         agent["schema_version"] = 5
-        agent["owner_daily_limit"] = min(
-            2, max(1, int(agent.get("owner_daily_limit", 2) or 2)))
-        agent["owner_hourly_limit"] = 1
-        agent["companion_min_gap_seconds"] = max(
-            21600, int(agent.get("companion_min_gap_seconds", 21600) or 21600))
+        agent.setdefault("owner_daily_limit", 2)
+        agent.setdefault("owner_hourly_limit", 1)
+        agent.setdefault("companion_min_gap_seconds", 21600)
         agent.setdefault("companion_idle_seconds", 28800)
         migrated = True
     return config, migrated
