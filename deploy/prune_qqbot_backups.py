@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 
-def select_for_pruning(directory, keep=20, max_age_days=30, now=None):
+def select_for_pruning(directory, keep=5, max_age_days=30, now=None):
     root = Path(directory)
     if not root.is_dir():
         return []
@@ -22,7 +22,7 @@ def select_for_pruning(directory, keep=20, max_age_days=30, now=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", default="/root/qqbot-backups")
-    parser.add_argument("--keep", type=int, default=20)
+    parser.add_argument("--keep", type=int, default=5)
     parser.add_argument("--max-age-days", type=int, default=30)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()

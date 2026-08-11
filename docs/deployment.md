@@ -37,8 +37,8 @@ monolith modules.
 3. Copy `/opt/qqbot` to an isolated `/tmp` test directory.
 4. Upload changed files to the isolated copy.
 5. Run compile and full tests with `/opt/qqbot/venv/bin/python`.
-6. Upload the same files to `/opt/qqbot`.
-7. Fetch and reset the server repository to the tested commit.
+6. Fetch `origin` in `/opt/qqbot` and fast-forward `main` to the tested commit.
+7. Confirm the production worktree is clean and exactly matches `origin/main`.
 8. Install and restart `napcat.service`, enable `napcat-restart.path`, then
    install the persistent `napcat-login-watchdog.service` and restart `qqbot.service`.
 9. Confirm `qqbot.service`, `napcat.service`, `napcat-login-watchdog.service`, and

@@ -25,6 +25,7 @@
 - `docs/deployment.md`：测试、分阶段部署和回滚流程。
 - `docs/operations.md`：服务、日志、备份和生产运维。
 - `docs/roleplay.md`：角色扮演模块的数据和行为约束。
+- `docs/workspace.md`：本地目录、临时文件、Git 与三方同步规范。
 - `CLAUDE.md`：较完整的历史维护说明，仅作为补充参考。
 
 代码和当前测试是最终事实来源。文档与实现不一致时，应先确认现有行为，再同时修正文档和代码。
@@ -50,6 +51,15 @@ docs/                      架构、部署和运维文档
 ```
 
 `bot.client`、`bot.bilibili`、`bot.scheduler`、`bot.touchgal`、`bot.uapi` 等旧模块是兼容入口。新代码应导入聚焦后的 canonical 模块，不得随意删除兼容入口。
+
+## 工作区边界
+
+- 一个工作区只保留一个小汐正式 checkout，目录名统一为 `xiaoxi-bot`。不得同时维护 `audit-live-*`、`work*`、`source` 或其他内容相同的临时 clone。
+- 外部角色扮演、NapCat 或协议参考项目统一放在正式仓库同级的 `references/` 下。它们是独立仓库，不得纳入小汐 Git、测试或部署。
+- 参考仓库内可能存在未提交修改。除非任务明确要求修改参考项目，不得清理、重置或覆盖其 Git 状态。
+- 临时审计、部署验证和解包目录使用系统临时目录，并在任务完成后删除；不要把 bundle、tar、patch、日志或虚拟环境堆在工作区父目录。
+- 生产配置、密钥和运行数据不通过 Git 同步。工作区整理不得触碰 `/var/lib/qqbot/config.json`、`/etc/qqbot.env` 或 `/opt/qqbot/data/`。
+- 具体布局与三方核对命令见 `docs/workspace.md`。
 
 ## 不可破坏的约束
 
@@ -140,14 +150,14 @@ GitHub 的 `test` 状态检查是 `main` 的必需检查。完整验证未通过
 
 ## Git 工作流
 
-- 以当前仓库根目录作为正式主线 checkout；不要同时维护多个内容相同的临时 clone。
+- 只在标准 `xiaoxi-bot/` checkout 中开发；父目录只保留该仓库和 `references/`。
 - 开始任务前执行 `git fetch --prune --tags`，确认工作区干净并从最新 `main` 创建分支。
 - 分支名使用 `feat/<topic>`、`fix/<topic>`、`refactor/<topic>`、`docs/<topic>` 或 `chore/<topic>`。
 - 一个提交只解决一个明确问题；提交信息说明行为变化，例如 `fix: keep scheduler retries bounded`。
 - 不提交 `data/`、日志、临时下载、虚拟环境、备份包、密钥文件或本地探针输出。
 - 通过 PR 合并到 `main`，使用 squash merge。GitHub 会在合并后自动删除远程分支。
 - `main` 保持线性历史；禁止 force-push 和删除保护分支。
-- 回滚点使用仓库外的 `.bundle` 或 tar 备份，不在生产仓库长期堆积 `backup/*` 分支。
+- 回滚点使用仓库外的 `.bundle` 或 tar 备份，不在生产仓库长期堆积 `backup/*` 分支；验证完成后只保留必要的最新归档。
 - 提交或部署后再次确认 `git status` 干净且本地、GitHub、服务器指向同一提交。
 
 ## 部署规则
@@ -162,11 +172,13 @@ Services:   qqbot.service, napcat.service
 Backups:    /root/qqbot-backups/
 ```
 
+自动备份至少保留最新 5 份，并只删除超过 30 天的普通归档。部署前可额外创建一个已验证回滚点，但验证完成后不得长期堆积临时 bundle、隔离目录或 Git stash。
+
 部署必须遵循以下顺序：
 
 1. 在本地分支完成修改和完整测试。
 2. 通过 PR squash 合并，确认 GitHub CI 成功。
-3. 部署前创建可验证的 tar 或 Git bundle 备份。
+3. 部署前创建一个可验证的 tar 或 Git bundle 回滚点。
 4. 先在隔离目录使用生产 Python 环境验证上传内容。
 5. 再更新 `/opt/qqbot`，确保服务器 `main` 与 `origin/main` 一致。
 6. 只重启受影响的服务，确认 `qqbot.service` 和 `napcat.service` 为 `active`。
@@ -184,4 +196,5 @@ Backups:    /root/qqbot-backups/
 - 文档、配置样例和 API 合约与实现同步。
 - Git diff 中没有密钥、聊天正文、生成文件或无关改动。
 - 工作区干净，提交可追溯，生产部署有回滚点。
+- 本机、GitHub `main` 与生产服务器 `/opt/qqbot` 指向完全相同的提交。
 - 最终反馈列出修改内容、验证结果、部署状态和仍存在的风险。

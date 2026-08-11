@@ -22,6 +22,7 @@ docs/*
 !docs/napcat-docs-manifest.json
 !docs/operations.md
 !docs/roleplay.md
+!docs/workspace.md
 
 CLAUDE.md
 .claude/
@@ -39,6 +40,19 @@ backups/
 *.tool-backup
 *.audit-backup
 !docs/api-contracts.json
+
+# Root-level local transfer and audit artifacts
+/*.patch
+/*.bundle
+/*.tar
+/*.tar.gz
+/*.tar.zst
+/*.tgz
+/*.zip
+/*.bak
+/*.tmp
+/*.temp
+
 # Runtime-only roleplay data and private policy
 data/roleplay.sqlite3
 data/roleplay.sqlite3-*
