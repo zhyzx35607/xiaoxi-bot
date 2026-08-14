@@ -164,6 +164,63 @@ class PrivateSwitchDispatchTests(unittest.IsolatedAsyncioTestCase):
         handler._run_command.assert_awaited_once_with(
             "kick", "222", 111, 1, "member", "n", [])
 
+    async def test_group_alias_passes_full_args(self):
+        handler = self._handler()
+        await handler._handle_owner_command(
+            "group", "enable 111 222", 1, {"nickname": "n"}, [], "/group enable 111 222")
+        handler._run_command.assert_awaited_once_with(
+            "group", "enable 111 222", None, 1, "member", "n", [])
+
+
+class GroupEnableAliasTests(unittest.IsolatedAsyncioTestCase):
+    def _config(self):
+        return {
+            "bot_owner": 1, "bot_qq": 2, "group_defaults": {},
+            "groups": {
+                "111": {"enabled": False},
+                "222": {"enabled": True},
+                "333": {"enabled": True},
+            },
+        }
+
+    async def _run(self, config, args):
+        from bot.commands import admin
+
+        dispatcher = _Dispatcher(config)
+        with patch.object(admin, "_load", return_value=config), \
+                patch.object(admin, "_commit"):
+            await admin.cmd_group(dispatcher, None, 1, args, "member", "", [])
+        return dispatcher
+
+    async def test_group_enable_multiple_groups(self):
+        config = self._config()
+        dispatcher = await self._run(config, "enable 111 222")
+        self.assertTrue(config["groups"]["111"]["enabled"])
+        self.assertTrue(config["groups"]["222"]["enabled"])
+        self.assertIn("已启用 2 个群", dispatcher.replies[-1][0][2])
+
+    async def test_group_disable_all(self):
+        config = self._config()
+        await self._run(config, "disable all")
+        for gid in ("111", "222", "333"):
+            self.assertFalse(config["groups"][gid]["enabled"])
+
+    async def test_group_unknown_subcommand_shows_usage(self):
+        config = self._config()
+        dispatcher = await self._run(config, "foo 111")
+        self.assertIn("用法", dispatcher.replies[-1][0][2])
+
+    async def test_group_rejects_non_owner_private(self):
+        from bot.commands import admin
+
+        config = self._config()
+        dispatcher = _Dispatcher(config)
+        with patch.object(admin, "_load", return_value=config), \
+                patch.object(admin, "_commit") as commit:
+            await admin.cmd_group(dispatcher, None, 999, "enable 111", "member", "", [])
+        commit.assert_not_called()
+        self.assertIn("最高主人", dispatcher.replies[-1][0][2])
+
 
 if __name__ == "__main__":
     unittest.main()

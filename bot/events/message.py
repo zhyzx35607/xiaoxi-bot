@@ -758,8 +758,8 @@ class PrivateMessageMixin:
 /bl list - 查看黑名单
 /bl add <群号> <QQ> <小时> - 添加黑名单
 /bl remove <群号> <QQ> - 移除黑名单
-/group enable <群号> - 启用群
-/group disable <群号> - 禁用群
+/group enable <群号> [群号...|all] - 启用群（可多个）
+/group disable <群号> [群号...|all] - 禁用群（可多个）
 /group list - 列出所有群
 /memory <群号> - 查看该群的AI记忆
 /memory clear <群号> - 清除该群的AI记忆
@@ -784,7 +784,7 @@ class PrivateMessageMixin:
 """
             await self._reply(None, user_id, help_text)
 
-        elif cmd in ("enable", "disable"):
+        elif cmd in ("enable", "disable", "group"):
             await self._run_command(cmd, args, None, user_id, "member", sender_name, message)
 
         elif cmd in ("ai状态", "aistatus"):

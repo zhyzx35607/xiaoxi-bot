@@ -144,6 +144,11 @@ class RoleplayStore:
         for key, value in list(result.items()):
             if key.endswith("_json") or key == "data_json":
                 continue
+            # Structural identifiers (uuid hex, slugs) must survive intact:
+            # redaction patterns can mangle them, e.g. an id starting with
+            # 11 digits matches the phone-number rule and becomes unreadable.
+            if key == "id" or key == "slug" or key.endswith("_id"):
+                continue
             result[key] = sanitize_persistent_value(value)
         return result
 
@@ -165,7 +170,7 @@ class RoleplayStore:
     def list_characters(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT id,slug,name,created_at,updated_at FROM characters ORDER BY name").fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in rows]
+        return [self._row(dict(row)) for row in rows]
 
     def get_character(self, value: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -199,12 +204,12 @@ class RoleplayStore:
                 (persona_id, owner_id, name[:120], description[:12000], int(default), now, now),
             )
             row = conn.execute("SELECT * FROM personas WHERE owner_id=? AND name=?", (owner_id, name[:120])).fetchone()
-        return sanitize_persistent_value(dict(row))
+        return self._row(dict(row))
 
     def list_personas(self, owner_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM personas WHERE owner_id=? ORDER BY is_default DESC,name", (owner_id,)).fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in rows]
+        return [self._row(dict(row)) for row in rows]
 
     def get_persona(self, owner_id: int, value: str | None) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -275,7 +280,7 @@ class RoleplayStore:
                 "SELECT c.*,ch.name character_name FROM chats c JOIN characters ch ON ch.id=c.character_id "
                 "WHERE c.owner_id=? AND c.archived=0 ORDER BY c.updated_at DESC LIMIT ?", (owner_id, limit)
             ).fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in rows]
+        return [self._row(dict(row)) for row in rows]
 
     def use_chat(self, owner_id: int, value: str) -> dict[str, Any] | None:
         with self._lock, self._connect() as conn:
@@ -464,7 +469,7 @@ class RoleplayStore:
     def recent_messages(self, chat_id: str, limit: int = 24) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM messages WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit)).fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in reversed(rows)]
+        return [self._row(dict(row)) for row in reversed(rows)]
 
     def message_count(self, chat_id: str) -> int:
         with self._connect() as conn:
@@ -506,7 +511,7 @@ class RoleplayStore:
     def list_memories(self, chat_id: str, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM memories WHERE chat_id=? AND archived=0 ORDER BY locked DESC,updated_at DESC LIMIT ?", (chat_id, limit)).fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in rows]
+        return [self._row(dict(row)) for row in rows]
 
     def search_memories(self, chat_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         raw_parts = [part for part in re.split(r"\s+|[,，。！？;；]+", query) if len(part) >= 2]
@@ -532,7 +537,7 @@ class RoleplayStore:
         sql = "SELECT * FROM memories WHERE chat_id=? AND archived=0 AND (" + " OR ".join(clauses) + ") ORDER BY locked DESC,confidence DESC,updated_at DESC LIMIT ?"
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in rows]
+        return [self._row(dict(row)) for row in rows]
 
     def update_memory(self, chat_id: str, memory_id: int, content: str) -> bool:
         with self._lock, self._connect() as conn:
@@ -566,12 +571,12 @@ class RoleplayStore:
         with self._lock, self._connect() as conn:
             conn.execute("INSERT INTO worldbooks(id,owner_id,name,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(owner_id,name) DO UPDATE SET updated_at=excluded.updated_at", (worldbook_id, owner_id, name[:120], now, now))
             row = conn.execute("SELECT * FROM worldbooks WHERE owner_id=? AND name=?", (owner_id, name[:120])).fetchone()
-        return sanitize_persistent_value(dict(row))
+        return self._row(dict(row))
 
     def list_worldbooks(self, owner_id: int) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM worldbooks WHERE owner_id=? ORDER BY name", (owner_id,)).fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in rows]
+        return [self._row(dict(row)) for row in rows]
 
     def get_worldbook(self, owner_id: int, value: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -580,7 +585,7 @@ class RoleplayStore:
                 return None
             entries = conn.execute("SELECT * FROM world_entries WHERE worldbook_id=? ORDER BY priority DESC,id", (book["id"],)).fetchall()
         result = sanitize_persistent_value(dict(book))
-        result["entries"] = [sanitize_persistent_value(dict(row)) for row in entries]
+        result["entries"] = [self._row(dict(row)) for row in entries]
         return result
 
     def delete_worldbook(self, owner_id: int, value: str) -> bool:
@@ -619,7 +624,7 @@ class RoleplayStore:
         for row in rows:
             keywords = [k.strip().lower() for k in re.split(r"[,，|]", row["keywords"]) if k.strip()]
             if not keywords or any(keyword in lowered for keyword in keywords):
-                matches.append(sanitize_persistent_value(dict(row)))
+                matches.append(self._row(dict(row)))
             if len(matches) >= limit:
                 break
         return matches
@@ -685,12 +690,12 @@ class RoleplayStore:
     def recent_story_beats(self, chat_id: str, limit: int = 12) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM story_beats WHERE chat_id=? ORDER BY id DESC LIMIT ?", (chat_id, limit)).fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in reversed(rows)]
+        return [self._row(dict(row)) for row in reversed(rows)]
 
     def relationship_timeline(self, chat_id: str, limit: int = 30) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM memories WHERE chat_id=? AND memory_type IN ('relationship_state','relationship_event') AND archived=0 ORDER BY created_at DESC LIMIT ?", (chat_id, limit)).fetchall()
-        return [sanitize_persistent_value(dict(row)) for row in rows]
+        return [self._row(dict(row)) for row in rows]
 
     def audit(self, owner_id: int, event_type: str, detail: dict[str, Any], chat_id: str | None = None) -> None:
         with self._lock, self._connect() as conn:

@@ -176,6 +176,7 @@ COMMAND_DETAILS = {
     "badword": "/badword add <词> — 加违禁词\n/badword del <词> — 移除\n/badword list — 看列表\n有人发违禁词会自动撤回并提醒。需要管理权限。",
     "安全": "/安全 status — 安全功能状态\n/安全 log — 最近拦截记录\n群里的链接会自动检测安全性。需要管理权限。",
     "enable": "/enable — 在本群启用 Bot\n/disable — 关停本群\n群主人及以上可用。",
+    "group": "/group enable 群号 [群号...] — 启用群\n/group disable 群号 [群号...] — 关停群\n多个群号用空格分开，all 表示全部已配置群。最高主人私聊使用。",
     "list": "/list\n本群数据概览（发言、AI、开关状态）。群主人及以上可用。",
     "clearai": "/clearai\n清空本群的 AI 记忆数据。群主人及以上可用。",
     "approve": "/approve — 通过待处理的加群/好友申请\n/reject — 拒绝\n总主人私聊使用。",
@@ -198,7 +199,7 @@ _HELP_CATEGORIES = {
     "群资料与成员": {"群信息", "成员", "成员列表", "陌生人信息", "info", "群荣誉", "禁言列表", "精华列表", "history"},
     "文件与内容": {"群文件", "文件状态", "文件链接", "删除文件", "新建文件夹", "删除文件夹", "移动文件", "重命名文件", "精华", "删精华", "公告", "删公告", "setgroupavatar"},
     "群管理": {"kick", "ban", "unban", "allban", "welcome", "badword", "安全", "全体", "title"},
-    "功能与自动化": {"enable", "disable", "list", "clearai", "ai聊天", "私聊ai", "acg图", "热榜推送", "b站解析", "b站推送", "gal资源", "积分"},
+    "功能与自动化": {"enable", "disable", "group", "list", "clearai", "ai聊天", "私聊ai", "acg图", "热榜推送", "b站解析", "b站推送", "gal资源", "积分"},
     "主人与维护": {"api", "health", "好友列表", "sysmsg", "approve", "reject", "master", "admin"},
 }
 

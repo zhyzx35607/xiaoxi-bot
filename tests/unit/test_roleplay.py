@@ -43,6 +43,18 @@ class RoleplayServiceTests(unittest.TestCase):
         }
         return self.service.store.import_character(payload)
 
+    def test_structural_ids_survive_redaction(self):
+        # A uuid whose hex starts with 11 digits matches the phone-number
+        # redaction rule; identifiers must not be sanitized.
+        class _FakeUuid:
+            hex = "19497753600b4e71987bf0f2414fd7b7"
+
+        with patch("bot.roleplay.storage.uuid.uuid4", return_value=_FakeUuid()):
+            character = self._character()
+        self.assertEqual(character["id"], _FakeUuid.hex)
+        chat = self.service.store.new_chat(self.OWNER, character["id"], title="ids")
+        self.assertEqual(chat["character_id"], _FakeUuid.hex)
+
     def test_memory_updates_are_scoped_to_active_chat(self):
         character = self._character()
         first = self.service.store.new_chat(self.OWNER, character["id"], title="first")

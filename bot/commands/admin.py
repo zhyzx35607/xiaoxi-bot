@@ -669,3 +669,17 @@ async def cmd_disable(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, msg + "，我先潜了")
     else:
         await d._reply(group_id, user_id, "没找到能关闭的群")
+
+async def cmd_group(d, group_id, user_id, args, role, sender_card, message):
+    """/group enable|disable 群号... — owner alias matching the documented form."""
+    parts = args.strip().split(maxsplit=1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1] if len(parts) > 1 else ""
+    if sub == "enable":
+        await cmd_enable(d, group_id, user_id, rest, role, sender_card, message)
+    elif sub == "disable":
+        await cmd_disable(d, group_id, user_id, rest, role, sender_card, message)
+    else:
+        await d._reply(group_id, user_id,
+                       "用法：/group enable 群号 [群号...] 或 /group disable 群号 [群号...]\n"
+                       "多个群号用空格分开，all 表示全部已配置群")
