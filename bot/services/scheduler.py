@@ -421,6 +421,11 @@ def _acg_send_count(dispatcher):
     return max(20, min(50, int(cfg.get("send_count", cfg.get("minimum_count", 20)) or 20)))
 
 
+def _acg_images_per_forward(dispatcher):
+    cfg = dispatcher.config.get("acg_images", {})
+    return max(1, min(50, int(cfg.get("images_per_forward", 10) or 10)))
+
+
 def _acg_dedupe_seconds(dispatcher):
     cfg = dispatcher.config.get("acg_images", {})
     days = max(1, min(90, int(cfg.get("dedupe_days", 7) or 7)))
@@ -469,6 +474,16 @@ def _log_hotboard_empty(dispatcher, board):
         log.info("hotboard push deferred: board=%s no data", board)
     else:
         log.debug("hotboard push deferred: board=%s no data", board)
+
+
+def _log_acg_collect_deferred(dispatcher, error):
+    now = time.monotonic()
+    last = float(getattr(dispatcher, "_acg_collect_deferred_log_ts", 0.0) or 0.0)
+    if now - last >= 3600:
+        dispatcher._acg_collect_deferred_log_ts = now
+        log.info("ACG image collection deferred: %s", error)
+    else:
+        log.debug("ACG image collection deferred: %s", error)
 
 
 def _random_timestamp_for_window(day, window, timezone_name):
@@ -543,7 +558,7 @@ async def _collect_one_acg_image(dispatcher):
             illust_type=cfg.get("illust_type"),
         )
     except MukyuError as error:
-        log.debug("ACG image collection deferred: %s", error)
+        _log_acg_collect_deferred(dispatcher, error)
         return False
     url = image.url
     if not url or url in seen:
@@ -564,7 +579,7 @@ async def _collect_one_acg_image(dispatcher):
 
 async def _batch_seen_in_history(dispatcher, group_id, batch_id):
     try:
-        result = await dispatcher.client.get_group_msg_history(int(group_id), count=20)
+        result = await dispatcher.client.get_group_msg_history(int(group_id), count=50)
         return batch_id in str(result)
     except Exception as error:
         log.info("ACG delivery history check failed group=%s batch=%s: %s", group_id, batch_id, error)
@@ -680,22 +695,38 @@ async def _try_send_acg_delivery(dispatcher):
                     current["attempts"] = attempts
                     state["delivery"] = current
                     _save_acg_state(state)
-            header = "小汐的每日图片 · 批次 #{} · 共{}张".format(
-                delivery["batch_id"], len(delivery["urls"]))
-            nodes = [{
-                "type": "node",
-                "data": {"name": "小汐", "uin": str(bot_qq), "content": header},
-            }] + [{
-                "type": "node",
-                "data": {"name": "小汐", "uin": str(bot_qq),
-                         "content": [{"type": "image", "data": {"file": url}}]},
-            } for url in delivery["urls"]]
+            urls = list(delivery["urls"])
+            per_forward = _acg_images_per_forward(dispatcher)
+            chunks = [urls[index:index + per_forward]
+                      for index in range(0, len(urls), per_forward)]
             try:
-                result = await dispatcher.client.send_group_forward_msg(int(gid), nodes)
-                status = (result or {}).get("status") if isinstance(result, dict) else result
-                confirmed = status == "ok"
-                if not confirmed and status == "timeout":
-                    confirmed = await _batch_seen_in_history(dispatcher, gid, delivery["batch_id"])
+                confirmed = True
+                status = "ok"
+                for chunk_index, chunk in enumerate(chunks):
+                    # Sub-batch ids keep the batch_id substring so history
+                    # recovery still matches any chunk of the delivery.
+                    sub_batch_id = "{}-{}".format(delivery["batch_id"], chunk_index + 1)
+                    header = "小汐的每日图片 · 批次 #{} · 共{}张".format(sub_batch_id, len(chunk))
+                    nodes = [{
+                        "type": "node",
+                        "data": {"name": "小汐", "uin": str(bot_qq), "content": header},
+                    }] + [{
+                        "type": "node",
+                        "data": {"name": "小汐", "uin": str(bot_qq),
+                                 "content": [{"type": "image", "data": {"file": url}}]},
+                    } for url in chunk]
+                    result = await dispatcher.client.send_group_forward_msg(int(gid), nodes)
+                    status = (result or {}).get("status") if isinstance(result, dict) else result
+                    confirmed = status == "ok"
+                    if not confirmed and status == "timeout":
+                        # QQ persists accepted forwards with a delay; wait before
+                        # checking history or the same batch is sent again.
+                        await asyncio.sleep(15)
+                        confirmed = await _batch_seen_in_history(dispatcher, gid, sub_batch_id)
+                    if not confirmed:
+                        break
+                    if chunk_index + 1 < len(chunks):
+                        await asyncio.sleep(2)
                 if confirmed:
                     # Checkpoint each successful group immediately. Previously the
                     # state was updated only after every group completed, so a
