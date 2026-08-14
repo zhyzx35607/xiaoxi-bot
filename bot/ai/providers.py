@@ -353,23 +353,27 @@ async def generate_image(dispatcher, prompt, session=None):
         "n": 1,
     }
     url = f"{agnes_cfg['base_url']}/images/generations"
+    timeout = aiohttp.ClientTimeout(total=60)
+    async def _do(sess):
+        async with sess.post(url, headers=headers, json=payload, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                # OpenAI-compatible: data["data"][0]["url"]
+                if data.get("data"):
+                    return data["data"][0].get("url"), None
+            else:
+                body = await resp.text()
+                log.warning("Image gen API returned %d: %s", resp.status, body[:200])
+                return None, f"生图失败 (HTTP {resp.status})"
+        return None, "生图失败，请稍后重试"
     try:
-        timeout = aiohttp.ClientTimeout(total=60)
         if session:
-            async with session.post(url, headers=headers, json=payload, timeout=timeout) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    # OpenAI-compatible: data["data"][0]["url"]
-                    if data.get("data"):
-                        return data["data"][0].get("url"), None
-                else:
-                    body = await resp.text()
-                    log.warning("Image gen API returned %d: %s", resp.status, body[:200])
-                    return None, f"生图失败 (HTTP {resp.status})"
+            return await _do(session)
+        async with aiohttp.ClientSession() as s:
+            return await _do(s)
     except asyncio.TimeoutError:
         log.warning("Image generation timeout")
         return None, "生图超时了，再试一次吧"
     except Exception as e:
         log.error("Image generation error: %s", e)
         return None, f"生图出错: {str(e)[:80]}"
-    return None, "生图失败，请稍后重试"
