@@ -88,6 +88,7 @@ export QQBOT_TOKEN=""                             # OneBot access token；注意
 export UAPI_API_KEY="uapi-xxxxxxxxxxxxxxxx"        # uapis.cn 的 key，娱乐查询/B站推送备用通道用（没有则这些功能静默停用）
 export MUKYU_API_KEY=""                             # Mukyu 图片服务可选 key；匿名接口可用时可以留空
 export TOUCHGAL_API_TOKEN="tg-xxxxxxxxxxxxxxxx"     # TouchGal API Token；没有时 /gal 可用 status 查看状态
+export TOUCHGAL_PROXY_URL=""                          # TouchGal 可选代理，仅允许本机回环 http 代理（如 http://127.0.0.1:18080）；服务器能直连 developer.touchgal.com 时留空
 ```
 
 如果要用图片识别和表情包分析功能，再配 Vision API（推荐开启，免费额度足够用）：

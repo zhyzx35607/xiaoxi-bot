@@ -2905,6 +2905,19 @@ class TouchGalBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings["api_base"], DEFAULT_API_BASE)
         self.assertEqual(settings["site_base"], DEFAULT_SITE_BASE)
 
+    def test_settings_proxy_url_restricted_to_loopback(self):
+        from bot.touchgal import _settings
+
+        class DispatcherStub:
+            config = {"touchgal_proxy_url": "http://127.0.0.1:18080"}
+
+        self.assertEqual(_settings(DispatcherStub())["proxy"], "http://127.0.0.1:18080")
+
+        class BadStub:
+            config = {"touchgal_proxy_url": "http://evil.example:8080"}
+
+        self.assertEqual(_settings(BadStub())["proxy"], "")
+
     def test_settings_accept_https_api_override(self):
         from bot.touchgal import _settings
 

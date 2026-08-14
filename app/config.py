@@ -38,6 +38,8 @@ def apply_env_overrides(config):
         "TOUCHGAL_API_TOKEN": "touchgal_api_token",
         "QQBOT_TOUCHGAL_API_TOKEN": "touchgal_api_token",
         "TOUCHGAL_API_BASE_URL": "touchgal_api_base_url",
+        "TOUCHGAL_PROXY_URL": "touchgal_proxy_url",
+        "QQBOT_TOUCHGAL_PROXY_URL": "touchgal_proxy_url",
     }
     for env_name, cfg_key in env_map.items():
         value = os.getenv(env_name)
