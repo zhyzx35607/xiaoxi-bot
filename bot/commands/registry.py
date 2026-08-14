@@ -127,6 +127,8 @@ def register_all(d):
     # System (bot_owner only)
     d.register("enable", cmd_enable, "开启群聊机器人", bot_owner=True)
     d.register("disable", cmd_disable, "关闭群聊机器人", bot_owner=True)
+    d.register("group", cmd_group, "启用/关停群 /group enable|disable 群号 [群号...|all]",
+               bot_owner=True)
     d.register("list", cmd_list, "查看群聊数据概览", bot_owner=True)
     # Title self-service (any member; silently ignored when bot is not group owner)
     d.register("mytitle", cmd_my_title, "我要头衔xxx 给自己设置专属头衔")
