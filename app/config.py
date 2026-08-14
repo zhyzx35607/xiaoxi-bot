@@ -368,6 +368,7 @@ def migrate_config(config):
     message_output_defaults = {
         "forward_threshold_chars": 200,
         "forward_node_target_chars": 800,
+        "forward_max_nodes": 50,
         "help_always_forward": True,
         "ai_summary_enabled": True,
         "ai_summary_max_chars": 80,

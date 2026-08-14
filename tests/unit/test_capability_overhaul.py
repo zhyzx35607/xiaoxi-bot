@@ -70,6 +70,35 @@ class LongOutputTests(unittest.IsolatedAsyncioTestCase):
                 dispatcher, 100, 1, "help", force_forward=True, kind="help")
         model.assert_not_awaited()
 
+    async def test_oversized_forward_is_chunked(self):
+        # QQ rejects merged forwards above ~100 nodes; long help output must split.
+        dispatcher = self._dispatcher()
+        sections = ["第{}条命令说明".format(i) for i in range(120)]
+        await send_text_response(
+            dispatcher, 100, 1, "ignored", force_forward=True,
+            kind="help", title="小汐的完整帮助", sections=sections)
+        self.assertEqual(len(dispatcher.client.forwards), 3)
+        for _group, nodes in dispatcher.client.forwards:
+            self.assertLessEqual(len(nodes), 50)
+        titles = [nodes[0]["data"]["content"] for _group, nodes in dispatcher.client.forwards]
+        self.assertIn("(1/3)", titles[0])
+        self.assertIn("(3/3)", titles[2])
+
+    async def test_failed_forward_falls_back_to_notice(self):
+        class FailingClient(_OutputClient):
+            async def send_group_forward_msg(self, group_id, nodes):
+                return {"status": "failed", "retcode": 1200}
+
+            async def send_forward_msg(self, **kwargs):
+                return {"status": "failed", "retcode": 1200}
+
+        dispatcher = self._dispatcher()
+        dispatcher.client = FailingClient()
+        await send_text_response(
+            dispatcher, 100, 1, "a" * 500, force_forward=True, kind="help")
+        last = dispatcher.client.group_messages[-1][1]
+        self.assertIn("等会再试", str(last))
+
 
 class GroupHelpCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_random_image_help_uses_full_filter_reference(self):

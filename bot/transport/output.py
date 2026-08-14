@@ -177,11 +177,48 @@ async def send_text_response(dispatcher, group_id, user_id, text, *, force_forwa
 
     level, _ = await get_user_level(dispatcher, group_id, user_id, role_hint)
     nodes = build_forward_nodes(dispatcher, text, title=title, sections=sections)
-    if group_id:
-        result = await dispatcher.client.send_group_forward_msg(int(group_id), nodes)
+    # QQ rejects merged forwards above roughly 100 nodes; chunk conservatively.
+    max_nodes = max(10, min(80, int(config.get("forward_max_nodes", 50) or 50)))
+    if len(nodes) > max_nodes:
+        bot_qq = str(dispatcher.config.get("bot_qq", 0))
+        body = nodes[1:]
+        chunks = [body[index:index + max_nodes - 1]
+                  for index in range(0, len(body), max_nodes - 1)]
+        nodes_list = []
+        for index, chunk in enumerate(chunks):
+            chunk_title = title if len(chunks) == 1 else "{} ({}/{})".format(title, index + 1, len(chunks))
+            nodes_list.append([{
+                "type": "node",
+                "data": {"name": "小汐", "uin": bot_qq, "content": "【{}】".format(chunk_title)},
+            }] + chunk)
     else:
-        result = await dispatcher.client.send_private_forward_msg(int(user_id), nodes)
-    if not isinstance(result, dict) or result.get("status") != "ok":
+        nodes_list = [nodes]
+    result = None
+    first_message_id = 0
+    for chunk_nodes in nodes_list:
+        if group_id:
+            result = await dispatcher.client.send_group_forward_msg(int(group_id), chunk_nodes)
+        else:
+            result = await dispatcher.client.send_private_forward_msg(int(user_id), chunk_nodes)
+        if isinstance(result, dict) and result.get("status") == "ok":
+            if not first_message_id:
+                first_message_id = (result.get("data") or {}).get("message_id") or 0
+            continue
+        if isinstance(result, dict) and result.get("status") == "timeout" and group_id:
+            # Forward may still have landed; verify via group history before retrying.
+            await asyncio.sleep(15)
+            history = await dispatcher.client.get_group_msg_history(int(group_id), count=20)
+            if isinstance(history, dict) and title[:20] in str(history.get("data") or ""):
+                continue
+        log.warning(
+            "forward send failed: group=%s user=%s nodes=%d status=%s retcode=%s",
+            group_id, user_id, len(chunk_nodes),
+            result.get("status") if isinstance(result, dict) else result,
+            result.get("retcode") if isinstance(result, dict) else None,
+        )
+        result = None
+        break
+    if result is None and nodes_list:
         result = await dispatcher.client.send_forward_msg(
             message_type="group" if group_id else "private",
             group_id=int(group_id) if group_id else None,
@@ -190,7 +227,7 @@ async def send_text_response(dispatcher, group_id, user_id, text, *, force_forwa
         )
     if isinstance(result, dict) and result.get("status") == "ok":
         summary = await _summarize(dispatcher, text, level, kind)
-        message_id = (result.get("data") or {}).get("message_id")
+        message_id = first_message_id or (result.get("data") or {}).get("message_id")
         if group_id:
             segments = []
             reply_id = message_id or request_message_id
