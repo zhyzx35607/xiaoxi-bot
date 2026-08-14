@@ -43,7 +43,9 @@ def extract_urls(text):
         if key not in seen:
             seen.add(key)
             urls.append(url)
-    return urls[:5]
+    # Every extracted URL must reach the safety check; truncating here would
+    # silently exempt URLs past the limit.
+    return urls
 
 
 def load_security_events():

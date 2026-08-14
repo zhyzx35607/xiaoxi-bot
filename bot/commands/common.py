@@ -16,6 +16,15 @@ def _save(c):
     atomic_write_json(CONFIG_PATH, c, indent=2)
 
 
+def _commit(d, cfg):
+    """Persist cfg and refresh the in-memory config without dropping env-only secrets."""
+    _save(cfg)
+    # Local import: app.config already imports bot.utils, so importing it lazily
+    # avoids a module-level dependency cycle.
+    from app.config import apply_env_overrides
+    d.config = apply_env_overrides(cfg)
+
+
 def resolve_scoped_group_targets(dispatcher, group_id, user_id, args, *,
                                  allow_all=False, require_configured=False):
     """Resolve group targets without allowing a group command to escape its scope."""

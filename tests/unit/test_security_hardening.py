@@ -102,6 +102,12 @@ class SecurityCheckFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(is_url_check_risky({"status": "failed"})[0])
         self.assertIsNone(is_url_check_risky({"status": "ok", "data": {}})[0])
 
+    def test_extract_urls_does_not_drop_urls_beyond_five(self):
+        from bot.security.core import extract_urls
+
+        text = " ".join("https://example{}.invalid/x".format(i) for i in range(8))
+        self.assertEqual(len(extract_urls(text)), 8)
+
 
 class GroupScopeTests(unittest.IsolatedAsyncioTestCase):
     async def test_group_commands_reject_cross_group_targets(self):
