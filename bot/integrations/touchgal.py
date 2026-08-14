@@ -67,6 +67,7 @@ def _settings(dispatcher):
         "max_results": _bounded_number(cfg.get("max_results"), 5, 1, 10, int),
         "max_resources": _bounded_number(cfg.get("max_resources"), 3, 1, 5, int),
         "token": str(dispatcher.config.get("touchgal_api_token") or "").strip(),
+        "proxy": _safe_proxy_url(dispatcher.config.get("touchgal_proxy_url")),
         "api_base": _safe_base_url(
             dispatcher.config.get("touchgal_api_base_url") or DEFAULT_API_BASE,
             DEFAULT_API_BASE,
@@ -91,6 +92,22 @@ def _safe_base_url(value, fallback, allowed_hosts=None):
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         return fallback
     return str(value).strip().rstrip("/")
+
+
+def _safe_proxy_url(value):
+    """Accept only local/loopback http proxies; anything else is ignored."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return ""
+    if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return ""
+    if not parsed.port or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return ""
+    return text
 
 
 def normalize_title(value):
@@ -174,6 +191,7 @@ async def _api_get(dispatcher, path, params=None):
     try:
         async with dispatcher.client.session.get(
             url, params=params or {}, headers=headers,
+            proxy=settings["proxy"] or None,
             timeout=aiohttp.ClientTimeout(total=settings["timeout"]),
         ) as response:
             try:
