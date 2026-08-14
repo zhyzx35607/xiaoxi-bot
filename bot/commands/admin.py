@@ -16,7 +16,7 @@ from ..permission import (
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
 )
 from ..utils import atomic_write_json
-from .common import CONFIG_PATH, _load, _save, resolve_scoped_group_targets
+from .common import CONFIG_PATH, _commit, _load, _save, resolve_scoped_group_targets
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,8 +45,7 @@ async def cmd_at_all(d, group_id, user_id, args, role, sender_card, message):
 async def _toggle_group_feature(d, group_id, user_id, args, feature, label, cmd_name):
     """Shared on/off toggle for per-group feature flags."""
     if not group_id:
-        await d._reply(None, user_id,
-                       "这个要在群里用，私聊就带上群号：/{} 群号 on".format(cmd_name))
+        await _toggle_groups_feature(d, user_id, args, feature, label, cmd_name)
         return
     arg = args.strip().lower()
     cfg = _load()
@@ -62,10 +61,61 @@ async def _toggle_group_feature(d, group_id, user_id, args, feature, label, cmd_
                            label, "开启" if current else "关闭", cmd_name, cmd_name))
         return
     feats[feature] = (arg == "on")
-    _save(cfg)
-    d.config = cfg
+    _commit(d, cfg)
     await d._reply(group_id, user_id,
                    "本群{}已{}".format(label, "开启" if feats[feature] else "关闭"))
+
+async def _toggle_groups_feature(d, user_id, args, feature, label, cmd_name):
+    """Private cross-group batch toggle: /cmd 群号1 群号2|all on|off."""
+    usage = ("私聊用法：/{} 群号 on|off，多个群号用空格或逗号分开，"
+             "all 表示全部已配置群".format(cmd_name))
+    tokens = [t for t in re.split(r"[\s,，]+", (args or "").strip()) if t]
+    action = tokens[-1].lower() if tokens else ""
+    if action not in ("on", "off"):
+        if len(tokens) == 1 and tokens[0].isdigit():
+            # Single-group status query stays compatible: /cmd 群号
+            cfg = _load()
+            groups = cfg.get("groups", {})
+            current = groups.get(tokens[0], {}).get("features", {}).get(feature, True)
+            await d._reply(None, user_id,
+                           "群{}的{}：{}\n{}".format(tokens[0], label,
+                                                    "开启" if current else "关闭", usage))
+        else:
+            await d._reply(None, user_id, usage)
+        return
+    group_tokens = tokens[:-1]
+    if not group_tokens:
+        await d._reply(None, user_id, usage)
+        return
+    cfg = _load()
+    groups = cfg.setdefault("groups", {})
+    if any(t.lower() == "all" for t in group_tokens):
+        targets = list(groups.keys())
+    elif all(t.isdigit() for t in group_tokens):
+        targets = list(dict.fromkeys(group_tokens))
+    else:
+        await d._reply(None, user_id, "群号只能是数字或 all\n" + usage)
+        return
+    enabled = action == "on"
+    applied, skipped = [], []
+    for gid in targets:
+        group_cfg = groups.get(gid)
+        if not isinstance(group_cfg, dict):
+            skipped.append(gid)
+            continue
+        group_cfg.setdefault("features", {})[feature] = enabled
+        applied.append(gid)
+    if applied:
+        _commit(d, cfg)
+    lines = []
+    if applied:
+        lines.append("已对 {} 个群{}{}：{}".format(
+            len(applied), "开启" if enabled else "关闭", label, "、".join(applied)))
+    if skipped:
+        lines.append("跳过未配置群：" + "、".join(skipped))
+    if not lines:
+        lines.append("没有可操作的已配置群")
+    await d._reply(None, user_id, "\n".join(lines))
 
 async def cmd_acg_switch(d, group_id, user_id, args, role, sender_card, message):
     """/acg图 on|off — toggle scheduled ACG image push for this group."""
@@ -165,8 +215,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
             await d._reply(group_id, user_id, "这个UP主已经在盯了")
             return
         mids.append(mid)
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         # Prime seen-list + watermark so historical uploads never flood
         from ..bilibili import prime_push_state
         nickname = ""
@@ -187,8 +236,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
             return
         if mid in mids:
             mids.remove(mid)
-            _save(cfg)
-            d.config = cfg
+            _commit(d, cfg)
             await d._reply(group_id, user_id, "不盯 mid={} 了".format(mid))
         else:
             await d._reply(group_id, user_id, "这个UP主本来就没在盯")
@@ -468,25 +516,8 @@ async def cmd_my_title(d, group_id, user_id, args, role, sender_card, message):
 
 async def cmd_group_ai_switch(d, group_id, user_id, args, role, sender_card, message):
     """/AI聊天 on|off — toggle AI chat for this group (owner/bot account only)."""
-    if not group_id:
-        await d._reply(None, user_id, "这个要在群里用，私聊就带上群号：/AI聊天 群号 on")
-        return
-    arg = args.strip().lower()
-    cfg = _load()
-    gid = str(group_id)
-    groups = cfg.setdefault("groups", {})
-    group_cfg = groups.setdefault(gid, {"enabled": True, "masters": [],
-                                        "welcome_msg": {}, "bad_words": {}, "features": {}})
-    feats = group_cfg.setdefault("features", {})
-    current = feats.get("ai_chat", True)
-    if arg not in ("on", "off"):
-        await d._reply(group_id, user_id,
-                       "本群AI聊天：" + ("开启" if current else "关闭") + "\n用法：/AI聊天 on 或 /AI聊天 off")
-        return
-    feats["ai_chat"] = (arg == "on")
-    _save(cfg)
-    d.config = cfg
-    await d._reply(group_id, user_id, "本群AI聊天已" + ("开启" if feats["ai_chat"] else "关闭"))
+    await _toggle_group_feature(d, group_id, user_id, args,
+                                "ai_chat", "AI聊天", "AI聊天")
 
 async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, message):
     """/私聊AI on|off|allow QQ|deny QQ — global private-chat AI switch + allowlist."""
@@ -498,13 +529,11 @@ async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, m
     allowed = pc.setdefault("allowed_users", [])
     if action == "on":
         pc["enabled"] = True
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "私聊AI已开启，所有好友都能聊了")
     elif action == "off":
         pc["enabled"] = False
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "私聊AI已关闭，只有开放名单里的人能聊")
     elif action == "allow" and len(parts) >= 2 and parts[1].isdigit():
         qq = int(parts[1])
@@ -512,14 +541,12 @@ async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, m
         if qq not in allowed:
             allowed.append(qq)
         pc["allowed_users"] = allowed[-50:]
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "已开放私聊AI：" + str(qq))
     elif action == "deny" and len(parts) >= 2 and parts[1].isdigit():
         qq = int(parts[1])
         pc["allowed_users"] = [int(u) for u in allowed if str(u).isdigit() and int(u) != qq]
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "已移出开放名单：" + str(qq))
     else:
         status_text = "开启" if pc.get("enabled") else "关闭"
@@ -578,18 +605,15 @@ async def cmd_welcome(d, group_id, user_id, args, role, sender_card, message):
     w = gcfg.setdefault("welcome_msg", {"enabled": True, "template": "欢迎 {nickname} 加入本群！"})
     if arg == "on":
         w["enabled"] = True
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "入群欢迎已开启")
     elif arg == "off":
         w["enabled"] = False
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "入群欢迎已关闭")
     elif arg:
         w["template"] = arg
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "欢迎语改好了：" + arg)
     else:
         status_text = "开启" if w["enabled"] else "关闭"
@@ -615,8 +639,7 @@ async def cmd_enable(d, group_id, user_id, args, role, sender_card, message):
             }
         groups[gid]["enabled"] = True
         enabled_list.append(gid)
-    _save(cfg)
-    d.config = cfg
+    _commit(d, cfg)
     msg = f"已启用 {len(enabled_list)} 个群"
     if len(enabled_list) <= 5:
         msg += f": {', '.join(enabled_list)}"
@@ -636,8 +659,7 @@ async def cmd_disable(d, group_id, user_id, args, role, sender_card, message):
             groups[gid]["enabled"] = False
             disabled_list.append(gid)
     if disabled_list:
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         cleanup = getattr(d, "_cleanup_stale_state", None)
         if cleanup:
             cleanup()

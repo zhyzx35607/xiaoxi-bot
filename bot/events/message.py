@@ -770,16 +770,17 @@ class PrivateMessageMixin:
 /reject flag尾号 原因 - 拒绝申请
 /health - 查看运行状态
 /私聊AI on/off/allow/deny - 私聊AI开关与开放名单
-/AI聊天 群号 on/off - 开关指定群的AI聊天
+/AI聊天 群号 on/off - 开关指定群的AI聊天（多群号用空格/逗号分隔，all=全部已配置群）
 /安全 status/log - 查看安全功能和日志
 /info <QQ号> - 查看任意人资料
 /点赞信息 - 查看点赞统计
 /积分 - 查看uapis积分额度
 /b站推送 add 群号 mid - 盯UP主新投稿（mid=UP主空间网址 space.bilibili.com/ 后的数字，也可贴链接）
 /全体 群号 内容 - @全体成员
-/acg图 群号 on/off - 每日ACG图推送开关
-/热榜推送 群号 on/off - 每日热榜推送开关
-/b站解析 群号 on/off - B站自动解析开关
+/acg图 群号 on/off - 每日ACG图推送开关（支持多群号和 all，同上）
+/热榜推送 群号 on/off - 每日热榜推送开关（同上）
+/b站解析 群号 on/off - B站自动解析开关（同上）
+/gal资源 群号 on/off - Galgame资源自动回复开关（同上）
 """
             await self._reply(None, user_id, help_text)
 
@@ -810,6 +811,12 @@ class PrivateMessageMixin:
             await self._run_command("积分", args, None, user_id, "member", sender_name, message)
 
         elif cmd in self._private_group_command_names():
+            if cmd in self._private_multi_group_switch_names():
+                # Feature switches accept several group ids or "all" in one call
+                await self._run_command(
+                    cmd, args, None, user_id, "member", sender_name, message,
+                )
+                return
             target_group, rest_args = self._parse_private_group_args(args)
             if not target_group:
                 await self._reply(None, user_id, "私聊跨群命令要带群号，比如 /{} 群号 参数".format(cmd))
@@ -1199,8 +1206,11 @@ class PrivateMessageMixin:
             "kick", "ban", "unban", "allban", "welcome", "badword",
             "admin", "title", "头衔", "精华列表", "群荣誉",
             "群文件", "文件链接", "公告", "ocr", "转发摘要",
-            "已读", "history", "禁言列表", "转发", "setgroupavatar", "全体", "acg图", "热榜推送", "b站解析", "b站推送", "ai聊天",
+            "已读", "history", "禁言列表", "转发", "setgroupavatar", "全体", "acg图", "热榜推送", "b站解析", "b站推送", "ai聊天", "gal资源",
         }
+
+    def _private_multi_group_switch_names(self):
+        return {"acg图", "热榜推送", "b站解析", "gal资源", "ai聊天"}
 
     async def _get_image_context(self, group_id, message):
         """Build group image context through the shared private/group media path."""

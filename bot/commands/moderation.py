@@ -16,7 +16,7 @@ from ..permission import (
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
 )
 from ..utils import atomic_write_json
-from .common import CONFIG_PATH, _load, _save
+from .common import CONFIG_PATH, _commit, _load, _save
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -174,28 +174,24 @@ async def cmd_badword(d, group_id, user_id, args, role, sender_card, message):
     if action == "add" and word:
         if word not in bw["words"]:
             bw["words"].append(word)
-            _save(cfg)
-            d.config = cfg
+            _commit(d, cfg)
             await d._reply(group_id, user_id, "违禁词加好了：" + word)
         else:
             await d._reply(group_id, user_id, "该词已存在")
     elif action == "del" and word:
         if word in bw["words"]:
             bw["words"].remove(word)
-            _save(cfg)
-            d.config = cfg
+            _commit(d, cfg)
             await d._reply(group_id, user_id, "违禁词删掉了：" + word)
         else:
             await d._reply(group_id, user_id, "该词不存在")
     elif action == "on":
         bw["enabled"] = True
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "违禁词过滤已开启")
     elif action == "off":
         bw["enabled"] = False
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "违禁词过滤已关闭")
     else:
         word_list = ", ".join(bw["words"]) if bw["words"] else "(空)"
