@@ -510,6 +510,30 @@ class AgentCommandPermissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][3], 100)
 
 
+class AgentGroupProactiveCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_group_proactive_toggle_persists_to_dispatcher_config(self):
+        from bot.commands import agent as agent_cmd
+        from bot.permission import LEVEL_GOWNER
+
+        with tempfile.TemporaryDirectory() as root:
+            config_path = str(Path(root) / "config.json")
+            config = {"bot_owner": 999, "bot_qq": 888, "groups": {"300": {}}}
+            dispatcher = type("Dispatcher", (), {
+                "config": config,
+                "_config_path": config_path,
+                "_reply": AsyncMock(),
+            })()
+            with patch.object(agent_cmd, "get_user_level",
+                              new=AsyncMock(return_value=(LEVEL_GOWNER, ""))):
+                await agent_cmd.cmd_agent(dispatcher, 300, 102, "主动 on", "owner", "", [])
+            group_agent = dispatcher.config["groups"]["300"]["agent"]
+            self.assertTrue(group_agent["proactive_enabled"])
+            self.assertTrue(group_agent["primary_router"])
+            saved = json.loads(Path(config_path).read_text(encoding="utf-8"))
+            self.assertTrue(saved["groups"]["300"]["agent"]["proactive_enabled"])
+            dispatcher._reply.assert_awaited_once()
+
+
 class AgentResponsePolicyTests(unittest.TestCase):
     def test_observation_mode_never_autosends(self):
         from bot.agent.response import can_autosend

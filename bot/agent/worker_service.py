@@ -178,24 +178,28 @@ class AgentWorker:
         return delivered, failed
 
     async def _run_owner_companion(self):
-        settings = self.dispatcher.config.get("agent", {})
-        companion = getattr(self.dispatcher.agent_runtime, "companion", None)
-        owner_id = int(self.dispatcher.config.get("bot_owner") or 0)
-        if not companion or not owner_id or not settings.get("companion_enabled", True):
-            return "disabled"
-        now = time.time()
-        reason, payload = companion._due_reason(now)
-        high_priority = reason == "event"
-        if is_quiet_hours(settings, datetime.fromtimestamp(now)) and not high_priority:
-            return "quiet_hours"
-        allowed, budget_reason = self.dispatcher.agent_runtime.proactive.allowed(
-            self.dispatcher.config, "owner:{}".format(owner_id),
-            topic=(payload or {}).get("topic", reason) if isinstance(payload, dict) else reason,
-            is_private=True, now=now, priority="urgent" if high_priority else "normal")
-        if not allowed and not (high_priority and budget_reason == "quiet_hours"):
-            return budget_reason
-        result = await companion.decide(self.dispatcher, now=now)
-        return "queued" if result else "idle"
+        try:
+            settings = self.dispatcher.config.get("agent", {})
+            companion = getattr(self.dispatcher.agent_runtime, "companion", None)
+            owner_id = int(self.dispatcher.config.get("bot_owner") or 0)
+            if not companion or not owner_id or not settings.get("companion_enabled", True):
+                return "disabled"
+            now = time.time()
+            reason, payload = companion._due_reason(now)
+            high_priority = reason == "event"
+            if is_quiet_hours(settings, datetime.fromtimestamp(now)) and not high_priority:
+                return "quiet_hours"
+            allowed, budget_reason = self.dispatcher.agent_runtime.proactive.allowed(
+                self.dispatcher.config, "owner:{}".format(owner_id),
+                topic=(payload or {}).get("topic", reason) if isinstance(payload, dict) else reason,
+                is_private=True, now=now, priority="urgent" if high_priority else "normal")
+            if not allowed and not (high_priority and budget_reason == "quiet_hours"):
+                return budget_reason
+            result = await companion.decide(self.dispatcher, now=now)
+            return "queued" if result else "idle"
+        except Exception as error:
+            log.warning("Owner companion run failed: %s", error)
+            return "error"
 
     async def _run_owner_task(self):
         settings = self.dispatcher.config.get("agent", {})

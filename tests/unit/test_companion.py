@@ -2,6 +2,7 @@ import json
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -44,7 +45,8 @@ class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
     def test_idle_checkin_waits_at_least_eight_hours(self):
         with tempfile.TemporaryDirectory() as root:
             runtime = CompanionRuntime({"bot_owner": 100, "agent": {}}, Path(root) / "data" / "agent")
-            now = time.time()
+            # Pin to noon: at 20:00 the time check-in reason would fire first.
+            now = datetime(2024, 1, 15, 12, 0, 0).timestamp()
             state = runtime.state()
             state["last_interaction_at"] = now - 7 * 3600
             state["last_outgoing_at"] = now - 7 * 3600
@@ -97,6 +99,60 @@ class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
                 result = await runtime.decide(dispatcher, now=now, force=True)
             self.assertEqual(len(result["message_parts"]), 1)
             self.assertEqual(len(result["message_parts"][0]), 120)
+
+    async def test_refused_decision_consumes_followup_trigger(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = {"bot_owner": 100, "agent": {"companion_min_gap_seconds": 300}}
+            runtime = CompanionRuntime(config, Path(root) / "data" / "agent")
+            now = time.time()
+            runtime.store.add_followup(100, "unfinished", {"seed": "刚才的话题"}, now - 1)
+            dispatcher = type("Dispatcher", (), {
+                "config": config, "client": type("Client", (), {"session": None})(),
+                "roleplay": None,
+            })()
+            with patch("bot.agent.companion_runtime._call_deepseek", new=AsyncMock(return_value='[{"broken')):
+                result = await runtime.decide(dispatcher, now=now)
+            self.assertIsNone(result)
+            self.assertEqual(runtime.store.due_followups(100, now), [])
+
+    async def test_ai_error_consumes_time_trigger(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = {"bot_owner": 100, "agent": {}}
+            runtime = CompanionRuntime(config, Path(root) / "data" / "agent")
+            now = datetime.now().replace(hour=20, minute=0, second=0, microsecond=0).timestamp()
+            dispatcher = type("Dispatcher", (), {
+                "config": config, "client": type("Client", (), {"session": None})(),
+                "roleplay": None,
+            })()
+            with patch("bot.agent.companion_runtime._call_deepseek",
+                       new=AsyncMock(side_effect=RuntimeError("boom"))):
+                result = await runtime.decide(dispatcher, now=now)
+            self.assertIsNone(result)
+            bucket = datetime.fromtimestamp(now).strftime("%Y%m%d%H")
+            self.assertEqual(runtime.state()["last_time_bucket"], bucket)
+
+    async def test_non_numeric_ai_fields_are_clamped_not_raised(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = {"bot_owner": 100, "agent": {"companion_min_gap_seconds": 300}}
+            runtime = CompanionRuntime(config, Path(root) / "data" / "agent")
+            now = time.time()
+            response = json.dumps({
+                "should_send": True, "priority": "normal", "topic": "checkin",
+                "message_parts": ["最近怎么样？"], "emotion_delta": {},
+                "memory_candidates": [{"category": "note", "key": "k", "content": "主人喜欢蓝色", "confidence": "很高"}],
+                "followup": {"enabled": True, "max_attempts": "很多次"}, "media_request": {},
+            }, ensure_ascii=False)
+            dispatcher = type("Dispatcher", (), {
+                "config": config, "client": type("Client", (), {"session": None})(),
+                "roleplay": None,
+            })()
+            with patch("bot.agent.companion_runtime._call_deepseek", new=AsyncMock(return_value=response)):
+                result = await runtime.decide(dispatcher, now=now, force=True)
+            self.assertIsNotNone(result)
+            fact = runtime.store.list_facts(100, "蓝色")[0]
+            self.assertEqual(fact["confidence"], 0.0)
+            followups = runtime.store.due_followups(100, now + 21 * 60)
+            self.assertEqual(followups[0]["max_attempts"], 1)
 
 
 class CompanionOutboxTests(unittest.IsolatedAsyncioTestCase):
@@ -152,6 +208,24 @@ class CompanionOutboxTests(unittest.IsolatedAsyncioTestCase):
                 [item[1][0]["data"]["text"] for item in dispatcher.client.sent],
                 ["第一段", "第二段"],
             )
+
+
+class CompanionWorkerGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_companion_error_is_contained(self):
+        config = {"bot_owner": 100, "agent": {}}
+        companion = type("Companion", (), {
+            "_due_reason": lambda self, now: ("event", {"id": "e1", "topic": "t"}),
+            "decide": AsyncMock(side_effect=RuntimeError("boom")),
+        })()
+        runtime = type("Runtime", (), {
+            "companion": companion,
+            "proactive": type("Proactive", (), {
+                "allowed": lambda self, *a, **k: (True, ""),
+            })(),
+        })()
+        dispatcher = type("Dispatcher", (), {"config": config, "agent_runtime": runtime})()
+        status = await AgentWorker(dispatcher)._run_owner_companion()
+        self.assertEqual(status, "error")
 
 
 class ProviderPriorityTests(unittest.IsolatedAsyncioTestCase):

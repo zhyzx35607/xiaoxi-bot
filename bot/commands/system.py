@@ -20,7 +20,7 @@ from ..permission import (
 from ..events.context import _service_state
 from ..services.confirmations import create_confirmation
 from ..utils import atomic_write_json
-from .common import CONFIG_PATH, _load, _save, resolve_scoped_group_targets
+from .common import CONFIG_PATH, _commit, _load, _save, resolve_scoped_group_targets
 from .random_image import RANDOM_IMAGE_HELP
 
 log = logging.getLogger("qqbot")
@@ -447,8 +447,7 @@ async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
             g.setdefault("security", {})[key] = enabled
         else:
             cfg.setdefault("security", {})[key] = enabled
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "{}已{}".format(name, "开启" if enabled else "关闭"))
         return
     if len(parts) >= 2 and parts[0] in ("ban", "禁言"):
@@ -463,8 +462,7 @@ async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
             g.setdefault("security", {})["ban_seconds"] = seconds
         else:
             cfg.setdefault("security", {})["ban_seconds"] = seconds
-        _save(cfg)
-        d.config = cfg
+        _commit(d, cfg)
         await d._reply(group_id, user_id, "安全禁言秒数已设为 " + str(seconds))
         return
     await d._reply(group_id, user_id, "用法：/安全 status | /安全 log | /安全 url on/off | /安全 gray on/off | /安全 punish on/off | /安全 ban 秒数")

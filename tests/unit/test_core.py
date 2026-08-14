@@ -502,6 +502,23 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(long, 8.0)
         self.assertGreaterEqual(long, short)
 
+    def test_commit_config_keeps_env_secrets_in_memory_only(self):
+        from bot.commands import common
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            dispatcher = type("DispatcherStub", (), {"config": {}})()
+            with patch.object(common, "CONFIG_PATH", path), \
+                    patch.dict(os.environ, {"QQBOT_DEEPSEEK_API_KEY": "env-secret"}):
+                common._commit(dispatcher, {"groups": {}})
+            self.assertEqual(dispatcher.config["deepseek_api_key"], "env-secret")
+            with open(path, encoding="utf-8") as f:
+                saved = json.load(f)
+            self.assertNotIn("deepseek_api_key", saved)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
     def test_save_group_config_strips_secrets(self):
         import tempfile, os, json
         from bot.utils import atomic_write_json
@@ -667,7 +684,24 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
         call_mock.assert_awaited_once_with(
             "send_group_forward_msg",
             {"group_id": 100, "messages": [{"type": "node"}]},
-            timeout=60,
+            timeout=120,
+        )
+
+    async def test_forward_timeout_is_configurable(self):
+        from unittest.mock import AsyncMock
+
+        client = OneBotClient({
+            "ws_url": "ws://127.0.0.1:3001", "token": "",
+            "bot_qq": 222,
+            "runtime": {"api_timeout_seconds": 8, "forward_timeout_seconds": 30},
+        })
+        with patch.object(client, "call", new=AsyncMock(
+                return_value={"status": "ok"})) as call_mock:
+            await client.send_group_forward_msg(100, [{"type": "node"}])
+        call_mock.assert_awaited_once_with(
+            "send_group_forward_msg",
+            {"group_id": 100, "messages": [{"type": "node"}]},
+            timeout=30,
         )
 
     async def test_media_messages_use_extended_timeout(self):
@@ -1428,9 +1462,14 @@ class SchedulerJobTests(unittest.TestCase):
                 "hotboard_push": {"enabled": True, "times": [9, 21]},
             }
 
+        # Pin "now" to 01:00 in the scheduler timezone so every randomized
+        # slot later today is still pending regardless of wall-clock time.
+        fixed_now = datetime.now(scheduler._timezone()).replace(
+            hour=1, minute=0, second=0, microsecond=0).timestamp()
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "acg.json")
-            with patch.object(scheduler, "_ACG_HISTORY_PATH", path):
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch.object(scheduler.time, "time", return_value=fixed_now):
                 jobs = scheduler._scheduled_jobs(Stub())
         names = {job[0] for job in jobs}
         self.assertIn("checkin", names)
@@ -2200,14 +2239,16 @@ class AcgPushTests(unittest.IsolatedAsyncioTestCase):
                 scheduler._save_acg_state(state)
                 await scheduler._try_send_acg_delivery(stub)
                 state = scheduler._load_acg_state()
-            self.assertEqual(len(sent), 1)
-            image_nodes = [node for node in sent[0][1]
-                           if isinstance(node["data"]["content"], list)]
-            self.assertEqual(len(image_nodes), 20)
-            header = sent[0][1][0]["data"]["content"]
-            self.assertRegex(
-                header, r"^小汐的每日图片 · 批次 #\d{4}-[0-9a-f]{6} · 共20张$")
-            self.assertNotIn("?", header)
+            self.assertEqual(len(sent), 2)
+            for call_index, (group_id, nodes) in enumerate(sent):
+                image_nodes = [node for node in nodes
+                               if isinstance(node["data"]["content"], list)]
+                self.assertEqual(len(image_nodes), 10)
+                header = nodes[0]["data"]["content"]
+                self.assertRegex(
+                    header, r"^小汐的每日图片 · 批次 #\d{4}-[0-9a-f]{6}-%d · 共10张$"
+                    % (call_index + 1))
+                self.assertNotIn("?", header)
             self.assertEqual(len(state["pool"]), 5)
             self.assertFalse(state["pending_due"])
             self.assertIsNone(state["delivery"])

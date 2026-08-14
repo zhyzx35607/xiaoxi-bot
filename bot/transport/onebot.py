@@ -30,6 +30,7 @@ class OneBotClient:
         self._queue_size = int(runtime.get("ws_queue_size", 50))
         self._max_event_tasks = int(runtime.get("max_event_tasks", 8))
         self._api_timeout = int(runtime.get("api_timeout_seconds", 8))
+        self._forward_timeout = int(runtime.get("forward_timeout_seconds", 120))
         self._connect_timeout = float(runtime.get("connect_timeout_seconds", 5))
         self._reconnect_max_delay = float(runtime.get("reconnect_max_delay_seconds", 60))
         self._dispatch_sem = asyncio.Semaphore(self._max_event_tasks)
@@ -598,7 +599,7 @@ class OneBotClient:
         return await self.call("send_group_forward_msg", {
             "group_id": group_id,
             "messages": messages,
-        }, timeout=max(self._api_timeout, 60))
+        }, timeout=max(self._api_timeout, self._forward_timeout))
 
     async def send_private_forward_msg(self, user_id, messages):
         return await self.call("send_private_forward_msg", {

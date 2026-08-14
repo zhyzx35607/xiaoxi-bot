@@ -71,6 +71,7 @@ class ContentConfigMigrationTests(unittest.TestCase):
         self.assertFalse(config["hotboard_push"]["enabled"])
         self.assertFalse(config["voice_reply"]["enabled"])
         self.assertEqual(config["acg_images"]["send_count"], 20)
+        self.assertEqual(config["acg_images"]["images_per_forward"], 10)
         self.assertEqual(config["acg_images"]["dedupe_days"], 7)
         self.assertEqual(config["acg_images"]["max_delivery_attempts"], 3)
         self.assertEqual(config["acg_images"]["retry_base_seconds"], 300)
@@ -83,6 +84,7 @@ class ContentConfigMigrationTests(unittest.TestCase):
         self.assertNotIn("batch_size", config["acg_images"])
         self.assertNotIn("times", config["hotboard_push"])
         self.assertEqual(config["runtime"]["startup_connect_timeout_seconds"], 30)
+        self.assertEqual(config["runtime"]["forward_timeout_seconds"], 120)
         self.assertEqual(config["runtime"]["media_timeout_seconds"], 12)
         self.assertEqual(config["runtime"]["image_ocr_max_attempts"], 2)
         self.assertEqual(config["runtime"]["owner_private_merge_seconds"], 5)
@@ -576,6 +578,157 @@ class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 state = scheduler._load_acg_state()
 
         self.assertEqual(sent, [])
+        self.assertIsNone(state["delivery"])
+        self.assertFalse(state["pending_due"])
+
+    async def test_acg_delivery_splits_batch_into_sub_forwards(self):
+        sent = []
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append((group_id, nodes))
+                return {"status": "ok", "retcode": 0}
+
+        class Stub:
+            config = {
+                "bot_qq": 1,
+                "acg_images": {"enabled": True, "images_per_forward": 10},
+                "groups": {"100": {"enabled": True, "features": {"acg_images": True}}},
+            }
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch.object(scheduler.asyncio, "sleep", new=AsyncMock()):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "split-batch",
+                    "urls": ["https://example.com/{}.jpg".format(index) for index in range(20)],
+                    "remaining_groups": ["100"],
+                    "attempts": {},
+                    "created_at": time.time(),
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                self.assertTrue(await scheduler._try_send_acg_delivery(Stub()))
+                state = scheduler._load_acg_state()
+
+        self.assertEqual(len(sent), 2)
+        for index, (group_id, nodes) in enumerate(sent):
+            self.assertEqual(group_id, 100)
+            image_nodes = [node for node in nodes
+                           if isinstance(node["data"]["content"], list)]
+            self.assertEqual(len(image_nodes), 10)
+            self.assertIn("#split-batch-{}".format(index + 1),
+                          nodes[0]["data"]["content"])
+        self.assertIsNone(state["delivery"])
+        self.assertFalse(state["pending_due"])
+
+    async def test_acg_delivery_sub_forward_failure_keeps_group_pending(self):
+        sent = []
+        fail_second = [True]
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append((group_id, nodes))
+                if fail_second[0] and len(sent) == 2:
+                    return {"status": "failed", "retcode": 1200}
+                return {"status": "ok", "retcode": 0}
+
+            async def get_group_msg_history(self, group_id, count=20):
+                return {"messages": []}
+
+        class Stub:
+            config = {
+                "bot_qq": 1,
+                "acg_images": {"enabled": True, "images_per_forward": 10},
+                "groups": {"100": {"enabled": True, "features": {"acg_images": True}}},
+            }
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch.object(scheduler.asyncio, "sleep", new=AsyncMock()):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "partial-batch",
+                    "urls": ["https://example.com/{}.jpg".format(index) for index in range(20)],
+                    "remaining_groups": ["100"],
+                    "attempts": {},
+                    "created_at": time.time(),
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                self.assertFalse(await scheduler._try_send_acg_delivery(Stub()))
+                state = scheduler._load_acg_state()
+                self.assertEqual(len(sent), 2)
+                self.assertEqual(state["delivery"]["remaining_groups"], ["100"])
+                self.assertEqual(state["delivery"]["attempts"], {"100": 1})
+                fail_second[0] = False
+                state["delivery"]["next_retry_at"] = 0
+                scheduler._save_acg_state(state)
+                self.assertTrue(await scheduler._try_send_acg_delivery(Stub()))
+                state = scheduler._load_acg_state()
+
+        self.assertEqual(len(sent), 4)
+        self.assertIsNone(state["delivery"])
+        self.assertFalse(state["pending_due"])
+
+    async def test_acg_delivery_timeout_waits_then_recovers_from_history(self):
+        sent = []
+        history_counts = []
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append((group_id, nodes))
+                return {"status": "timeout", "retcode": -1}
+
+            async def get_group_msg_history(self, group_id, count=20):
+                history_counts.append(count)
+                return {"messages": [{"raw_message": "批次 #timeout-batch-1"}]}
+
+        class Stub:
+            config = {
+                "bot_qq": 1,
+                "acg_images": {"enabled": True},
+                "groups": {"100": {"enabled": True, "features": {"acg_images": True}}},
+            }
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            sleep_mock = AsyncMock()
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch.object(scheduler.asyncio, "sleep", new=sleep_mock):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "timeout-batch",
+                    "urls": ["https://example.com/a.jpg"],
+                    "remaining_groups": ["100"],
+                    "attempts": {},
+                    "created_at": time.time(),
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                self.assertTrue(await scheduler._try_send_acg_delivery(Stub()))
+                state = scheduler._load_acg_state()
+                # A second pass must not resend the recovered batch.
+                self.assertFalse(await scheduler._try_send_acg_delivery(Stub()))
+
+        sleep_mock.assert_any_await(15)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(history_counts, [50])
         self.assertIsNone(state["delivery"])
         self.assertFalse(state["pending_due"])
 

@@ -239,11 +239,16 @@ class CompanionRuntime:
         except Exception as error:
             log.debug("Companion roleplay state unavailable: %s", error)
         prompt = self._build_prompt(reason, payload, now, roleplay_hint)
-        async with self._lock:
-            raw = await _call_deepseek(dispatcher.config, [{"role": "user", "content": prompt}],
-                                       max_tokens=int(settings.get("companion_max_tokens", 700)),
-                                       temperature=float(settings.get("companion_temperature", 0.85)),
-                                       session=getattr(dispatcher.client, "session", None))
+        try:
+            async with self._lock:
+                raw = await _call_deepseek(dispatcher.config, [{"role": "user", "content": prompt}],
+                                           max_tokens=int(settings.get("companion_max_tokens", 700)),
+                                           temperature=float(settings.get("companion_temperature", 0.85)),
+                                           session=getattr(dispatcher.client, "session", None))
+        except Exception as error:
+            log.warning("Companion decide AI call failed reason=%s: %s", reason, error)
+            self._consume_trigger(reason, payload, now, state)
+            return None
         result = self._parse_result(raw)
         if result is None and reason == "event" and payload:
             result = {
@@ -254,6 +259,7 @@ class CompanionRuntime:
                 "memory_candidates": [], "followup": {"enabled": True, "max_attempts": 3}, "media_request": {},
             }
         if not result or not result.get("message_parts"):
+            self._consume_trigger(reason, payload, now, state)
             return None
         if reason not in {"event", "followup"} and str(
                 result.get("priority") or "normal") != "urgent":
@@ -271,14 +277,14 @@ class CompanionRuntime:
         self.store.enqueue(self.owner_id, topic, {"message_parts": result["message_parts"], "media_request": result.get("media_request") or {}}, now, priority, key)
         for candidate in result.get("memory_candidates") or []:
             if isinstance(candidate, dict) and candidate.get("content") and not contains_sensitive_data(candidate["content"]):
-                self.store.upsert_fact(self.owner_id, candidate.get("category", "note"), candidate.get("key", candidate["content"][:80]), candidate["content"], candidate.get("value"), "sigmai", float(candidate.get("confidence", 0.65)))
+                self.store.upsert_fact(self.owner_id, candidate.get("category", "note"), candidate.get("key", candidate["content"][:80]), candidate["content"], candidate.get("value"), "sigmai", _clamp(candidate.get("confidence", 0.65)))
         if reason == "event" and payload:
             self.store.mark_event_triggered(payload.get("id"), datetime.fromtimestamp(now).strftime("%Y"))
         followup = result.get("followup") or {}
         if reason == "followup" and payload:
             self.store.finish_followup(payload.get("id"), now + 12 * 3600)
             next_attempt = int(payload.get("attempt", 0)) + 1
-            max_attempts = int(payload.get("max_attempts", 4))
+            max_attempts = int(_clamp(payload.get("max_attempts", 4), 1, 5))
             delays = (45 * 60, 90 * 60, 180 * 60)
             if next_attempt < max_attempts and state.get("followup_enabled", True):
                 delay = delays[min(next_attempt - 1, len(delays) - 1)]
@@ -288,8 +294,18 @@ class CompanionRuntime:
         elif followup.get("enabled") and state.get("followup_enabled", True):
             self.store.add_followup(
                 self.owner_id, topic, {"seed": result["message_parts"][-1]},
-                now + 20 * 60, 0, int(followup.get("max_attempts", 4)))
+                now + 20 * 60, 0, int(_clamp(followup.get("max_attempts", 4), 1, 5)))
         return {"topic": topic, "priority": priority, "reason": reason, "message_parts": result["message_parts"]}
+
+    def _consume_trigger(self, reason, payload, now, state):
+        """Advance the trigger source so a failed decision is not retried every tick."""
+        if reason == "event" and payload:
+            self.store.mark_event_triggered(payload.get("id"), datetime.fromtimestamp(now).strftime("%Y"))
+        elif reason == "followup" and payload:
+            self.store.finish_followup(payload.get("id"), now + 12 * 3600)
+        if reason == "time":
+            state["last_time_bucket"] = datetime.fromtimestamp(now).strftime("%Y%m%d%H")
+            self.store.save_state(self.owner_id, state)
 
     def _build_prompt(self, reason, payload, now, roleplay_hint=""):
         dt = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M")

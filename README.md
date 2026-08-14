@@ -197,7 +197,8 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 `/status` — 看运行状态、内存、在线时间
 `/AI状态` — 看 SigmaI / DeepSeek 供应商状态
 `/私聊AI on/off/allow QQ/deny QQ` — 私聊 AI 总开关与开放名单
-`/AI聊天 on/off` — 开关本群的 AI 聊天（私聊里用 `/AI聊天 群号 on/off`）
+`/AI聊天 on/off` — 开关本群的 AI 聊天（私聊里用 `/AI聊天 群号1 群号2 ... on/off`，多群号可用空格/逗号分隔，`all` 表示全部已配置群）
+`/acg图 群号... on/off` `/热榜推送 群号... on/off` `/b站解析 群号... on/off` `/gal资源 群号... on/off` — 私聊跨群开关对应功能，群号用法同上（支持多群号和 `all`）
 `/打卡状态` `/打卡测试 群号` — 群打卡
 `/list` — 所有群的概览
 `/log [N]` — 看最近 N 条日志

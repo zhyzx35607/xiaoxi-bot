@@ -3,7 +3,7 @@
 import re
 import time
 
-from ..permission import LEVEL_GOWNER, LEVEL_SUPER, get_group_config, get_user_level, save_group_config
+from ..permission import LEVEL_GOWNER, LEVEL_SUPER, get_user_level, save_group_config
 
 
 def _scope_key(group_id, user_id):
@@ -329,7 +329,8 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
             await dispatcher._reply(group_id, user_id, "\u7fa4\u57df\u4e3b\u52a8 Agent \u53ea\u80fd\u7531\u6700\u9ad8\u4e3b\u4eba\u6216\u5f53\u524d\u7fa4\u4e3b\u5728\u7fa4\u91cc\u8bbe\u7f6e")
             return
         enabled = value.lower() in {"on", "\u5f00\u542f", "1", "true"}
-        group_agent = get_group_config(dispatcher, group_id).setdefault("agent", {})
+        group_agent = dispatcher.config.setdefault("groups", {}).setdefault(
+            str(group_id), {}).setdefault("agent", {})
         group_agent["proactive_enabled"] = enabled
         group_agent["primary_router"] = enabled
         save_group_config(dispatcher)
