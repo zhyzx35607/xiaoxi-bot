@@ -529,8 +529,7 @@ class AgentGroupProactiveCommandTests(unittest.IsolatedAsyncioTestCase):
             group_agent = dispatcher.config["groups"]["300"]["agent"]
             self.assertTrue(group_agent["proactive_enabled"])
             self.assertTrue(group_agent["primary_router"])
-            with open(config_path, encoding="utf-8") as f:
-                saved = json.load(f)
+            saved = json.loads(Path(config_path).read_text(encoding="utf-8"))
             self.assertTrue(saved["groups"]["300"]["agent"]["proactive_enabled"])
             dispatcher._reply.assert_awaited_once()
 
