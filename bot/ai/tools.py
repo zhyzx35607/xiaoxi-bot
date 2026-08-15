@@ -130,9 +130,13 @@ async def _chat_with_tools(dispatcher, messages, tools, group_id, user_id,
             content = (message.get("content") or "").strip()
             if not tool_calls:
                 return content or None
+            # Only the answered subset goes back into the conversation: an
+            # assistant message carrying unanswered tool_call ids violates the
+            # OpenAI chat schema and makes strict providers return 400.
+            answered = tool_calls[:3]
             conversation.append({"role": "assistant", "content": content or None,
-                                 "tool_calls": tool_calls})
-            for call in tool_calls[:3]:
+                                 "tool_calls": answered})
+            for call in answered:
                 fn = call.get("function", {}) if isinstance(call, dict) else {}
                 name = fn.get("name", "")
                 try:

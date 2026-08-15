@@ -36,14 +36,14 @@ class DelayedReplyServiceMixin:
                 now = time.time()
                 while self._delayed_queue and self._delayed_queue[0][0] <= now:
                     entry = heapq.heappop(self._delayed_queue)
-                    if entry[5] is None:
+                    if entry[6] is None:
                         continue  # stale entry (merged or cancelled)
-                    key = (entry[1], entry[2])
+                    key = (entry[2], entry[3])
                     if self._delayed_queue_index.get(key) is not entry:
                         continue  # stale entry
                     del self._delayed_queue_index[key]
                     self.create_background_task(
-                        self._trigger_delayed_reply(entry[1], entry[2], entry[3], entry[4], entry[5], entry[6]),
+                        self._trigger_delayed_reply(entry[2], entry[3], entry[4], entry[5], entry[6], entry[7]),
                         name="delayed-reply",
                     )
                 if not self._delayed_queue:
@@ -74,13 +74,16 @@ class DelayedReplyServiceMixin:
         now = time.time()
         existing = self._delayed_queue_index.get(key)
         if existing:
-            existing[5] = None  # mark old entry stale
+            existing[6] = None  # mark old entry stale
             del self._delayed_queue_index[key]
         if len(self._delayed_queue_index) >= self._delayed_queue_cap:
             log.debug("Delayed queue full, dropping candidate from group=%s user=%s", group_id, user_id)
             return
         delay = random.randint(60, 300)
-        entry = [now + delay, group_id, user_id, message_id, message, raw, sender_card]
+        # entry[1] is a monotonic sequence so heapq never has to compare
+        # group_id values (int/str mix would raise TypeError on timestamp ties).
+        self._delayed_queue_seq += 1
+        entry = [now + delay, self._delayed_queue_seq, group_id, user_id, message_id, message, raw, sender_card]
         heapq.heappush(self._delayed_queue, entry)
         self._delayed_queue_index[key] = entry
         self._delayed_queue_event.set()
@@ -96,8 +99,6 @@ class DelayedReplyServiceMixin:
         log.debug("Delayed reply firing group=%s user=%s", group_id, user_id)
 
         if is_blacklisted(group_id, user_id):
-            return
-        if message_id and message_id in self._seen_msg_ids:
             return
 
         import re as _re_clean

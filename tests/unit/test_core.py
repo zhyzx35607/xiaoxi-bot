@@ -2303,7 +2303,7 @@ class DelayedQueueWorkerTests(unittest.IsolatedAsyncioTestCase):
         import heapq, time as _time
         from bot.dispatcher import Dispatcher
         d = Dispatcher.__new__(Dispatcher)
-        entry = [_time.time() + 300, 1, 2, 0, [], "hi", "n"]
+        entry = [_time.time() + 300, 0, 1, 2, 0, [], "hi", "n"]
         d._delayed_queue = [entry]
         d._delayed_queue_index = {(1, 2): entry}
         d._delayed_queue_event = asyncio.Event()
@@ -2331,7 +2331,7 @@ class DelayedQueueWorkerTests(unittest.IsolatedAsyncioTestCase):
         import time as _time
         from bot.dispatcher import Dispatcher
         d = Dispatcher.__new__(Dispatcher)
-        entry = [_time.time() - 1, 1, 2, 0, [], "hi", "n"]
+        entry = [_time.time() - 1, 0, 1, 2, 0, [], "hi", "n"]
         d._delayed_queue = [entry]
         d._delayed_queue_index = {(1, 2): entry}
         d._delayed_queue_event = asyncio.Event()
@@ -2347,6 +2347,48 @@ class DelayedQueueWorkerTests(unittest.IsolatedAsyncioTestCase):
             pass
         self.assertEqual(len(fired), 1)
         self.assertEqual(d._delayed_queue_index, {})
+
+    async def test_enqueue_survives_timestamp_tie_with_mixed_group_id_types(self):
+        # Regression: heapq compares entry[1] on timestamp ties; a mixed
+        # int/str group_id pair raised TypeError and killed the worker.
+        import heapq
+        from bot.dispatcher import Dispatcher
+        d = Dispatcher.__new__(Dispatcher)
+        d._delayed_queue = []
+        d._delayed_queue_index = {}
+        d._delayed_queue_cap = 20
+        d._delayed_queue_event = asyncio.Event()
+        d._delayed_queue_seq = 0
+        with patch("bot.services.delayed_reply.time.time", return_value=1000.0), \
+                patch("bot.services.delayed_reply.random.randint", return_value=60):
+            await d._enqueue_delayed_reply(100, 1, 10, [], "完全不同的消息甲", "A")
+            await d._enqueue_delayed_reply("200", 2, 20, [], "完全不同的消息乙", "B")
+        self.assertEqual(len(d._delayed_queue), 2)
+        fired = [heapq.heappop(d._delayed_queue), heapq.heappop(d._delayed_queue)]
+        self.assertEqual({entry[2] for entry in fired}, {100, "200"})
+
+    async def test_delayed_reply_fires_for_already_seen_message_id(self):
+        # Regression: the only enqueue path runs after message_id is recorded
+        # in _seen_msg_ids, so the dedup check in _trigger_delayed_reply
+        # always hit and the delayed interjection could never fire.
+        from unittest.mock import AsyncMock
+        from bot import ai as ai_module
+
+        dispatcher = Dispatcher({
+            "runtime": {}, "bot_owner": 111, "bot_qq": 222,
+            "groups": {"9001": {"enabled": True}},
+        }, object())
+        dispatcher._seen_msg_ids[777] = time.time()
+        with patch.object(ai_module, "handle_ai_chat",
+                          new=AsyncMock(return_value="确实好看")) as ai_mock, \
+                patch.object(ai_module, "_schedule_state",
+                             return_value=("active", "")), \
+                patch.object(dispatcher, "_get_image_context",
+                             new=AsyncMock(return_value="")):
+            await dispatcher._trigger_delayed_reply(
+                9001, 333, 777, [], "这本书真的太好看了强烈推荐", "路人")
+        ai_mock.assert_called_once()
+        self.assertIn(9001, dispatcher._group_interject_ts)
 
 
 class AIToolRegistryTests(unittest.TestCase):
@@ -2746,6 +2788,113 @@ class ChatWithToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured.get("tools"), tools)
         self.assertEqual(captured.get("tool_choice"), "auto")
         self.assertEqual(message, {"content": "ok"})
+
+    async def test_only_answered_tool_calls_are_written_back(self):
+        # Regression: the full tool_calls list was appended to the
+        # conversation while only the first 3 were answered; strict providers
+        # then reject the next request (400) for unanswered tool_call ids.
+        import ai_tools
+        from bot import ai as ai_module
+
+        async def fake_execute(dispatcher, name, args, **kw):
+            return {"ok": True, "tool": name}
+
+        many_calls = [
+            {"id": "call_%d" % i, "type": "function",
+             "function": {"name": "uapi_saying", "arguments": "{}"}}
+            for i in range(5)
+        ]
+        responses = [
+            {"content": None, "tool_calls": many_calls},
+            {"content": "好了"},
+        ]
+        seen = []
+
+        async def fake_inner(config, messages, max_tokens=400, temperature=0.7,
+                             session=None, tools=None):
+            seen.append([dict(m) for m in messages])
+            return responses.pop(0)
+
+        ai_module._PROVIDER_NO_TOOLS.clear()
+        with patch.object(ai_module, "_call_deepseek_inner", new=fake_inner), \
+             patch.object(ai_tools, "execute_ai_tool", new=fake_execute):
+            reply = await ai_module._chat_with_tools(
+                self._stub(), [{"role": "user", "content": "来几言"}],
+                ai_tools.build_tool_schemas(explicit=True), 100, 333)
+        self.assertEqual(reply, "好了")
+        assistant = next(m for m in seen[1] if m.get("role") == "assistant")
+        self.assertEqual(len(assistant["tool_calls"]), 3)
+        tool_msgs = [m for m in seen[1] if m.get("role") == "tool"]
+        self.assertEqual(len(tool_msgs), 3)
+        self.assertEqual({m["tool_call_id"] for m in tool_msgs},
+                         {c["id"] for c in assistant["tool_calls"]})
+
+    async def test_legacy_tool_loop_injected_group_id_is_filtered(self):
+        # Regression: the legacy JSON loop injects group_id into every tool
+        # call; handlers like uapi_weather don't accept it and always failed
+        # with a swallowed TypeError (tool_failed).
+        import ai_tools
+
+        dispatcher = type("D", (), {"config": {}})()
+        weather = {
+            "city": "杭州", "weather": "晴", "temperature": "26",
+            "wind_direction": "东风", "wind_power": "3级",
+            "humidity": "60%", "report_time": "2024-01-01 12:00",
+        }
+        with patch("bot.uapi.credits_available", return_value=True), \
+                patch("bot.uapi.uapi_get", new=AsyncMock(return_value=weather)):
+            result = await ai_tools.execute_tool(
+                dispatcher, "uapi_weather", {"city": "杭州", "group_id": 100})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["city"], "杭州")
+
+    async def test_known_no_tools_provider_is_skipped_with_tools(self):
+        # Regression: a provider already known to reject tools was still
+        # called with tools on every round, paying for a guaranteed 400.
+        from bot import ai as ai_module
+        calls = []
+
+        class Response:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def json(self):
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+        class Session:
+            def post(self, url, **kwargs):
+                calls.append(url)
+                return Response()
+
+        config = {
+            "sigmai_api_key": "sigma", "sigmai_base_url": "https://sigma.test/v1",
+            "sigmai_model": "DeepSeek-V4-Flash",
+            "deepseek_api_key": "deep", "deepseek_base_url": "https://deepseek.test",
+            "deepseek_model": "deepseek-chat",
+            "runtime": {},
+        }
+        sigmai_key = ("https://sigma.test/v1", "DeepSeek-V4-Flash")
+        tools = [{"type": "function", "function": {
+            "name": "uapi_saying", "description": "x",
+            "parameters": {"type": "object", "properties": {}, "required": []}}}]
+        ai_module._PROVIDER_NO_TOOLS.add(sigmai_key)
+        try:
+            with patch.dict("os.environ", {
+                    "SIGMAI_API_KEY": "", "QQBOT_SIGMAI_API_KEY": "",
+                    "SIGMAI_BASE_URL": "", "SIGMAI_MODEL": "",
+                    "DEEPSEEK_API_KEY": "", "QQBOT_DEEPSEEK_API_KEY": ""}):
+                message = await ai_module._call_deepseek_inner(
+                    config, [{"role": "user", "content": "hi"}],
+                    session=Session(), tools=tools)
+        finally:
+            ai_module._PROVIDER_NO_TOOLS.discard(sigmai_key)
+        self.assertEqual(message, {"content": "ok"})
+        self.assertEqual(calls, ["https://deepseek.test/chat/completions"])
 
 
 class SearchWebFallbackTests(unittest.IsolatedAsyncioTestCase):
