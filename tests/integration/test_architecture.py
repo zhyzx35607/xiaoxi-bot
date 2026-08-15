@@ -53,6 +53,22 @@ class ArchitectureRegressionTests(unittest.TestCase):
     def test_removed_security_monolith_does_not_return(self):
         self.assertFalse(os.path.exists(os.path.join(ROOT, "bot", "security.py")))
 
+    def test_compat_facades_resolve_mutable_state_live(self):
+        from bot import bilibili as bilibili_facade
+        from bot import uapi as uapi_facade
+        from bot.integrations import bilibili as bilibili_impl
+        from bot.integrations import uapi as uapi_impl
+
+        uapi_impl._state = {"marker": True}
+        self.assertIs(uapi_facade._state, uapi_impl._state)
+        uapi_facade.reset_state_for_test()
+        self.assertIsNone(uapi_facade._state)
+        self.assertIsNone(uapi_impl._state)
+
+        self.assertIs(bilibili_facade._state, bilibili_impl._state)
+        bilibili_facade.reset_state_for_test()
+        self.assertIs(bilibili_facade._state, bilibili_impl._state)
+
     def test_runtime_paths_remain_compatible(self):
         from bot.integrations import bilibili, uapi
         from bot.services import scheduler

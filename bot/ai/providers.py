@@ -273,10 +273,7 @@ def format_ai_provider_status(config):
                 "（{}）".format(item.get("last_error")) if item.get("last_error") else "",
             )
         )
-    fallback_delay = config.get("runtime", {}).get(
-        "sigmai_fallback_delay_seconds",
-        config.get("runtime", {}).get("agnes_fallback_delay_seconds", 6))
-    lines.append("SigmaI 超过 {} 秒未响应时并行启动 DeepSeek 兜底。".format(fallback_delay))
+    lines.append("SigmaI 失败或超时后会串行降级到 DeepSeek（先等 SigmaI 结束，不会并行兜底）。")
     return "\n".join(lines)
 
 async def _call_vision_api(config, image_url, session=None):
