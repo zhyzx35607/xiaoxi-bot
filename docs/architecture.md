@@ -17,6 +17,8 @@ app/
 
 bot/
 ├── ai/                prompts, providers, reply parsing, memory, stickers, search, tools
+├── agent/             agent plans, tools, stores, verifier and background workers
+├── roleplay/          roleplay cards, chats, world books, SQLite persistence
 ├── commands/          registry plus capability, admin, query, media and system domains
 ├── events/            context gates, routing, messages, notices, requests
 ├── transport/         OneBot WebSocket, actions, segments, long-output delivery
@@ -26,6 +28,11 @@ bot/
 ├── storage/           atomic JSON persistence
 └── dispatcher.py      state owner and external coordination facade
 ```
+
+Root-level `ai_tools.py` (AI tool execution: permission checks and quotas),
+`api_registry.py` (NapCat API capability registry) and `event_policy.py`
+(event subscription policy) are active production modules; `actions.py` is a
+compatibility wrapper.
 
 Legacy modules such as `bot.client`, `bot.bilibili`, `bot.scheduler`,
 `bot.touchgal`, and `bot.uapi` are compatibility proxies. Existing public

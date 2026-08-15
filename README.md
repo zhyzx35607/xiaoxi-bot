@@ -185,13 +185,14 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 `/list` — 群数据概览
 `/clearai` — 清本群数据（确认后先备份再清理）；最高主人私聊时需明确写群号或 `all`
 `/b站推送 add/del/list` — 盯 UP 主新投稿（mid 是 UP 主空间网址 space.bilibili.com/ 后面的数字，直接贴空间链接也行；详细用法发 `/help b站推送`）
+`/b站推送 atall on/off` — 推送时是否 @全体成员（默认开；只有 Bot 是管理/群主时才会 @）
 `/积分` — 看 uapis 积分额度
 
 最高主人和群主人可在 `/随机图` 后追加 `R18` 或 `混合`；其他身份始终固定为全年龄范围，并且响应元数据会再次校验 `x_restrict=0`。
 
-**群主才能用的（QQ 群主身份）：**
+**群主人（4 级）才能用的：**
 
-`/title @xxx 头衔` — 设专属头衔（Bot 得是群主）
+`/title @xxx 头衔` — 设专属头衔（Bot 得是群主，这是 QQ 的硬限制；调用者需群主人及以上）
 
 **Bot 主人的私聊命令（在私聊窗口发给 Bot）：**
 
@@ -216,7 +217,7 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 `/b站推送 add 群号 mid` — 盯 UP 主新投稿
 `/全体 群号 内容` — 跨群 @全体
 
-跨群管理：大部分命令可以用 `/<命令> 群号 参数` 的格式跨群操作，比如 `/kick 123456 @xxx`。
+跨群管理：仅限主人在私聊中使用 `/<命令> 群号 参数` 的格式跨群操作，比如私聊发 `/kick 123456 @xxx`。群聊里的命令只作用于本群，前置群号不会被解析。
 
 **不用前缀也能触发的：**
 
@@ -230,7 +231,7 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 
 ## 命令权限标记
 
-`bot/commands.py` 的 `register_all` 给每个命令打的权限标记，由 `bot/permission.py` 的 `check_permission` 统一校验。标记含义：
+`bot/commands/registry.py` 的 `register_all` 给每个命令打的权限标记，由 `bot/permission.py` 的 `check_permission` 统一校验。标记含义：
 
 | 标记 | 含义 |
 | --- | --- |
@@ -239,6 +240,7 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 | `bot_owner_required` | 机器人本人必须是 QQ 群主（头衔类操作，权限再高也绕不过 QQ 限制） |
 | `bot_owner` | bot 主人、机器人账号本身，或群内主人（master）可用 |
 | `bot_owner_only` | 仅 bot 主人 / 机器人账号本身可用 |
+| `owner_only` | QQ 群主或最高主人可用（当前只有 `/agent` 使用） |
 
 补充规则：bot 主人（`bot_owner` 配置的 QQ）和机器人账号（`bot_qq`）是 5 级 super，跳过一切校验；群内主人（master，4 级）跳过 `admin_only` 及之后的校验。
 
@@ -246,12 +248,15 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 
 | 标记组合 | 命令 |
 | --- | --- |
-| `bot_owner_only` | 好友列表、master、approve、reject |
-| `bot_owner` | sysmsg、clearai、enable、disable、list、私聊ai、ai聊天、b站推送、积分 |
-| `admin_only` | 安全、acg图、热榜推送、b站解析 |
-| `admin_only` + `bot_admin_required` | 删除文件、新建文件夹、删除文件夹、移动文件、重命名文件、删公告、setgroupavatar、kick、ban、unban、allban、welcome、badword、精华、删精华、公告、admin、全体 |
-| `admin_only` + `bot_owner_required` | title（头衔） |
-| 无标记（所有群成员） | api、群信息、成员、成员列表、文件状态、图片描述、表情回应、戳、陌生人信息、help、like、rank、weather（天气）、translate、calc、fortune、ocr、转发摘要、群文件、文件链接、精华列表、群荣誉、已读、history、禁言列表、info、转发、点赞信息、health、生图、mytitle、热榜（热搜）、一言、答案之书、每日新闻、必应壁纸、epic免费 |
+| `bot_owner_only` | 好友列表、master、approve、reject、好友、账号、实验、char、persona、chat、memory、world、mode、scene、bond |
+| `owner_only` | agent |
+| `bot_owner` | sysmsg、clearai、enable、disable、group、list、私聊ai、ai聊天、b站推送、积分、功能 |
+| `admin_only` | 安全、acg图、热榜推送、b站解析、gal资源、确认、取消确认、自动化（handler 实际要求群主人及以上） |
+| `admin_only` + `bot_admin_required` | 删除文件、新建文件夹、删除文件夹、移动文件、重命名文件、删公告、setgroupavatar、kick、ban、unban、allban、welcome、badword、精华、删精华、公告、admin、全体、群管 |
+| `admin_only` + `bot_owner_required` | title（头衔；handler 还要求调用者为群主人及以上） |
+| 无标记（所有群成员） | 消息、待办、相册、文件、互动、api、群、群信息、成员、成员列表、文件状态、图片描述、表情回应、戳、陌生人信息、help、like、rank、weather（天气）、translate、calc、fortune、ocr、转发摘要、群文件、文件链接、精华列表、群荣誉、已读、history、禁言列表、info、转发、点赞信息、health、生图、随机图（pixiv图）、mytitle、热榜（热搜）、一言、答案之书、每日新闻、必应壁纸、epic免费、二维码、节假日、每日单词、github、网址状态、敏感词、b站直播、b站用户、b站评论、云ocr、图片审核、gal（galgame/游戏资源） |
+
+主人私聊的系统命令（`/log`、`/status`、`/AI状态`、`/bl`、`/打卡状态`、`/打卡测试`、`/memory 群号`、`/sticker` 等）由私聊路由直接处理，仅 bot 主人可用，不经注册表标记。
 
 另外踢人/禁言类命令在执行时还会过 `can_moderate_target`：目标不能是 bot 主人或机器人账号（受保护），且操作者等级必须严格高于目标等级（super 除外）。
 
@@ -291,12 +296,18 @@ data/
 
 ```text
 main.py                    稳定入口，委托给 app.bootstrap
+ai_tools.py                AI 工具执行层（只读/互动/管理工具的权限校验与配额）
+api_registry.py            NapCat API 能力登记表（分类、风险、AI 可见性）
+event_policy.py            事件订阅策略
+actions.py                 兼容 wrapper
 app/
   config.py                配置加载、迁移和环境变量覆盖
   logging_setup.py         bot.log 与可选 chat.log 配置
   bootstrap.py             Client、Dispatcher 与后台任务生命周期
 bot/
   ai/                      AI 提示词、Provider、记忆、搜索和工具
+  agent/                   Agent 计划、工具、存储、验证和后台任务
+  roleplay/                角色扮演（角色卡、会话、世界书、SQLite 持久化）
   commands/                管理、查询、媒体、娱乐、能力分类与动态帮助
   events/                  事件范围、路由、群聊和私聊处理
   transport/               OneBot WebSocket、消息段与长消息输出
@@ -306,6 +317,13 @@ bot/
   storage/                 原子 JSON 持久化
   dispatcher.py            运行状态和模块协调
   permission.py            五级身份与权限判断
+  guard.py                 入群/消息守卫
+  media.py                 消息段与媒体辅助
+  memory.py                聊天记忆兼容入口
+  natural_triggers.py      免前缀自然语言命令触发
+  notice_handler.py        群通知事件处理兼容入口
+  request_handler.py       加群/好友请求处理兼容入口
+  utils.py                 共享帮助函数（时区、文本处理等）
 ```
 
 `bot.client`、`bot.bilibili`、`bot.scheduler`、`bot.touchgal`、`bot.uapi`
@@ -320,7 +338,7 @@ bot/
 - 最高主人明确呼叫小汐时始终回复；最高主人和配置群主人触发温柔、顺从、可爱的人格。
 - 新增 `/消息`、`/群管`、`/待办`、`/相册`、`/文件`、`/好友`、`/账号`、`/互动`、`/自动化`、`/实验` 分类入口。
 - 新增二维码、节假日、每日单词、GitHub、网址状态、敏感词、B站查询、云 OCR 和图片审核。
-- B站投稿与动态自动推送在 Bot 为管理员或群主时会把 `@全体成员` 放在消息最前面。
+- B站投稿与动态自动推送在 Bot 为管理员或群主时会把 `@全体成员` 放在消息最前面；打扰到群友时可用 `/b站推送 atall off` 按群关闭。
 ## 运行可靠性
 
 - 定时任务默认使用 `Asia/Shanghai` 时区，可通过 `runtime.scheduler_timezone` 调整。

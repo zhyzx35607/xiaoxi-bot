@@ -37,6 +37,7 @@ main.py                    稳定入口，只负责日志和启动流程
 app/                       配置、日志和进程生命周期
 bot/ai/                    AI Provider、提示词、记忆、搜索和回复解析
 bot/agent/                 Agent 计划、工具、存储、验证和后台任务
+bot/roleplay/              角色扮演（角色卡、会话、世界书、SQLite 持久化）
 bot/commands/              命令注册及按领域拆分的命令实现
 bot/events/                消息、通知、请求和路由
 bot/transport/             OneBot WebSocket、动作和消息输出
@@ -130,7 +131,7 @@ docs/                      架构、部署和运维文档
 ```bash
 git diff --check
 python -m pip install -r requirements.txt -r requirements-dev.txt
-python -m ruff check . --no-cache --select E9,F524,F63,F7,F82
+python -m ruff check . --no-cache --select E9,F524,F63,F7,F82,F811,F841,B023,ASYNC221,ASYNC230,S110,S112,PLW0602,PLW0211,G201
 python -m bandit -q -r app bot deploy -x tests --severity-level high --confidence-level high
 python scripts/sync_api_contracts.py --check
 python -m compileall -q -f .

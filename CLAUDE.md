@@ -60,7 +60,7 @@ should import canonical focused modules. See `docs/architecture.md` and
 
 **Private chat:** Gated by `private_chat` config (`enabled` default **false** + `allowed_users` list, toggled via `/私聊AI`). The bot owner always passes. Non-friends are silently ignored (no "add friend first" reply). No hard rate limit; the AI decides whether to reply, how long, and when to stop, guided by the persona prompt.
 
-**Persona / prompts:** See `bot/ai.py`. The system prompt is layered:
+**Persona / prompts:** See `bot/ai/` (prompts live in `bot/ai/prompts.py`). The system prompt is layered:
 - `PERSONA_PROFILE` — identity and background facts
 - `STYLE_RULES` — speaking style, boundaries, tone
 - `TIMING_RULES` — when to speak vs. `[SKIP]`
@@ -99,11 +99,11 @@ The owner can issue cross-group commands from private chat by prefixing with a g
 
 ## uapis.cn credit budget
 
-`bot/uapi.py` applies local command/automation protection buckets while recording actual UApiS debits from `Uapi-Credits-Charged`. Official monthly remaining quota is parsed from rate-limit response headers and persisted in `data/uapi_state.json`. Requests without a key use visitor quota; free endpoints retry without authentication if a configured key is rejected.
+`bot/uapi.py`（兼容 facade，实现在 `bot/integrations/uapi.py`）applies local command/automation protection buckets while recording actual UApiS debits from `Uapi-Credits-Charged`. Official monthly remaining quota is parsed from rate-limit response headers and persisted in `data/uapi_state.json`. Requests without a key use visitor quota; free endpoints retry without authentication if a configured key is rejected.
 
 ## Bilibili integration
 
-`bot/bilibili.py`: group messages containing BV/av/b23 links are auto-parsed (official `x/web-interface/view`, anonymous `platform=html5` playurl for mp4 download, ≤80MB streamed to `tmp/`, sent as video segment, then deleted). Per-group UP主 watch list (`groups.<gid>.bili_push.mids`, managed via `/b站推送`) is polled every 60s via wbi-signed `x/space/wbi/arc/search` (buvid cookie + wbi keys refreshed ~12h). Datacenter IPs get intermittent -352/-412 risk-control responses, so the poller uses a bounded retry count (`bilibili.official_retries`, default 2), then opens a cooldown circuit (`bilibili.risk_cooldown_seconds`, default 1800) before optionally falling back to uapis.cn `social/bilibili/archives`. Announced bvids are persisted in `data/bili_push.json`; adding a mid primes the seen-list to avoid flooding.
+`bot/bilibili.py`（兼容 facade，实现在 `bot/integrations/bilibili.py`）: group messages containing BV/av/b23 links are auto-parsed (official `x/web-interface/view`, anonymous `platform=html5` playurl for mp4 download, ≤80MB streamed to `tmp/`, sent as video segment, then deleted). Per-group UP主 watch list (`groups.<gid>.bili_push.mids`, managed via `/b站推送`) is polled every 60s via wbi-signed `x/space/wbi/arc/search` (buvid cookie + wbi keys refreshed ~12h). Datacenter IPs get intermittent -352/-412 risk-control responses, so the poller uses a bounded retry count (`bilibili.official_retries`, default 2), then opens a cooldown circuit (`bilibili.risk_cooldown_seconds`, default 1800) before optionally falling back to uapis.cn `social/bilibili/archives`. Announced bvids are persisted in `data/bili_push.json`; adding a mid primes the seen-list to avoid flooding.
 
 ## Environment variables
 
