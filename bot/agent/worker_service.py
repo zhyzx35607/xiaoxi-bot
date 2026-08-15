@@ -10,6 +10,7 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 from .policy import is_quiet_hours
+from ..utils import bot_timezone, configured_timezone_name
 
 log = logging.getLogger("qqbot")
 
@@ -187,7 +188,9 @@ class AgentWorker:
             now = time.time()
             reason, payload = companion._due_reason(now)
             high_priority = reason == "event"
-            if is_quiet_hours(settings, datetime.fromtimestamp(now)) and not high_priority:
+            local_now = datetime.fromtimestamp(
+                now, bot_timezone(configured_timezone_name(self.dispatcher.config)))
+            if is_quiet_hours(settings, local_now) and not high_priority:
                 return "quiet_hours"
             allowed, budget_reason = self.dispatcher.agent_runtime.proactive.allowed(
                 self.dispatcher.config, "owner:{}".format(owner_id),

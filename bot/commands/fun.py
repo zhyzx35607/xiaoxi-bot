@@ -6,7 +6,6 @@ import logging
 import os
 import random
 import re
-import time
 
 import aiohttp
 
@@ -15,7 +14,7 @@ from ..permission import (
     add_master, remove_master, list_masters,
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
 )
-from ..utils import atomic_write_json
+from ..utils import atomic_write_json, now_in_timezone
 from .common import CONFIG_PATH, _load, _save
 
 log = logging.getLogger("qqbot")
@@ -68,7 +67,7 @@ async def cmd_like(d, group_id, user_id, args, role, sender_card, message):
     mentions = d._extract_mentions(message)
     if mentions:
         target = mentions[0]
-    today = time.strftime("%Y%m%d")
+    today = now_in_timezone(d.config).strftime("%Y%m%d")
     key = today + ":" + str(target)
     if key in d._daily_likes:
         return
@@ -104,7 +103,7 @@ async def cmd_rank(d, group_id, user_id, args, role, sender_card, message):
     await d._reply(group_id, user_id, "\n".join(lines))
 
 async def cmd_fortune(d, group_id, user_id, args, role, sender_card, message):
-    today = time.strftime("%Y%m%d")
+    today = now_in_timezone(d.config).strftime("%Y%m%d")
     key = today + ":" + str(user_id)
     if key in d._daily_fortunes:
         await d._reply(group_id, user_id, "今天已经看过啦，明天再来")

@@ -1452,6 +1452,55 @@ class InteractionQuotaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"], "interaction_tool_not_allowed")
         ai_tools.reset_quota_for_test()
 
+    async def test_failed_interaction_does_not_consume_quota(self):
+        import ai_tools
+
+        class Client:
+            async def set_msg_emoji_like(self, message_id, emoji_id):
+                return {"status": "failed", "retcode": 1200, "msg": "rejected"}
+
+        class Stub:
+            client = Client()
+            config = {}
+
+        ai_tools.reset_quota_for_test()
+        stub = Stub()
+        result = await ai_tools.execute_interaction_tool(
+            stub, "set_msg_emoji_like", {"message_id": 1}, group_id=100, user_id=7)
+        self.assertFalse(result["ok"])
+        self.assertEqual(ai_tools.interaction_quota_left(100),
+                         ai_tools.INTERACTION_DAILY_LIMIT)
+        ai_tools.reset_quota_for_test()
+
+    async def test_failed_registry_interaction_does_not_consume_quota(self):
+        import ai_tools
+
+        class Client:
+            async def set_msg_emoji_like(self, message_id, emoji_id):
+                return {"status": "failed", "retcode": 1200, "msg": "rejected"}
+
+            async def get_group_member_info(self, group_id, user_id, no_cache=False):
+                return {"status": "ok", "data": {"role": "member"}}
+
+        class Stub:
+            config = {
+                "bot_owner": 111,
+                "bot_qq": 222,
+                "group_defaults": {},
+                "groups": {"100": {"enabled": True, "masters": []}},
+            }
+            client = Client()
+
+        ai_tools.reset_quota_for_test()
+        stub = Stub()
+        result = await ai_tools.execute_ai_tool(
+            stub, "set_msg_emoji_like", {"message_id": 1}, group_id=100,
+            user_id=666, message_id=1, interaction_allowed=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(ai_tools.interaction_quota_left(100),
+                         ai_tools.INTERACTION_DAILY_LIMIT)
+        ai_tools.reset_quota_for_test()
+
 
 class SchedulerJobTests(unittest.TestCase):
     def test_scheduled_jobs_include_all(self):
@@ -2568,6 +2617,50 @@ class PlayfulBanTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(r["ok"])
             self.assertEqual(r["error"], "group_only")
             self.assertEqual(bans, [])
+
+    async def test_failed_ban_does_not_consume_quota_cooldown_or_target_mark(self):
+        import ai_tools as ai_tools_module
+        from bot import permission
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            permission._bot_role_cache.clear()
+            bans = []
+
+            class Client:
+                session = None
+
+                async def get_group_member_info(self, group_id, user_id, no_cache=False):
+                    if user_id == 222:
+                        return {"status": "ok", "data": {"role": "owner"}}
+                    return {"status": "ok", "data": {"role": "member"}}
+
+                async def set_group_ban(self, group_id, user_id, duration=1800):
+                    bans.append((group_id, user_id, duration))
+                    return {"status": "failed", "retcode": 1200, "msg": "rejected"}
+
+            class Stub:
+                config = {
+                    "bot_owner": 111,
+                    "bot_qq": 222,
+                    "group_defaults": {},
+                    "groups": {"100": {"enabled": True, "masters": []}},
+                }
+                client = Client()
+
+            stub = Stub()
+            r = await ai_tools.execute_playful_ban(stub, {"user_id": 666}, self._ctx())
+            self.assertFalse(r["ok"])
+            self.assertEqual(len(bans), 1)
+            today = ai_tools._time.strftime("%Y%m%d")
+            gkey = "{}:{}".format(today, self.GROUP)
+            tkey = "{}:{}".format(gkey, 666)
+            self.assertEqual(ai_tools_module._playful_ban_group_usage.get(gkey, 0), 0)
+            self.assertNotIn(tkey, ai_tools_module._playful_ban_target_usage)
+            self.assertNotIn(self.GROUP, ai_tools_module._playful_ban_last_ts)
+            # A retry is allowed immediately: no cooldown/target mark was recorded.
+            r = await ai_tools.execute_playful_ban(stub, {"user_id": 666}, self._ctx())
+            self.assertFalse(r["ok"])
+            self.assertEqual(len(bans), 2)
 
 
 class ChatWithToolsTests(unittest.IsolatedAsyncioTestCase):
