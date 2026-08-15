@@ -1,7 +1,8 @@
 """Scoped long-term goals for owner and group Agent workspaces."""
 
 import time
-import uuid
+
+from .storage.json_store import new_record_id
 
 
 class AgentGoalStore:
@@ -22,7 +23,7 @@ class AgentGoalStore:
     def create(self, scope_key, owner_id, title):
         now = time.time()
         goal = {
-            "id": uuid.uuid4().hex[:12],
+            "id": new_record_id(),
             "scope_key": scope_key,
             "owner_id": int(owner_id),
             "title": str(title).strip()[:500],

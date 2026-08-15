@@ -1,7 +1,8 @@
 """Durable Agent reflections with confidence and provenance."""
 
 import time
-import uuid
+
+from .storage.json_store import new_record_id
 
 
 class AgentInsightStore:
@@ -25,7 +26,7 @@ class AgentInsightStore:
                     return records[-200:], item
             now = time.time()
             item = {
-                "id": uuid.uuid4().hex[:12], "content": content[:1000],
+                "id": new_record_id(), "content": content[:1000],
                 "category": str(category)[:50],
                 "confidence": max(0.0, min(float(confidence), 1.0)),
                 "evidence": str(evidence)[:2000], "source_id": str(source_id)[:100],

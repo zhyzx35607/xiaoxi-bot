@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import uuid
 from collections.abc import Callable
 
 from ...memory import sanitize_persistent_value
@@ -91,3 +92,14 @@ class AgentJsonStore:
             return records, True
 
         return self.update(relative, [], append)
+
+
+def new_record_id(length=12):
+    """UUID-based record id that survives sanitize_persistent_value.
+
+    The sanitizer rewrites long digit runs (phone/ID patterns) on write,
+    which would corrupt a digit-heavy uuid hex and make later id lookups
+    never match. Forcing a letter at index 5 keeps every digit run short.
+    """
+    raw = uuid.uuid4().hex[:max(6, int(length))]
+    return raw[:5] + "abcdef"[int(raw[5], 16) % 6] + raw[6:]

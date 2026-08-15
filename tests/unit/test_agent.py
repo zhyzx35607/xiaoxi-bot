@@ -1005,3 +1005,30 @@ class AgentGroupProactiveTests(unittest.IsolatedAsyncioTestCase):
         runtime.run_autonomous = AsyncMock(side_effect=AssertionError("duplicate review"))
         dispatcher = type("D", (), {"config": config, "agent_runtime": runtime, "client": object()})()
         self.assertEqual(await AgentWorker(dispatcher)._review_group_scope(), "idle")
+
+
+class RecordIdSanitizeTests(unittest.TestCase):
+    """new_record_id must survive sanitize_persistent_value's phone redaction."""
+
+    def test_generated_ids_never_match_phone_pattern(self):
+        import re
+
+        from bot.agent.storage.json_store import new_record_id
+        phone = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
+        for _ in range(2000):
+            self.assertIsNone(phone.search(new_record_id()))
+            self.assertIsNone(phone.search(new_record_id(16)))
+
+    def test_goal_lifecycle_survives_digit_heavy_uuid(self):
+        import uuid as uuid_module
+
+        from bot.agent.runtime import AgentRuntime
+
+        class FakeUUID:
+            hex = "131234567890"  # phone-shaped without the letter injection
+
+        runtime = AgentRuntime({}, tempfile.mkdtemp())
+        with patch.object(uuid_module, "uuid4", return_value=FakeUUID()):
+            goal = runtime.goals.create("owner:100", 100, "完成 Agent 改造")
+            runtime.goals.update("owner:100", goal["id"], status="done")
+        self.assertEqual(runtime.goals.list("owner:100"), [])

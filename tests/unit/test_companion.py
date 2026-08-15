@@ -10,6 +10,9 @@ from bot.agent.companion_runtime import CompanionRuntime
 from bot.agent.runtime import AgentRuntime
 from bot.agent.worker_service import AgentWorker
 from bot.ai.providers import _call_deepseek_inner
+from bot.utils import bot_timezone
+
+_SHANGHAI = bot_timezone("Asia/Shanghai")
 
 
 class CompanionMemoryTests(unittest.TestCase):
@@ -45,8 +48,9 @@ class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
     def test_idle_checkin_waits_at_least_eight_hours(self):
         with tempfile.TemporaryDirectory() as root:
             runtime = CompanionRuntime({"bot_owner": 100, "agent": {}}, Path(root) / "data" / "agent")
-            # Pin to noon: at 20:00 the time check-in reason would fire first.
-            now = datetime(2024, 1, 15, 12, 0, 0).timestamp()
+            # Pin to noon in the configured timezone: at 20:00 the time
+            # check-in reason would fire first.
+            now = datetime(2024, 1, 15, 12, 0, 0, tzinfo=_SHANGHAI).timestamp()
             state = runtime.state()
             state["last_interaction_at"] = now - 7 * 3600
             state["last_outgoing_at"] = now - 7 * 3600
@@ -119,7 +123,7 @@ class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as root:
             config = {"bot_owner": 100, "agent": {}}
             runtime = CompanionRuntime(config, Path(root) / "data" / "agent")
-            now = datetime.now().replace(hour=20, minute=0, second=0, microsecond=0).timestamp()
+            now = datetime.now(_SHANGHAI).replace(hour=20, minute=0, second=0, microsecond=0).timestamp()
             dispatcher = type("Dispatcher", (), {
                 "config": config, "client": type("Client", (), {"session": None})(),
                 "roleplay": None,
@@ -128,7 +132,7 @@ class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
                        new=AsyncMock(side_effect=RuntimeError("boom"))):
                 result = await runtime.decide(dispatcher, now=now)
             self.assertIsNone(result)
-            bucket = datetime.fromtimestamp(now).strftime("%Y%m%d%H")
+            bucket = datetime.fromtimestamp(now, _SHANGHAI).strftime("%Y%m%d%H")
             self.assertEqual(runtime.state()["last_time_bucket"], bucket)
 
     async def test_non_numeric_ai_fields_are_clamped_not_raised(self):

@@ -1,7 +1,8 @@
 """Deterministic reminder records and due-delivery state."""
 
 import time
-import uuid
+
+from .storage.json_store import new_record_id
 
 
 class AgentReminderStore:
@@ -14,7 +15,7 @@ class AgentReminderStore:
 
     def create(self, scope_key, user_id, text, due_at):
         reminder = {
-            "id": uuid.uuid4().hex[:12],
+            "id": new_record_id(),
             "scope_key": scope_key,
             "user_id": int(user_id),
             "text": str(text).strip()[:1000],

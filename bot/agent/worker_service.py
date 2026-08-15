@@ -5,11 +5,11 @@ import json
 import logging
 import random
 import time
-import uuid
 from datetime import datetime
 from urllib.parse import urlparse
 
 from .policy import is_quiet_hours
+from .storage.json_store import new_record_id
 from ..utils import bot_timezone, configured_timezone_name
 
 log = logging.getLogger("qqbot")
@@ -330,7 +330,7 @@ class AgentWorker:
         if not allowed:
             return reason
         goal = goals[0]
-        run_id = uuid.uuid4().hex[:16]
+        run_id = new_record_id(16)
         self.dispatcher.agent_runtime.store.write(
             "worker/owner_goal_review.json",
             {"status": "running", "run_id": run_id, "started_at": now, "goal_id": goal.get("id")},
@@ -413,7 +413,7 @@ class AgentWorker:
             if not allowed:
                 continue
             owner_id = int(self.dispatcher.config.get("bot_owner") or 0)
-            run_id = uuid.uuid4().hex[:16]
+            run_id = new_record_id(16)
             state[str(group_id)] = {"status": "running", "run_id": run_id, "started_at": now}
             runtime.store.write("worker/group_reviews.json", state)
             event = runtime.build_event({
