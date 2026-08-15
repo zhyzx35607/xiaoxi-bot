@@ -100,7 +100,13 @@ async def cmd_ban(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, "请 @要禁言的人")
         return
     duration = 30
-    m = re.search(r"(?<!\d)(\d{1,5})(?!\d)(?:\s*(?:分钟|分|min|m))?", clean_args)
+    # Remove the target QQ numbers before looking for a duration, otherwise a
+    # 5-digit QQ like 12345 is mistaken for 12345 minutes.
+    duration_text = clean_args
+    for tid in mentions:
+        duration_text = re.sub(
+            r"(?<!\d)" + re.escape(str(tid)) + r"(?!\d)", "", duration_text, count=1)
+    m = re.search(r"(?<!\d)(\d{1,5})(?!\d)(?:\s*(?:分钟|分|min|m))?", duration_text)
     if m:
         duration = max(1, min(int(m.group(1)), 43200))
     for tid in mentions:
