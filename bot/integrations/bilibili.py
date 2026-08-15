@@ -720,13 +720,20 @@ def _dyn_entry(group_id, mid):
     return entry
 
 
+def _at_all_enabled(dispatcher, group_id):
+    """Per-group switch: whether push announcements may @全体成员."""
+    groups = dispatcher.config.get("groups", {}) or {}
+    gcfg = groups.get(str(group_id)) or {}
+    return bool((gcfg.get("bili_push") or {}).get("at_all", True))
+
+
 async def _announce_dynamic(dispatcher, group_id, dyn):
     from ..permission import get_bot_role
     text = "【B站动态】{}\n{}\n{}".format(
         dyn["name"], dyn["text"][:300], dyn["link"])
     segments = []
     bot_role, _ = await get_bot_role(dispatcher, int(group_id))
-    if bot_role in ("admin", "owner"):
+    if bot_role in ("admin", "owner") and _at_all_enabled(dispatcher, group_id):
         segments.append({"type": "at", "data": {"qq": "all"}})
     segments.append({"type": "text", "data": {"text": text}})
     for url in dyn["images"]:
@@ -891,7 +898,7 @@ async def _announce_video(dispatcher, group_id, video):
     text = "{}\n{}\n{}".format(head, title[:60], link)
     segments = []
     bot_role, _ = await get_bot_role(dispatcher, int(group_id))
-    if bot_role in ("admin", "owner"):
+    if bot_role in ("admin", "owner") and _at_all_enabled(dispatcher, group_id):
         segments.append({"type": "at", "data": {"qq": "all"}})
     segments.append({"type": "text", "data": {"text": text}})
     cover = video.get("cover", "")

@@ -183,6 +183,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
              "/b站推送 add <mid或空间链接> — 盯一个UP主\n"
              "/b站推送 del <mid> — 不盯了\n"
              "/b站推送 list — 看本群在盯谁\n"
+             "/b站推送 atall on/off — 推送时是否 @全体成员（仅 Bot 是管理/群主时会 @）\n"
              "mid 就是UP主空间网址 space.bilibili.com/ 后面的数字")
     parts = args.strip().split()
     action = parts[0].lower() if parts else "list"
@@ -240,11 +241,23 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
             await d._reply(group_id, user_id, "不盯 mid={} 了".format(mid))
         else:
             await d._reply(group_id, user_id, "这个UP主本来就没在盯")
+    elif action == "atall":
+        val = parts[index].lower() if len(parts) > index else ""
+        if val not in ("on", "off"):
+            await d._reply(group_id, user_id,
+                           "用法：/b站推送 atall on/off — 推送时是否 @全体成员")
+            return
+        push_cfg["at_all"] = (val == "on")
+        _commit(d, cfg)
+        await d._reply(group_id, user_id,
+                       "好，本群B站推送{} @全体成员".format("会" if val == "on" else "不再"))
     elif action == "list":
+        atall_state = "开" if push_cfg.get("at_all", True) else "关"
         if mids:
             await d._reply(group_id, user_id,
                            "本群正在盯的UP主 mid：" + ", ".join(str(m) for m in mids)
-                           + "\n（mid 就是 space.bilibili.com/ 后面的数字）")
+                           + "\n（mid 就是 space.bilibili.com/ 后面的数字）"
+                           + "\n推送 @全体成员：{}".format(atall_state))
         else:
             await d._reply(group_id, user_id,
                            "本群还没盯任何UP主\n" + usage)
