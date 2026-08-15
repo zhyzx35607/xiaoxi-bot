@@ -258,10 +258,13 @@ class CompanionStore:
             return result
 
     def mark_outbox(self, item_id: str, status: str, error: str = "", due_at: float | None = None):
+        # attempts backs the failure-escalation check in the delivery worker,
+        # so terminal marks ("sent"/"suppressed") must not inflate it.
+        bump = 0 if str(status) in ("sent", "suppressed") else 1
         with self._lock, self._connection() as conn:
             if due_at is None:
-                conn.execute("UPDATE outbox SET status=?,attempts=attempts+1,last_error=?,updated_at=? WHERE id=?",
-                             (str(status)[:30], str(error)[:500], _now(), str(item_id)))
+                conn.execute("UPDATE outbox SET status=?,attempts=attempts+?,last_error=?,updated_at=? WHERE id=?",
+                             (str(status)[:30], bump, str(error)[:500], _now(), str(item_id)))
             else:
-                conn.execute("UPDATE outbox SET status=?,attempts=attempts+1,last_error=?,due_at=?,updated_at=? WHERE id=?",
-                             (str(status)[:30], str(error)[:500], float(due_at), _now(), str(item_id)))
+                conn.execute("UPDATE outbox SET status=?,attempts=attempts+?,last_error=?,due_at=?,updated_at=? WHERE id=?",
+                             (str(status)[:30], bump, str(error)[:500], float(due_at), _now(), str(item_id)))

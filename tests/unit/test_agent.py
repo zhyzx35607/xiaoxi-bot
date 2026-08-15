@@ -724,8 +724,10 @@ class AgentGoalReviewTests(unittest.IsolatedAsyncioTestCase):
         runtime = AgentRuntime(config, tempfile.mkdtemp())
         goal = runtime.goals.create("owner:100", 100, "持续完善机器人")
         calls = []
+        queue_flags = []
         async def run(dispatcher, event, task_context="", allow_background_queue=True, **kwargs):
             calls.append((event.text, task_context))
+            queue_flags.append(allow_background_queue)
             return {"reply": "下一步补观测指标", "intent": "goal-review", "tools": [], "needs_confirmation": False}, []
         runtime.run_autonomous = run
         class Client:
@@ -736,6 +738,9 @@ class AgentGoalReviewTests(unittest.IsolatedAsyncioTestCase):
         result = await AgentWorker(dispatcher)._review_owner_goal()
         self.assertEqual(result, "sent")
         self.assertEqual(len(calls), 1)
+        # Worker-triggered reviews must not queue new background tasks
+        # themselves (review -> task -> review self-amplifying loop).
+        self.assertEqual(queue_flags, [False])
         self.assertIn("下一步补观测指标", dispatcher.client.sent[0][1])
         updated = runtime.goals.list("owner:100")[0]
         self.assertEqual(updated["id"], goal["id"])

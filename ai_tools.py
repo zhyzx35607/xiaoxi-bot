@@ -218,6 +218,12 @@ async def execute_tool(dispatcher, name, arguments):
     handler = tools.get(name)
     if not handler:
         return {"ok": False, "error": "tool_not_allowed", "tool": name}
+    # Callers inject context args (e.g. group_id) that plain uapi tools don't
+    # accept; drop anything outside the handler signature, same as _wrap_read.
+    import inspect as _inspect
+    params = _inspect.signature(handler).parameters
+    if not any(p.kind == _inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        args = {k: v for k, v in args.items() if k in params}
     try:
         result = await handler(dispatcher, **args)
         result["tool"] = name

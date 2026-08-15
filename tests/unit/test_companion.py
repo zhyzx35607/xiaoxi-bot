@@ -36,6 +36,27 @@ class CompanionMemoryTests(unittest.TestCase):
             runtime.observe_owner_message("我回来了")
             self.assertEqual(runtime.store.due_followups(100, time.time()), [])
 
+    def test_terminal_outbox_marks_do_not_inflate_attempts(self):
+        # attempts backs the delivery worker's failure-escalation check, so
+        # terminal marks ("sent"/"suppressed") must not increment it.
+        with tempfile.TemporaryDirectory() as root:
+            runtime = CompanionRuntime({"bot_owner": 100}, Path(root) / "data" / "agent")
+            store = runtime.store
+            store.enqueue(100, "t", {"message_parts": ["hi"]},
+                          time.time() - 1, "normal", "key:attempts")
+            item = store.due_outbox(100, time.time())[0]
+            store.mark_outbox(item["id"], "pending", "boom", time.time() + 10)
+            retry = store.due_outbox(100, time.time() + 20)[0]
+            self.assertEqual(retry["attempts"], 1)
+            store.mark_outbox(item["id"], "sent")
+            store.mark_outbox(item["id"], "suppressed")
+            with store._connection() as conn:
+                row = conn.execute(
+                    "SELECT attempts, status FROM outbox WHERE id=?",
+                    (item["id"],)).fetchone()
+            self.assertEqual(row["attempts"], 1)
+            self.assertEqual(row["status"], "suppressed")
+
 
 class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
     def test_prompt_forbids_invented_physical_experiences(self):
@@ -157,6 +178,29 @@ class CompanionDecisionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fact["confidence"], 0.0)
             followups = runtime.store.due_followups(100, now + 21 * 60)
             self.assertEqual(followups[0]["max_attempts"], 1)
+
+    async def test_string_followup_and_media_fields_do_not_crash_decide(self):
+        # Regression: the LLM may return followup/media_request as plain
+        # strings; .get() on them raised AttributeError and killed the tick.
+        with tempfile.TemporaryDirectory() as root:
+            config = {"bot_owner": 100, "agent": {"companion_min_gap_seconds": 300}}
+            runtime = CompanionRuntime(config, Path(root) / "data" / "agent")
+            now = time.time()
+            response = json.dumps({
+                "should_send": True, "priority": "normal", "topic": "checkin",
+                "message_parts": ["最近怎么样？"], "emotion_delta": {},
+                "memory_candidates": [], "followup": "稍后追问", "media_request": "图片",
+            }, ensure_ascii=False)
+            dispatcher = type("Dispatcher", (), {
+                "config": config, "client": type("Client", (), {"session": None})(),
+                "roleplay": None,
+            })()
+            with patch("bot.agent.companion_runtime._call_deepseek", new=AsyncMock(return_value=response)):
+                result = await runtime.decide(dispatcher, now=now, force=True)
+            self.assertIsNotNone(result)
+            self.assertEqual(runtime.store.due_followups(100, now + 21 * 60), [])
+            item = runtime.store.due_outbox(100, now)[0]
+            self.assertEqual(item["payload"]["media_request"], {})
 
 
 class CompanionOutboxTests(unittest.IsolatedAsyncioTestCase):

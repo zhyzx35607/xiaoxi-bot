@@ -346,7 +346,10 @@ class AgentWorker:
             plan, results = await self.dispatcher.agent_runtime.run_autonomous(
                 self.dispatcher, event,
                 task_context="\u5f53\u524d\u76ee\u6807ID={}\uff1b\u5df2\u6709\u8fdb\u5ea6={}".format(
-                    goal.get("id"), goal.get("progress", "")))
+                    goal.get("id"), goal.get("progress", "")),
+                # A worker-triggered review must not queue new background
+                # tasks itself (review -> task -> review self-amplifying loop).
+                allow_background_queue=False)
             reply = str(plan.get("reply") or "").strip()
             if not reply:
                 self.dispatcher.agent_runtime.store.write(

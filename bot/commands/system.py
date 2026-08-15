@@ -214,6 +214,8 @@ _PRIVATE_VISIBLE = {
 def _help_permission_label(info):
     if info.get("bot_owner_only"):
         return "最高主人"
+    if info.get("owner_only"):
+        return "群主或最高主人"
     if info.get("bot_owner"):
         return "群主人及以上"
     if info.get("admin_only"):
@@ -223,6 +225,8 @@ def _help_permission_label(info):
 
 def _help_visible(info, level, group_id):
     if info.get("bot_owner_only") and level < LEVEL_SUPER:
+        return False
+    if info.get("owner_only") and level < LEVEL_GOWNER:
         return False
     if info.get("bot_owner") and level < LEVEL_MASTER:
         return False

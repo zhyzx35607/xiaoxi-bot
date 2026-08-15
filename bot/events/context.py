@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 
-from ..permission import is_group_enabled
+from ..permission import get_group_config, is_group_enabled
 
 chat_log = logging.getLogger("qqbot.chat")
 
@@ -20,16 +20,22 @@ def _private_chat_allowed(dispatcher, user_id):
     return bool(pc_cfg.get("enabled", False) or user_id in allowed_users)
 
 def _disabled_group_activation_allowed(dispatcher, event):
-    """Allow only the owner/bot account to recover a disabled group in place."""
+    """Allow only the owner/bot account/group masters to recover a disabled group."""
     if event.get("post_type") != "message" or event.get("message_type") != "group":
         return False
     user_id = event.get("user_id")
     if user_id == dispatcher.config.get("bot_owner"):
         return True
-    if user_id != dispatcher.config.get("bot_qq"):
-        return False
     prefix = dispatcher.config.get("command_prefix", "/")
-    return str(event.get("raw_message") or "").strip().lower() == prefix + "enable"
+    is_enable = str(event.get("raw_message") or "").strip().lower() == prefix + "enable"
+    if user_id == dispatcher.config.get("bot_qq"):
+        return is_enable
+    # Group masters may re-enable their own group, but only via /enable —
+    # everything else from a disabled group stays gated out.
+    if is_enable:
+        masters = get_group_config(dispatcher, event.get("group_id")).get("masters", [])
+        return any(str(master) == str(user_id) for master in masters)
+    return False
 
 def _event_scope_allowed(dispatcher, event):
     """Hard scope gate applied before parsing, logging, caching, or AI work."""
@@ -38,7 +44,12 @@ def _event_scope_allowed(dispatcher, event):
         return _disabled_group_activation_allowed(dispatcher, event)
     if (event.get("post_type") in ("message", "message_sent")
             and event.get("message_type") == "private"):
-        return _private_chat_allowed(dispatcher, event.get("user_id", 0))
+        # message_sent is the bot's own echo: user_id is the bot account,
+        # target_id is the actual chat peer.
+        peer_id = event.get("user_id", 0)
+        if event.get("post_type") == "message_sent":
+            peer_id = event.get("target_id") or peer_id
+        return _private_chat_allowed(dispatcher, peer_id)
     return True
 
 def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, sender_name=""):

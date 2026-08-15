@@ -108,13 +108,15 @@ async def cmd_fortune(d, group_id, user_id, args, role, sender_card, message):
     if key in d._daily_fortunes:
         await d._reply(group_id, user_id, "今天已经看过啦，明天再来")
         return
-    d._daily_fortunes[key] = True
-    d.save_runtime_state(force=True)
     from ..ai import deepseek_chat
     prompt = ("请为星座运势生成一段今日运势，包含综合运势、爱情运势、工作/学业运，"
               "每项一句话，语气像普通群友，简短4-5行即可。")
     reply = await deepseek_chat(d, prompt)
     if reply:
+        # Only charge the daily attempt after a reply was actually generated,
+        # so an AI failure does not burn the user's one try for the day.
+        d._daily_fortunes[key] = True
+        d.save_runtime_state(force=True)
         await d._reply(group_id, user_id, sender_card + " 的今日运势\n\n" + reply)
     else:
         await d._reply(group_id, user_id, "脑子卡了一下，等会再试")
