@@ -6,7 +6,7 @@
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt -r requirements-dev.txt
-ruff check . --no-cache --select E9,F524,F63,F7,F82
+ruff check . --no-cache --select E9,F524,F63,F7,F82,F811,F841,B023,ASYNC221,ASYNC230,S110,S112,PLW0602,PLW0211,G201
 bandit -q -r app bot deploy -x tests --severity-level high --confidence-level high
 python -m compileall -q -f .
 QQBOT_DISABLE_FILE_LOG=1 python -m unittest discover -v

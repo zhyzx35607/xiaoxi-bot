@@ -3299,3 +3299,84 @@ class RuntimeConcurrencyRegressionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await scheduler._run_due_scheduled_job(
                 dispatcher, "hotboard", 2))
         mark_done.assert_called_once_with(dispatcher, "hotboard", 2)
+
+
+class BiliPushAtAllTests(unittest.IsolatedAsyncioTestCase):
+    """Per-group switch for @全体成员 in bilibili push announcements."""
+
+    async def _announce_video(self, bili_cfg):
+        from bot.integrations import bilibili
+        captured = {}
+
+        class Client:
+            _running = True
+
+        class Stub:
+            config = {"bot_qq": 222,
+                      "groups": {"100": {"enabled": True, "bili_push": bili_cfg}}}
+            client = Client()
+
+        async def fake_send(dispatcher, group_id, segments, marker, kind):
+            captured["segments"] = segments
+            return {"status": "ok"}
+
+        with patch("bot.integrations.bilibili._send_group_confirmed", new=fake_send), \
+                patch("bot.permission.get_bot_role",
+                      new=AsyncMock(return_value=("admin", None))):
+            await bilibili._announce_video(
+                Stub(), "100",
+                {"bvid": "BV1", "title": "t", "author": "a", "cover": ""})
+        return captured["segments"]
+
+    @staticmethod
+    def _has_at_all(segments):
+        return any(seg.get("type") == "at" and seg.get("data", {}).get("qq") == "all"
+                   for seg in segments)
+
+    async def test_at_all_prepended_by_default(self):
+        segments = await self._announce_video({"mids": [42]})
+        self.assertTrue(self._has_at_all(segments))
+
+    async def test_at_all_skipped_when_disabled(self):
+        segments = await self._announce_video({"mids": [42], "at_all": False})
+        self.assertFalse(self._has_at_all(segments))
+
+    async def test_cmd_bili_push_atall_toggle(self):
+        from bot.commands import admin
+
+        config = {"bot_owner": 1, "bot_qq": 2,
+                  "groups": {"100": {"enabled": True,
+                                     "bili_push": {"mids": [42]}}}}
+        replies = []
+
+        class Stub:
+            async def _reply(self, group_id, user_id, text):
+                replies.append(text)
+
+        with patch.object(admin, "_load", return_value=config), \
+                patch.object(admin, "_commit") as commit:
+            await admin.cmd_bili_push(Stub(), 100, 1, "atall off", "master", "", [])
+            self.assertFalse(config["groups"]["100"]["bili_push"]["at_all"])
+            self.assertIn("不再", replies[-1])
+            await admin.cmd_bili_push(Stub(), 100, 1, "atall on", "master", "", [])
+            self.assertTrue(config["groups"]["100"]["bili_push"]["at_all"])
+            self.assertEqual(commit.call_count, 2)
+
+    async def test_cmd_bili_push_atall_rejects_bad_value(self):
+        from bot.commands import admin
+
+        config = {"bot_owner": 1, "bot_qq": 2,
+                  "groups": {"100": {"enabled": True,
+                                     "bili_push": {"mids": [42]}}}}
+        replies = []
+
+        class Stub:
+            async def _reply(self, group_id, user_id, text):
+                replies.append(text)
+
+        with patch.object(admin, "_load", return_value=config), \
+                patch.object(admin, "_commit") as commit:
+            await admin.cmd_bili_push(Stub(), 100, 1, "atall maybe", "master", "", [])
+            self.assertNotIn("at_all", config["groups"]["100"]["bili_push"])
+            commit.assert_not_called()
+            self.assertIn("用法", replies[-1])
