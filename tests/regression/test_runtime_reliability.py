@@ -326,6 +326,22 @@ class RuntimeTemporaryFileTests(unittest.TestCase):
                     self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
                 os.remove(path)
 
+    def test_world_readable_temp_file_is_0644_default_stays_0600(self):
+        from bot.storage.runtime_paths import create_runtime_temp_file
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"QQBOT_TMP_DIR": directory}):
+                fd, shared_path = create_runtime_temp_file(
+                    "shared_", ".bin", world_readable=True)
+                os.close(fd)
+                fd, private_path = create_runtime_temp_file("private_", ".bin")
+                os.close(fd)
+                if os.name != "nt":
+                    self.assertEqual(os.stat(shared_path).st_mode & 0o777, 0o644)
+                    self.assertEqual(os.stat(private_path).st_mode & 0o777, 0o600)
+                os.remove(shared_path)
+                os.remove(private_path)
+
     def test_unusable_configured_temp_directory_falls_back_to_data(self):
         from bot.storage import runtime_paths
 
@@ -855,3 +871,203 @@ class ImportAndDeploymentTests(unittest.TestCase):
         self.assertIn("-perm /022", installer)
         self.assertIn("refusing unsafe project permissions", installer)
         self.assertIn("QQBOT_SKIP_RESTART", installer)
+
+
+class ReconnectBackoffTests(unittest.TestCase):
+    """Instant WS kicks must keep exponential backoff; only stable sessions reset it."""
+
+    def test_instant_kick_keeps_growing_backoff(self):
+        from bot.transport.onebot import OneBotClient
+
+        delay = 1
+        seen = []
+        for _ in range(4):
+            # Simulated session that dies 2s after connect (token mismatch kick).
+            delay = OneBotClient._backoff_delay(delay, 2.0)
+            seen.append(delay)
+            delay = min(delay * 2, 60)
+        self.assertEqual(seen, [1, 2, 4, 8])
+
+    def test_stable_session_resets_backoff(self):
+        from bot.transport.onebot import OneBotClient, _RECONNECT_STABLE_SECONDS
+
+        self.assertEqual(
+            OneBotClient._backoff_delay(32, _RECONNECT_STABLE_SECONDS + 1), 1)
+        self.assertEqual(
+            OneBotClient._backoff_delay(32, _RECONNECT_STABLE_SECONDS - 1), 32)
+
+    def test_failed_connect_does_not_reset_backoff(self):
+        from bot.transport.onebot import OneBotClient
+
+        self.assertEqual(OneBotClient._backoff_delay(16, None), 16)
+
+
+class RepeatCheckLockTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_repeat_send_does_not_block_other_groups(self):
+        from bot.dispatcher import Dispatcher
+
+        dispatcher = Dispatcher.__new__(Dispatcher)
+        dispatcher.config = {"repeat_mode": {
+            "enabled": True, "min_users": 2, "probability": 1.0,
+            "cooldown_seconds": 0,
+        }}
+        dispatcher._group_repeat_tracker = {}
+        dispatcher._lock = asyncio.Lock()
+        send_started = asyncio.Event()
+        send_release = asyncio.Event()
+
+        class Client:
+            async def send_group_msg(self, group_id, message):
+                send_started.set()
+                await send_release.wait()
+                return {"status": "ok"}
+
+        dispatcher.client = Client()
+        with patch("bot.dispatcher.is_blacklisted", return_value=False):
+            self.assertFalse(await dispatcher._check_repeat(1, "复读", 100))
+            repeat_task = asyncio.create_task(dispatcher._check_repeat(1, "复读", 200))
+            await asyncio.wait_for(send_started.wait(), timeout=1)
+            # The send is in flight; another group must still get the lock.
+            self.assertFalse(await asyncio.wait_for(
+                dispatcher._check_repeat(2, "别的", 300), timeout=1))
+            send_release.set()
+            self.assertTrue(await asyncio.wait_for(repeat_task, timeout=1))
+
+
+class HealthLoopSamplingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sample_runs_via_event_loop_thread(self):
+        from bot.services.health import HealthServiceMixin
+
+        holder = HealthServiceMixin.__new__(HealthServiceMixin)
+        holder._rss_watch_loop = asyncio.get_running_loop()
+        # Called from an executor thread, like the RSS watch daemon thread.
+        diagnostics = await asyncio.to_thread(holder._sample_loop_diagnostics)
+        self.assertIsNotNone(diagnostics)
+        self.assertIn("GC:", diagnostics)
+
+    async def test_sample_returns_none_without_loop(self):
+        from bot.services.health import HealthServiceMixin
+
+        holder = HealthServiceMixin.__new__(HealthServiceMixin)
+        holder._rss_watch_loop = None
+        self.assertIsNone(holder._sample_loop_diagnostics())
+
+    async def test_sample_times_out_when_loop_is_wedged(self):
+        from bot.services.health import HealthServiceMixin
+
+        holder = HealthServiceMixin.__new__(HealthServiceMixin)
+        idle_loop = asyncio.new_event_loop()
+        try:
+            holder._rss_watch_loop = idle_loop
+            self.assertIsNone(holder._sample_loop_diagnostics(timeout=0.1))
+        finally:
+            idle_loop.close()
+
+
+class ConfiguredTimezoneTests(unittest.TestCase):
+    def test_uapi_day_bucket_uses_explicit_timezone(self):
+        import bot.integrations.uapi as uapi_module
+        from datetime import datetime as real_datetime, timezone as real_timezone
+
+        class FakeDatetime:
+            @classmethod
+            def now(cls, tz=None):
+                instant = real_datetime(2026, 1, 1, 16, 30,
+                                        tzinfo=real_timezone.utc)
+                return instant.astimezone(tz) if tz else instant
+
+        with patch.object(uapi_module, "datetime", FakeDatetime):
+            # 2026-01-01 16:30 UTC is already 2026-01-02 in Asia/Shanghai,
+            # including the fixed UTC+8 fallback used without tzdata.
+            self.assertEqual(uapi_module._today("Asia/Shanghai"), "2026-01-02")
+            self.assertEqual(uapi_module._month("Asia/Shanghai"), "2026-01")
+            state = {
+                "date": "2026-01-01", "month": "2026-01",
+                "day_user": 5, "day_auto": 1, "month_used": 10,
+                "official_month_remaining": 1, "official_month_limit": 2,
+            }
+            self.assertTrue(uapi_module._rollover(state, "Asia/Shanghai"))
+            self.assertEqual(state["date"], "2026-01-02")
+            self.assertEqual(state["day_user"], 0)
+
+    def test_explicit_timezone_changes_the_bucket_boundary(self):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        import bot.integrations.uapi as uapi_module
+        from datetime import datetime as real_datetime, timezone as real_timezone
+
+        try:
+            ZoneInfo("UTC")
+        except ZoneInfoNotFoundError:
+            self.skipTest("tzdata is not installed on this host")
+
+        class FakeDatetime:
+            @classmethod
+            def now(cls, tz=None):
+                instant = real_datetime(2026, 1, 1, 16, 30,
+                                        tzinfo=real_timezone.utc)
+                return instant.astimezone(tz) if tz else instant
+
+        with patch.object(uapi_module, "datetime", FakeDatetime):
+            self.assertEqual(uapi_module._today("UTC"), "2026-01-01")
+            self.assertEqual(uapi_module._today("Asia/Shanghai"), "2026-01-02")
+
+    def test_quiet_hours_judged_in_explicit_timezone(self):
+        from datetime import datetime, timezone
+
+        from bot.agent.policy import is_quiet_hours
+        from bot.utils import bot_timezone
+
+        settings = {"quiet_start": 23, "quiet_end": 9}
+        zone = bot_timezone("Asia/Shanghai")
+        self.assertTrue(is_quiet_hours(
+            settings, datetime(2026, 1, 1, 23, 30, tzinfo=zone)))
+        self.assertFalse(is_quiet_hours(
+            settings, datetime(2026, 1, 1, 12, 0, tzinfo=zone)))
+        # The same instant as 23:30 Shanghai is 15:30 UTC; a naive
+        # server-local reading in UTC would wrongly say "not quiet".
+        utc_instant = datetime(2026, 1, 1, 15, 30, tzinfo=timezone.utc)
+        self.assertTrue(is_quiet_hours(
+            settings, utc_instant.astimezone(zone)))
+
+    def test_fallback_delay_config_key_is_removed_by_migration(self):
+        config, migrated = migrate_config({
+            "runtime": {
+                "sigmai_fallback_delay_seconds": 6,
+                "agnes_fallback_delay_seconds": 6,
+            },
+        })
+        self.assertTrue(migrated)
+        self.assertNotIn("sigmai_fallback_delay_seconds", config["runtime"])
+        self.assertNotIn("agnes_fallback_delay_seconds", config["runtime"])
+
+    def test_provider_status_text_describes_serial_fallback(self):
+        from bot.ai.providers import format_ai_provider_status
+
+        text = format_ai_provider_status({"runtime": {}})
+        self.assertIn("串行降级", text)
+        self.assertNotIn("并行启动", text)
+
+
+class ConfirmationStrengthTests(unittest.TestCase):
+    def test_confirmation_code_is_8_hex_chars(self):
+        from bot.services import confirmations
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "pending_actions.json"
+            with patch.object(confirmations, "_PATH", str(path)):
+                code = confirmations.create_confirmation(
+                    100, 7, "set_group_name", {"group_id": 100}, "rename")
+        self.assertEqual(len(code), 8)
+        self.assertTrue(all(char in "0123456789abcdef" for char in code))
+
+    def test_corrupted_pending_actions_logs_warning(self):
+        from bot.services import confirmations
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "pending_actions.json"
+            path.write_text("{not-json", encoding="utf-8")
+            with patch.object(confirmations, "_PATH", str(path)):
+                with self.assertLogs("qqbot", level="WARNING") as captured:
+                    self.assertEqual(confirmations._load_unlocked(), {})
+        self.assertTrue(any("confirmations" in line for line in captured.output))

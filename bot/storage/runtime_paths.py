@@ -61,14 +61,16 @@ def runtime_diagnostic_path(filename):
     return str(Path(runtime_diagnostics_dir()) / safe_name)
 
 
-def create_runtime_temp_file(prefix, suffix):
+def create_runtime_temp_file(prefix, suffix, world_readable=False):
     fd, path = tempfile.mkstemp(
         prefix=prefix,
         suffix=suffix,
         dir=runtime_temp_dir(),
     )
     try:
-        os.chmod(path, 0o600)
+        # world_readable is only for non-sensitive media/text handed to the
+        # separate NapCat process (napcat user); everything else stays 0600.
+        os.chmod(path, 0o644 if world_readable else 0o600)
     except OSError:
         pass
     return fd, path

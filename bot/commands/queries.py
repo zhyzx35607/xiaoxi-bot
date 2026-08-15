@@ -80,7 +80,7 @@ async def _send_uapi_image(d, group_id, user_id, path, params, label):
         return
     payload, ctype = result
     ext = ".png" if "png" in ctype else ".jpg"
-    fd, tmp_path = create_runtime_temp_file("uapi_", ext)
+    fd, tmp_path = create_runtime_temp_file("uapi_", ext, world_readable=True)
     try:
         await asyncio.to_thread(_write_binary_fd, fd, payload)
         segments = [{"type": "image", "data": {"file": "file://" + tmp_path}}]

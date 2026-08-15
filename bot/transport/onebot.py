@@ -10,6 +10,10 @@ from api_registry import REGISTRY
 
 log = logging.getLogger("qqbot")
 
+# A session must stay up this long before the reconnect backoff resets;
+# instant kicks (e.g. token mismatch) keep the exponential backoff.
+_RECONNECT_STABLE_SECONDS = 30.0
+
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PID_FILE = os.getenv("QQBOT_PID_FILE") or os.path.join(_ROOT, "bot.pid")
 class OneBotClient:
@@ -125,6 +129,13 @@ class OneBotClient:
             self._queue_bytes = max(0, self._queue_bytes - dropped[1])
         return True
 
+    @staticmethod
+    def _backoff_delay(retry_delay, session_secs):
+        """Reconnect backoff: only a session that stayed up resets the delay."""
+        if session_secs is not None and session_secs >= _RECONNECT_STABLE_SECONDS:
+            return 1
+        return retry_delay
+
     async def run(self):
         if not self._acquire_pid():
             return
@@ -140,6 +151,7 @@ class OneBotClient:
             retry_delay = 1
 
             while self._running:
+                session_secs = None
                 try:
                     async with websockets.connect(
                         url,
@@ -151,7 +163,6 @@ class OneBotClient:
                     ) as ws:
                         self._ws = ws
                         self._connected_event.set()
-                        retry_delay = 1
                         log.info("Connected to OneBot WS")
                         connected_at = time.monotonic()
 
@@ -269,6 +280,7 @@ class OneBotClient:
                     self._pending.clear()
 
                 if self._running:
+                    retry_delay = self._backoff_delay(retry_delay, session_secs)
                     try:
                         await asyncio.wait_for(self._stop_event.wait(), timeout=retry_delay)
                     except asyncio.TimeoutError:

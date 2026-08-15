@@ -142,7 +142,7 @@ async def _summarize(dispatcher, text, level, kind):
 async def _upload_text_fallback(dispatcher, group_id, user_id, text, title):
     path = ""
     try:
-        handle, path = create_runtime_temp_file("qqbot_", ".txt")
+        handle, path = create_runtime_temp_file("qqbot_", ".txt", world_readable=True)
         os.close(handle)
         await asyncio.to_thread(_write_text_file, path, text)
         name = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", title)[:40] + ".txt"
