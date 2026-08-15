@@ -230,6 +230,20 @@ class ServiceInstallScriptTests(unittest.TestCase):
         self.assertIn("systemctl restart napcat.service", restart)
         self.assertIn("CapabilityBoundingSet=", restart)
 
+    def test_napcat_cache_cleanup_targets_service_home_and_is_installed(self):
+        service = (ROOT / "deploy" / "napcat-cache-cleanup.service").read_text(
+            encoding="utf-8"
+        )
+        script = (ROOT / "deploy" / "install-napcat-service.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("/var/lib/napcat/.config/QQ/NapCat/temp", service)
+        self.assertNotIn("/root/.config/QQ", service)
+        self.assertIn("napcat-cache-cleanup.service", script)
+        self.assertIn("napcat-cache-cleanup.timer", script)
+        self.assertIn("systemctl enable --now napcat-cache-cleanup.timer", script)
+
     def test_journald_has_bounded_retention(self):
         config = (ROOT / "deploy" / "qqbot-journald.conf").read_text(encoding="utf-8")
         self.assertIn("SystemMaxUse=192M", config)
