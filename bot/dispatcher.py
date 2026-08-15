@@ -1,4 +1,4 @@
-﻿# bot/dispatcher.py - Fast message dispatcher with permission system
+# bot/dispatcher.py - Fast message dispatcher with permission system
 import asyncio, heapq, json, logging, os, random, re, time
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -110,8 +110,9 @@ class Dispatcher(
         self._search_sem = asyncio.Semaphore(max(1, int(runtime.get("search_concurrency", 1))))
         self._group_conversation_state = defaultdict(self._new_conversation_state)
         # Delayed reply queue (group interjections only, lightweight heapq worker)
-        self._delayed_queue = []  # heap of [fire_ts, group_id, user_id, message_id, message, raw, sender_card]
+        self._delayed_queue = []  # heap of [fire_ts, seq, group_id, user_id, message_id, message, raw, sender_card]
         self._delayed_queue_index = {}  # (group_id, user_id) -> active entry for merge
+        self._delayed_queue_seq = 0  # monotonic tie-breaker for heap entries
         self._delayed_queue_cap = 20
         self._delayed_queue_event = asyncio.Event()
         self._delayed_worker_task = None
@@ -221,10 +222,10 @@ class Dispatcher(
         if self._delayed_queue:
             kept = []
             for entry in self._delayed_queue:
-                if str(entry[1]) in enabled_gids:
+                if str(entry[2]) in enabled_gids:
                     kept.append(entry)
                 else:
-                    self._delayed_queue_index.pop((entry[1], entry[2]), None)
+                    self._delayed_queue_index.pop((entry[2], entry[3]), None)
             self._delayed_queue = kept
             heapq.heapify(self._delayed_queue)
 

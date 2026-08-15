@@ -274,13 +274,21 @@ class CompanionRuntime:
         topic = str(result.get("topic") or (payload or {}).get("topic") or reason)[:160]
         priority = str(result.get("priority") or ("urgent" if reason == "event" else "normal"))
         key = "{}:{}:{}".format(topic, datetime.fromtimestamp(now).strftime("%Y%m%d%H"), reason)
-        self.store.enqueue(self.owner_id, topic, {"message_parts": result["message_parts"], "media_request": result.get("media_request") or {}}, now, priority, key)
+        media_request = result.get("media_request")
+        if not isinstance(media_request, dict):
+            media_request = {}
+        self.store.enqueue(self.owner_id, topic, {"message_parts": result["message_parts"], "media_request": media_request}, now, priority, key)
         for candidate in result.get("memory_candidates") or []:
             if isinstance(candidate, dict) and candidate.get("content") and not contains_sensitive_data(candidate["content"]):
                 self.store.upsert_fact(self.owner_id, candidate.get("category", "note"), candidate.get("key", candidate["content"][:80]), candidate["content"], candidate.get("value"), "sigmai", _clamp(candidate.get("confidence", 0.65)))
         if reason == "event" and payload:
             self.store.mark_event_triggered(payload.get("id"), datetime.fromtimestamp(now).strftime("%Y"))
-        followup = result.get("followup") or {}
+        followup = result.get("followup")
+        if not isinstance(followup, dict):
+            # LLM output or legacy state may put a plain string here; treat
+            # any non-dict value as "no followup requested" instead of
+            # crashing the whole worker tick on .get().
+            followup = {}
         if reason == "followup" and payload:
             self.store.finish_followup(payload.get("id"), now + 12 * 3600)
             next_attempt = int(payload.get("attempt", 0)) + 1

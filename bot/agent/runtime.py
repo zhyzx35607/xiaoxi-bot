@@ -26,8 +26,27 @@ from .skills import AgentSkillStore
 from .storage.json_store import AgentJsonStore
 from .timeline import AgentTimeline
 from .tools.gateway import AgentToolGateway
+from .tools.native import WRITE_TOOLS
 from .workers import AgentTaskStore
 from .verifier import AgentVerifier
+
+
+def _plan_requires_confirmation(plan):
+    """Deterministic confirmation rule for Agent plans.
+
+    AI output is not proof of safety: a plan containing native write tools
+    or an execution_plan always needs human confirmation, regardless of the
+    model's self-assessed needs_confirmation flag.
+    """
+    if not isinstance(plan, dict):
+        return True
+    if plan.get("execution_plan"):
+        return True
+    for tool in plan.get("tools") or []:
+        name = tool.get("name") if isinstance(tool, dict) else tool
+        if name in WRITE_TOOLS:
+            return True
+    return False
 
 
 class AgentRuntime:
@@ -314,7 +333,8 @@ class AgentRuntime:
             self._ensure_execution(dispatcher)
             initial_plan = await self.planner.plan(
                 agent_event, self._planning_context(agent_event))
-            if initial_plan.get("needs_confirmation", True):
+            # The model may only tighten confirmation, never waive it.
+            if _plan_requires_confirmation(initial_plan) or bool(initial_plan.get("needs_confirmation", True)):
                 from ..services.confirmations import create_agent_confirmation
                 frozen_event = {
                     "user_id": agent_event.identity.user_id,

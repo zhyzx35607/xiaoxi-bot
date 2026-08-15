@@ -434,6 +434,13 @@ async def cmd_admin_mgr(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, "请 @要操作的人")
         return
     target = mentions[0]
+    # Same hierarchy rules as kick/ban: an admin must not demote a peer,
+    # and owner/bot accounts stay protected. Operating on the QQ group
+    # owner is rejected here too (QQ would refuse it anyway).
+    target_ok, target_error = await can_moderate_target(d, group_id, user_id, target, role)
+    if not target_ok:
+        await d._reply(group_id, user_id, target_error)
+        return
     if action == "add":
         r = await d.client.set_group_admin(group_id, target, True)
         if r.get("status") == "ok":
@@ -684,7 +691,7 @@ async def cmd_disable(d, group_id, user_id, args, role, sender_card, message):
         await d._reply(group_id, user_id, "没找到能关闭的群")
 
 async def cmd_group(d, group_id, user_id, args, role, sender_card, message):
-    """/group enable|disable 群号... — owner alias matching the documented form."""
+    """/group enable|disable|list 群号... — owner alias matching the documented form."""
     parts = args.strip().split(maxsplit=1)
     sub = parts[0].lower() if parts else ""
     rest = parts[1] if len(parts) > 1 else ""
@@ -692,7 +699,15 @@ async def cmd_group(d, group_id, user_id, args, role, sender_card, message):
         await cmd_enable(d, group_id, user_id, rest, role, sender_card, message)
     elif sub == "disable":
         await cmd_disable(d, group_id, user_id, rest, role, sender_card, message)
+    elif sub == "list":
+        groups = d.config.get("groups", {})
+        lines = []
+        for gid, gcfg in groups.items():
+            status = "开启" if gcfg.get("enabled", True) else "关闭"
+            lines.append("  {} [{}]".format(gid, status))
+        await d._reply(group_id, user_id,
+                       "群组:\n" + "\n".join(lines) if lines else "还没有配置群")
     else:
         await d._reply(group_id, user_id,
-                       "用法：/group enable 群号 [群号...] 或 /group disable 群号 [群号...]\n"
+                       "用法：/group enable 群号 [群号...]、/group disable 群号 [群号...] 或 /group list\n"
                        "多个群号用空格分开，all 表示全部已配置群")
