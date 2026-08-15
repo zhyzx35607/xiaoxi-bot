@@ -148,7 +148,6 @@ def migrate_config(config):
         "ai_timeout_seconds": 15,
         "sigmai_timeout_seconds": 15,
         "deepseek_timeout_seconds": 20,
-        "sigmai_fallback_delay_seconds": 6,
         "connect_timeout_seconds": 5,
         "startup_connect_timeout_seconds": 30,
         "reconnect_max_delay_seconds": 60,
@@ -206,9 +205,12 @@ def migrate_config(config):
     if "agnes_timeout_seconds" in runtime and "sigmai_timeout_seconds" not in runtime:
         runtime["sigmai_timeout_seconds"] = runtime.pop("agnes_timeout_seconds")
         migrated = True
-    if "agnes_fallback_delay_seconds" in runtime and "sigmai_fallback_delay_seconds" not in runtime:
-        runtime["sigmai_fallback_delay_seconds"] = runtime.pop("agnes_fallback_delay_seconds")
-        migrated = True
+    # The fallback-delay keys never had an implementation (SigmaI falls back
+    # serially); drop them so stale config cannot masquerade as a live knob.
+    for dead_key in ("agnes_fallback_delay_seconds", "sigmai_fallback_delay_seconds"):
+        if dead_key in runtime:
+            runtime.pop(dead_key)
+            migrated = True
 
     uapi_defaults = {
         "concurrency": 3,

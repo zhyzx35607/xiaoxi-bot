@@ -3,7 +3,13 @@
 import time
 from datetime import datetime
 
+from ..utils import bot_timezone, configured_timezone_name
 from .policy import agent_config, is_quiet_hours
+
+
+def _localize(config, now):
+    return datetime.fromtimestamp(
+        now, bot_timezone(configured_timezone_name(config)))
 
 
 class ProactiveBudget:
@@ -20,12 +26,12 @@ class ProactiveBudget:
     def allowed(self, config, scope_key, *, topic="", is_private=False, now=None, priority="normal"):
         now = now or time.time()
         settings = agent_config(config)
-        if is_quiet_hours(settings, datetime.fromtimestamp(now)):
+        if is_quiet_hours(settings, _localize(config, now)):
             return False, "quiet_hours"
         state = self._state(scope_key)
         if float(state.get("muted_until", 0) or 0) > now:
             return False, "muted"
-        day = datetime.fromtimestamp(now).strftime("%Y%m%d")
+        day = _localize(config, now).strftime("%Y%m%d")
         sent = state.get("sent", []) if state.get("day") == day else []
         limit = int(settings["owner_daily_limit"] if is_private else settings["group_daily_limit"])
         if priority != "urgent" and len(sent) >= limit:
@@ -45,7 +51,7 @@ class ProactiveBudget:
         def update(state):
             if not isinstance(state, dict):
                 state = {"day": "", "sent": [], "topics": {}, "muted_until": 0}
-            day = datetime.fromtimestamp(now).strftime("%Y%m%d")
+            day = _localize(config, now).strftime("%Y%m%d")
             if state.get("day") != day:
                 state = {"day": day, "sent": [], "topics": {}, "muted_until": 0}
             state.setdefault("sent", []).append(now)

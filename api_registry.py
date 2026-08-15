@@ -40,7 +40,7 @@ _NAMES = {
         "set_group_kick", "set_group_ban", "set_group_whole_ban", "set_group_admin",
         "set_group_card", "set_group_special_title", "set_group_name", "set_group_portrait",
         "set_group_leave", "send_group_notice", "del_group_notice", "set_essence_msg",
-        "delete_essence_msg", "set_group_add_request", "set_group_todo",
+        "delete_essence_msg", "set_group_todo",
         "cancel_group_todo", "complete_group_todo", "upload_image_to_qun_album",
         "del_group_album_media", "do_group_album_comment", "set_group_album_media_like",
         "cancel_group_album_media_like", "set_group_remark", "set_group_search",
@@ -83,6 +83,8 @@ _INTERACTION = {
     "mark_all_as_read", "_mark_all_as_read", "set_input_status",
 }
 _MANAGEMENT = set(_NAMES["management"]) | {
+    # Categorized under "request" but still a management-risk action.
+    "set_group_add_request",
     "delete_msg", "upload_group_file", "delete_group_file", "create_group_file_folder",
     "delete_group_folder", "move_group_file", "trans_group_file", "rename_group_file",
     "upload_private_file", "download_file", "set_friend_add_request", "set_online_status",

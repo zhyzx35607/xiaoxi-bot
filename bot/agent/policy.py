@@ -1,6 +1,7 @@
 """Deterministic guardrails for Agent autonomy and proactive messages."""
 
 from datetime import datetime
+from ..utils import bot_timezone, now_in_timezone
 from .models import AgentDecision, AgentEvent, IdentityLevel
 
 DEFAULTS = {"enabled": True, "group_enabled": True, "private_enabled": True, "proactive_enabled": True, "owner_daily_limit": 2, "owner_hourly_limit": 1, "group_daily_limit": 3, "topic_cooldown_seconds": 1800, "quiet_start": 23, "quiet_end": 9, "member_passive_only": True}
@@ -11,7 +12,7 @@ def agent_config(config):
     return result
 
 def is_quiet_hours(settings, now=None):
-    hour = (now or datetime.now()).hour
+    hour = (now or datetime.now(bot_timezone())).hour
     start, end = int(settings["quiet_start"]), int(settings["quiet_end"])
     return (hour >= start or hour < end) if start > end else start <= hour < end
 
@@ -23,7 +24,7 @@ def decide_event(config, event: AgentEvent, *, explicit=False):
     if explicit: return AgentDecision(True, "explicit_request")
     if event.identity.level < IdentityLevel.GROUP_OWNER and settings["member_passive_only"]: return AgentDecision(False, "member_passive_only")
     if not settings["proactive_enabled"]: return AgentDecision(False, "proactive_disabled")
-    if is_quiet_hours(settings) and not event.identity.is_super_owner: return AgentDecision(False, "quiet_hours")
+    if is_quiet_hours(settings, now_in_timezone(config)) and not event.identity.is_super_owner: return AgentDecision(False, "quiet_hours")
     return AgentDecision(True, "privileged_proactive_candidate")
 
 def primary_router_enabled(config, event: AgentEvent):

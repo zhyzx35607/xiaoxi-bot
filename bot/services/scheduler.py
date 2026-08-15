@@ -11,30 +11,20 @@ import os
 import random
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from ..utils import atomic_write_json
+from datetime import datetime, timedelta
+from ..utils import atomic_write_json, bot_timezone, configured_timezone_name
 
 log = logging.getLogger("qqbot")
-_TZ_WARNING_NAMES = set()
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _CHECKIN_STATUS_PATH = os.path.join(_ROOT, "data", "checkin_status.json")
 
 
 def _timezone(name="Asia/Shanghai"):
-    try:
-        return ZoneInfo(str(name or "Asia/Shanghai"))
-    except ZoneInfoNotFoundError:
-        key = str(name or "Asia/Shanghai")
-        if key not in _TZ_WARNING_NAMES:
-            _TZ_WARNING_NAMES.add(key)
-            log.info("Timezone database unavailable for %s; using fixed UTC+8", name)
-        return timezone(timedelta(hours=8), name="Asia/Shanghai")
+    return bot_timezone(name)
 
 
 def _scheduler_timezone(dispatcher):
-    runtime = dispatcher.config.get("runtime", {})
-    return str(runtime.get("scheduler_timezone") or "Asia/Shanghai")
+    return configured_timezone_name(dispatcher.config)
 
 
 def _client_connected(dispatcher):

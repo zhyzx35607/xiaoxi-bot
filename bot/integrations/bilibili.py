@@ -495,7 +495,8 @@ async def download_mp4(dispatcher, url, bvid, max_bytes, timeout=120):
                 log.info("bili download too large: %d > %d", length, max_bytes)
                 return None
             total = 0
-            fd, path = create_runtime_temp_file("bili_{}_".format(bvid), ".mp4")
+            fd, path = create_runtime_temp_file(
+                "bili_{}_".format(bvid), ".mp4", world_readable=True)
             with os.fdopen(fd, "wb") as f:
                 async for chunk in resp.content.iter_chunked(262144):
                     total += len(chunk)

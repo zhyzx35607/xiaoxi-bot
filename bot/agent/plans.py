@@ -1,7 +1,8 @@
 """Persistent multi-step execution plans scoped to an owner or group."""
 
 import time
-import uuid
+
+from .storage.json_store import new_record_id
 
 
 TERMINAL_STEP_STATUSES = {"done", "failed", "cancelled", "skipped"}
@@ -33,7 +34,7 @@ class AgentPlanStore:
                     "evidence": "", "result": "", "updated_at": now,
                 })
         record = {
-            "id": uuid.uuid4().hex[:12], "scope_key": scope_key,
+            "id": new_record_id(), "scope_key": scope_key,
             "owner_id": int(owner_id or 0), "title": str(title).strip()[:1000],
             "success_criteria": str(success_criteria).strip()[:1000],
             "status": "active" if normalized else "draft", "steps": normalized,

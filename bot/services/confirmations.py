@@ -1,7 +1,8 @@
-﻿"""Short-lived confirmation records for destructive NapCat actions."""
+"""Short-lived confirmation records for destructive NapCat actions."""
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import tarfile
@@ -11,6 +12,7 @@ import time
 from ..memory import sanitize_for_memory, sanitize_persistent_value
 from ..utils import atomic_write_json
 
+log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _PATH = os.path.join(_ROOT, "data", "pending_actions.json")
 _TTL = 60
@@ -21,7 +23,10 @@ def _load_unlocked():
         with open(_PATH, encoding="utf-8") as handle:
             data = json.load(handle)
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except FileNotFoundError:
+        return {}
+    except Exception as error:
+        log.warning("Pending confirmations load failed; starting empty: %s", error)
         return {}
 
 def _load():
@@ -62,7 +67,7 @@ def create_confirmation(group_id, user_id, action, params, description):
     with _LOCK:
         data = _load_unlocked()
         _prune(data)
-        code = secrets.token_hex(3)
+        code = secrets.token_hex(4)
         data[code] = {
             "group_id": int(group_id or 0),
             "user_id": int(user_id),

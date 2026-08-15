@@ -9,7 +9,7 @@ from .permission import (
     save_group_config, LEVEL_MASTER, LEVEL_ADMIN, LEVEL_MEMBER
 )
 from .guard import is_blacklisted, add_blacklist, get_warning_count, add_warning
-from .utils import atomic_write_json
+from .utils import atomic_write_json, now_in_timezone
 from .events.context import (
     _cq_unescape,
     _disabled_group_activation_allowed,
@@ -157,7 +157,7 @@ class Dispatcher(
         now = time.time()
         if not force and (not self._state_dirty or now - self._last_state_save < 30):
             return
-        today = time.strftime("%Y%m%d")
+        today = now_in_timezone(self.config).strftime("%Y%m%d")
         group_counts = {}
         for gid, users in self._group_msg_counts.items():
             group_counts[str(gid)] = {str(uid): int(cnt) for uid, cnt in users.items()}
@@ -250,7 +250,7 @@ class Dispatcher(
             self._global_reply_timestamps.popleft()
 
         # _daily_likes / _daily_fortunes: remove non-today keys from memory
-        today = time.strftime("%Y%m%d")
+        today = now_in_timezone(self.config).strftime("%Y%m%d")
         for dct in (self._daily_likes, self._daily_fortunes):
             stale_keys = [k for k in dct if not k.startswith(today + ":")]
             for k in stale_keys:
@@ -492,6 +492,7 @@ class Dispatcher(
         # Skip blacklisted users in repeat tracking
         if is_blacklisted(group_id, sender_user_id):
             return False
+        should_repeat = False
         async with self._lock:
             tracker = self._group_repeat_tracker.setdefault(group_id, {})
             now = time.time()
@@ -515,9 +516,13 @@ class Dispatcher(
                 prob = cfg.get("probability", 0.3)
                 if random.random() < prob:
                     tracker[raw] = (first_ts, users, now)
-                    await self.client.send_group_msg(group_id, raw)
-                    return True
-            return False
+                    should_repeat = True
+        if should_repeat:
+            # Sending can block on a slow network; never hold the dispatch
+            # lock while the OneBot call is in flight.
+            await self.client.send_group_msg(group_id, raw)
+            return True
+        return False
 
     def _is_trivial_for_interjection(self, text, message):
         """Cheap hard filter for unsolicited interjection candidates.

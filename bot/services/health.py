@@ -74,23 +74,16 @@ class HealthServiceMixin:
                     mb = kb / 1024.0
                     if mb >= 150 and time.time() - last > 20:
                         last = time.time()
-                        log.warning("RSS thread-watch: %.0fMB | GC: %s",
-                                    mb, self._gc_type_histogram())
+                        diagnostics = self._sample_loop_diagnostics()
+                        log.warning("RSS thread-watch: %.0fMB | %s", mb,
+                                    diagnostics or "loop diagnostics unavailable")
                         dump_path = runtime_diagnostic_path("stack_dump.txt")
                         with open(dump_path, "a", encoding="utf-8") as f:
                             f.write("\n=== RSS %.0fMB at %s ===\n" % (
                                 mb, time.strftime("%F %T")))
                             faulthandler.dump_traceback(file=f)
-                            loop = self._rss_watch_loop
-                            if loop is not None:
-                                try:
-                                    for task in asyncio.all_tasks(loop):
-                                        coro = task.get_coro()
-                                        f.write("TASK %s %s\n" % (
-                                            getattr(coro, "__qualname__", coro),
-                                            task.get_name()))
-                                except Exception as e:
-                                    f.write("task enum failed: %s\n" % e)
+                            if diagnostics:
+                                f.write(diagnostics + "\n")
                 except Exception as exc:
                     now = time.time()
                     if now - last_error >= 60:
@@ -99,6 +92,39 @@ class HealthServiceMixin:
         t = threading.Thread(target=_watch, daemon=True, name="rss-watch")
         self._rss_watch_thread = t
         t.start()
+
+    def _sample_loop_diagnostics(self, timeout=5.0):
+        """GC histogram + asyncio task list, collected on the event loop thread.
+
+        asyncio.all_tasks() and gc.get_objects() are not safe to call from the
+        watch thread; if the loop is wedged the sample times out instead.
+        """
+        import concurrent.futures
+        loop = self._rss_watch_loop
+        if loop is None:
+            return None
+        result = concurrent.futures.Future()
+
+        def _collect():
+            lines = []
+            try:
+                lines.append("GC: %s" % self._gc_type_histogram())
+            except Exception as error:
+                lines.append("GC histogram failed: %s" % error)
+            try:
+                for task in asyncio.all_tasks():
+                    coro = task.get_coro()
+                    lines.append("TASK %s %s" % (
+                        getattr(coro, "__qualname__", coro), task.get_name()))
+            except Exception as error:
+                lines.append("task enum failed: %s" % error)
+            result.set_result("\n".join(lines))
+
+        try:
+            loop.call_soon_threadsafe(_collect)
+            return result.result(timeout=timeout)
+        except Exception:
+            return None
 
     async def stop_rss_guard(self):
         stop_event = getattr(self, "_rss_watch_stop", None)

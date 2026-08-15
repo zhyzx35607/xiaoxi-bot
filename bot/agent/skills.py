@@ -1,7 +1,8 @@
 """Reusable scope-isolated Agent SOPs."""
 
 import time
-import uuid
+
+from .storage.json_store import new_record_id
 
 
 class AgentSkillStore:
@@ -14,7 +15,7 @@ class AgentSkillStore:
     def create(self, scope_key, owner_id, name, instructions, *, triggers=None):
         now = time.time()
         item = {
-            "id": uuid.uuid4().hex[:12], "name": str(name).strip()[:100],
+            "id": new_record_id(), "name": str(name).strip()[:100],
             "instructions": str(instructions).strip()[:4000],
             "triggers": [str(value).strip()[:80] for value in (triggers or []) if str(value).strip()][:20],
             "owner_id": int(owner_id or 0), "enabled": True,

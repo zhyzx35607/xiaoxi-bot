@@ -11,11 +11,12 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from email.utils import parsedate_to_datetime
 
 import aiohttp
 
-from ..utils import atomic_write_json
+from ..utils import atomic_write_json, bot_timezone, configured_timezone_name
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -78,12 +79,12 @@ def _log_missing_key(path):
         log.debug("uapi: using visitor quota for %s", path)
 
 
-def _today():
-    return time.strftime("%Y-%m-%d")
+def _today(tz_name="Asia/Shanghai"):
+    return datetime.now(bot_timezone(tz_name)).strftime("%Y-%m-%d")
 
 
-def _month():
-    return time.strftime("%Y-%m")
+def _month(tz_name="Asia/Shanghai"):
+    return datetime.now(bot_timezone(tz_name)).strftime("%Y-%m")
 
 
 def _load_state():
@@ -125,8 +126,8 @@ def _save_state():
         log.warning("uapi state save failed: %s", error)
 
 
-def _rollover(state):
-    today, month = _today(), _month()
+def _rollover(state, tz_name="Asia/Shanghai"):
+    today, month = _today(tz_name), _month(tz_name)
     changed = False
     if state["date"] != today:
         state["date"] = today
@@ -157,7 +158,7 @@ def _endpoint_cost(path):
 
 def credits_remaining(config):
     state = _load_state()
-    if _rollover(state):
+    if _rollover(state, configured_timezone_name(config)):
         _save_state()
     daily, reserve, month_limit = _limits(config)
     user_cap = max(0, daily - reserve)
@@ -181,7 +182,7 @@ def credits_remaining(config):
 
 def credits_available(config, kind="user", path=None):
     state = _load_state()
-    if _rollover(state):
+    if _rollover(state, configured_timezone_name(config)):
         _save_state()
     cost = _endpoint_cost(path) if path else 1
     if cost <= 0:
@@ -457,41 +458,37 @@ async def _json_request_unlocked(dispatcher, method, path, params=None, json_bod
         auth_attempts.append({})
     session = dispatcher.client.session
     for auth_index, attempt_headers in enumerate(auth_attempts):
-        for retry_index in range(3):
-            try:
-                async with _request_semaphore(dispatcher):
-                    async with session.request(
-                        method, BASE_URL + path, params=params, json=json_body,
-                        headers=attempt_headers,
-                        timeout=aiohttp.ClientTimeout(total=timeout),
-                    ) as response:
-                        await _record_response_locked(
-                            dispatcher, path, kind, response.status, response.headers)
-                        if response.status == 401 and auth_index + 1 < len(auth_attempts):
-                            log.warning("uapi %s rejected configured key; retrying free endpoint as visitor", path)
-                            break
-                        if response.status == 429:
-                            delay = _start_rate_limit_cooldown(
-                                dispatcher, path, response.headers)
-                            log.warning(
-                                "uapi %s rate limited; cooling down for %.1fs",
-                                path, delay,
-                            )
-                            return None
-                        elif response.status != 200:
-                            log.warning("uapi %s -> HTTP %s", path, response.status)
-                            return None
-                        else:
-                            data = await _read_json_bounded(response)
-                            if use_cache:
-                                _cache_put(path, params, data)
-                            return data
-                if response.status == 401:
-                    break
-                await asyncio.sleep(delay)
-            except Exception as error:
-                log.warning("uapi %s failed: %s", path, error)
-                return None
+        try:
+            async with _request_semaphore(dispatcher):
+                async with session.request(
+                    method, BASE_URL + path, params=params, json=json_body,
+                    headers=attempt_headers,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                ) as response:
+                    await _record_response_locked(
+                        dispatcher, path, kind, response.status, response.headers)
+                    if response.status == 401 and auth_index + 1 < len(auth_attempts):
+                        log.warning("uapi %s rejected configured key; retrying free endpoint as visitor", path)
+                        continue
+                    if response.status == 429:
+                        delay = _start_rate_limit_cooldown(
+                            dispatcher, path, response.headers)
+                        log.warning(
+                            "uapi %s rate limited; cooling down for %.1fs",
+                            path, delay,
+                        )
+                        return None
+                    elif response.status != 200:
+                        log.warning("uapi %s -> HTTP %s", path, response.status)
+                        return None
+                    else:
+                        data = await _read_json_bounded(response)
+                        if use_cache:
+                            _cache_put(path, params, data)
+                        return data
+        except Exception as error:
+            log.warning("uapi %s failed: %s", path, error)
+            return None
     return None
 
 

@@ -7,9 +7,10 @@ import os
 import random
 import re
 import time
+from datetime import datetime
 
 from ..permission import get_group_config
-from ..utils import atomic_write_json
+from ..utils import atomic_write_json, bot_timezone, configured_timezone_name
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,8 +18,8 @@ _STATE_PATH = os.path.join(_ROOT, "data", "voice_reply_state.json")
 _state = None
 
 
-def _today():
-    return time.strftime("%Y-%m-%d")
+def _today(tz_name="Asia/Shanghai"):
+    return datetime.now(bot_timezone(tz_name)).strftime("%Y-%m-%d")
 
 
 def _load_state():
@@ -90,11 +91,12 @@ async def maybe_send_short_voice(dispatcher, group_id, text):
         dispatcher._voice_reply_lock = lock
     async with lock:
         now = time.time()
+        tz_name = configured_timezone_name(getattr(dispatcher, "config", None))
         state = _load_state()
         group_key = str(group_id)
         record = state["groups"].get(group_key, {})
-        if record.get("date") != _today():
-            record = {"date": _today(), "count": 0, "last_sent": 0}
+        if record.get("date") != _today(tz_name):
+            record = {"date": _today(tz_name), "count": 0, "last_sent": 0}
         if int(record.get("count", 0) or 0) >= settings["daily_limit"]:
             return False
         if now - float(record.get("last_sent", 0) or 0) < settings["cooldown_seconds"]:
@@ -113,7 +115,7 @@ async def maybe_send_short_voice(dispatcher, group_id, text):
                      group_id, (result or {}).get("status") if isinstance(result, dict) else result,
                      (result or {}).get("retcode") if isinstance(result, dict) else None)
             return False
-        record.update({"date": _today(),
+        record.update({"date": _today(tz_name),
                        "count": int(record.get("count", 0) or 0) + 1,
                        "last_sent": now})
         state["groups"][group_key] = record

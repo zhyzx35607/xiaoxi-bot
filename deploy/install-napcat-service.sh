@@ -119,10 +119,13 @@ if [[ -d "${napcat_config_dir}" ]]; then
   \) -print0)
 fi
 install -m 0644 "${project_root}/deploy/napcat.service" /etc/systemd/system/napcat.service
+install -m 0644 "${project_root}/deploy/napcat-cache-cleanup.service" /etc/systemd/system/napcat-cache-cleanup.service
+install -m 0644 "${project_root}/deploy/napcat-cache-cleanup.timer" /etc/systemd/system/napcat-cache-cleanup.timer
 install -m 0644 "${project_root}/deploy/napcat-login-watchdog.service" /etc/systemd/system/napcat-login-watchdog.service
 install -m 0644 "${project_root}/deploy/napcat-restart.service" /etc/systemd/system/napcat-restart.service
 install -m 0644 "${project_root}/deploy/napcat-restart.path" /etc/systemd/system/napcat-restart.path
 systemctl daemon-reload
+systemctl enable --now napcat-cache-cleanup.timer
 systemctl enable --now napcat-restart.path
 systemctl enable --now napcat-login-watchdog.service
 

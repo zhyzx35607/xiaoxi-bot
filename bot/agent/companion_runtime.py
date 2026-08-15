@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..ai.providers import _call_deepseek
 from ..memory import contains_sensitive_data, sanitize_for_memory
+from ..utils import bot_timezone, configured_timezone_name
 from .companion_store import CompanionStore
 
 log = logging.getLogger("qqbot")
@@ -192,12 +193,16 @@ class CompanionRuntime:
             lines.append("近期经历：" + "；".join(str(item.get("content", ""))[:180] for item in reversed(episodes[:6])))
         return "\n".join(lines)[:10000]
 
+    def _local_time(self, now):
+        return datetime.fromtimestamp(
+            now, bot_timezone(configured_timezone_name(self.config)))
+
     def _due_reason(self, now):
         state = self.state()
         followups = self.store.due_followups(self.owner_id, now)
         if followups and state.get("followup_enabled", True):
             return "followup", followups[0]
-        dt = datetime.fromtimestamp(now)
+        dt = self._local_time(now)
         for event in self.store.due_events(self.owner_id, dt.month, dt.day):
             key = str(dt.year)
             if event.get("last_trigger_key") != key:
@@ -269,11 +274,11 @@ class CompanionRuntime:
         self._apply_delta(state, result.get("emotion_delta") or {}, now)
         state["last_decision_at"] = now
         if reason == "time":
-            state["last_time_bucket"] = datetime.fromtimestamp(now).strftime("%Y%m%d%H")
+            state["last_time_bucket"] = self._local_time(now).strftime("%Y%m%d%H")
         self.store.save_state(self.owner_id, state)
         topic = str(result.get("topic") or (payload or {}).get("topic") or reason)[:160]
         priority = str(result.get("priority") or ("urgent" if reason == "event" else "normal"))
-        key = "{}:{}:{}".format(topic, datetime.fromtimestamp(now).strftime("%Y%m%d%H"), reason)
+        key = "{}:{}:{}".format(topic, self._local_time(now).strftime("%Y%m%d%H"), reason)
         media_request = result.get("media_request")
         if not isinstance(media_request, dict):
             media_request = {}
@@ -282,7 +287,7 @@ class CompanionRuntime:
             if isinstance(candidate, dict) and candidate.get("content") and not contains_sensitive_data(candidate["content"]):
                 self.store.upsert_fact(self.owner_id, candidate.get("category", "note"), candidate.get("key", candidate["content"][:80]), candidate["content"], candidate.get("value"), "sigmai", _clamp(candidate.get("confidence", 0.65)))
         if reason == "event" and payload:
-            self.store.mark_event_triggered(payload.get("id"), datetime.fromtimestamp(now).strftime("%Y"))
+            self.store.mark_event_triggered(payload.get("id"), self._local_time(now).strftime("%Y"))
         followup = result.get("followup")
         if not isinstance(followup, dict):
             # LLM output or legacy state may put a plain string here; treat
@@ -308,15 +313,15 @@ class CompanionRuntime:
     def _consume_trigger(self, reason, payload, now, state):
         """Advance the trigger source so a failed decision is not retried every tick."""
         if reason == "event" and payload:
-            self.store.mark_event_triggered(payload.get("id"), datetime.fromtimestamp(now).strftime("%Y"))
+            self.store.mark_event_triggered(payload.get("id"), self._local_time(now).strftime("%Y"))
         elif reason == "followup" and payload:
             self.store.finish_followup(payload.get("id"), now + 12 * 3600)
         if reason == "time":
-            state["last_time_bucket"] = datetime.fromtimestamp(now).strftime("%Y%m%d%H")
+            state["last_time_bucket"] = self._local_time(now).strftime("%Y%m%d%H")
             self.store.save_state(self.owner_id, state)
 
     def _build_prompt(self, reason, payload, now, roleplay_hint=""):
-        dt = datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M")
+        dt = self._local_time(now).strftime("%Y-%m-%d %H:%M")
         return ("你是最高主人私聊中的长期陪伴 bot。你只能输出 JSON，不要输出 Markdown。\n"
                 "你要像一个有连续情绪、记忆和关系状态的人，但不要声称拥有真实意识。\n"
                 "当前时间：{}；触发原因：{}；触发数据：{}\n角色扮演状态：{}\n{}\n"
