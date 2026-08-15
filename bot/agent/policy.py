@@ -41,7 +41,10 @@ def primary_router_enabled(config, event: AgentEvent):
     return bool(group_agent.get("primary_router", False))
 
 def tool_allowed(config, event: AgentEvent, tool_name):
+    # Moderation actions (set_group_ban/set_group_kick/set_group_whole_ban) are
+    # not gated here: they can never reach this point because the real boundary
+    # is the gateway allowlist — SAFE_ACTIONS only contains risk=="read" NapCat
+    # actions, and native write tools check can_manage_agent in execute_native.
     forbidden = {"get_clientkey", "get_cookies", "get_credentials", "get_csrf_token", "get_rkey", "get_rkey_server", "nc_get_rkey", "send_packet", "send_raw_packet", "test_action"}
     if tool_name in forbidden: return False
-    if tool_name in {"set_group_ban", "set_group_kick", "set_group_whole_ban"}: return event.identity.level >= IdentityLevel.GROUP_OWNER
     return True

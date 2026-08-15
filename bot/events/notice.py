@@ -305,8 +305,16 @@ async def check_bad_words(dispatcher, group_id, user_id, raw_message, message_id
                 try: await dispatcher.client.delete_msg(message_id)
                 except Exception as error:
                     log.debug("Bad-word message deletion failed: %s", error)
-            warn = bw.get("warn_msg", "请注意文明发言！").replace("{user}", str(user_id))
-            await dispatcher.client.send_group_msg(group_id, warn)
+            warn = str(bw.get("warn_msg", "请注意文明发言！"))
+            # {user} must become a real at segment; a plain-text QQ number
+            # does not render as a mention in QQ clients.
+            segments = []
+            for index, piece in enumerate(warn.replace("@{user}", "{user}").split("{user}")):
+                if index:
+                    segments.append({"type": "at", "data": {"qq": str(user_id)}})
+                if piece:
+                    segments.append({"type": "text", "data": {"text": piece}})
+            await dispatcher.client.send_group_msg(group_id, segments or warn)
             log.info("Bad word filtered for user=%s", user_id)
             return True
     return False

@@ -32,6 +32,22 @@ def _read_json_list(path):
     return value
 
 
+def _message_with_single_at(message, target):
+    """Return the segment list with every @ except `target` stripped.
+
+    Natural-language triggers run the moderation command once per target;
+    without this filter the command re-reads all @ segments from the raw
+    message and acts on every target each time.
+    """
+    if not isinstance(message, list):
+        return message
+    return [
+        seg for seg in message
+        if not (isinstance(seg, dict) and seg.get("type") == "at")
+        or str(seg.get("data", {}).get("qq")) == str(target)
+    ]
+
+
 def _read_linux_uptime_seconds():
     with open("/proc/uptime", encoding="utf-8") as handle:
         return int(float(handle.read().split()[0]))
@@ -469,15 +485,18 @@ class GroupMessageMixin:
             cmd_name, trig_args = trig
             if cmd_name == "kick":
                 for target in trig_args.get("targets", []):
-                    await self._run_command("kick", str(target), group_id, user_id, sender_role, sender_card, message)
+                    await self._run_command("kick", str(target), group_id, user_id, sender_role,
+                                            sender_card, _message_with_single_at(message, target))
             elif cmd_name == "ban":
                 targets = trig_args.get("targets", [])
                 duration = trig_args.get("args", "")
                 for target in targets:
-                    await self._run_command("ban", f"{duration} {target}".strip(), group_id, user_id, sender_role, sender_card, message)
+                    await self._run_command("ban", f"{duration} {target}".strip(), group_id, user_id,
+                                            sender_role, sender_card, _message_with_single_at(message, target))
             elif cmd_name == "unban":
                 for target in trig_args.get("targets", []):
-                    await self._run_command("unban", str(target), group_id, user_id, sender_role, sender_card, message)
+                    await self._run_command("unban", str(target), group_id, user_id, sender_role,
+                                            sender_card, _message_with_single_at(message, target))
             elif cmd_name == "mytitle":
                 await self._run_command("mytitle", trig_args.get("title", ""),
                                         group_id, user_id, sender_role, sender_card, message)
@@ -899,20 +918,6 @@ class PrivateMessageMixin:
                 await self._reply(None, user_id, status)
             except Exception as e:
                 await self._reply(None, user_id, f"状态读取失败：{e}")
-
-        elif cmd == "group" and args.strip():
-            parts2 = args.split()
-            if parts2[0] == "list":
-                groups = self.config.get("groups", {})
-                lines = []
-                for gid, gcfg in groups.items():
-                    st = "开启" if gcfg.get("enabled", True) else "关闭"
-                    lines.append(f"  {gid} [{st}]")
-                await self._reply(None, user_id, "群组:\n" + "\n".join(lines))
-            elif parts2[0] in ("enable", "disable") and len(parts2) >= 2:
-                gid = parts2[1]
-                await self._run_command(
-                    parts2[0], gid, None, user_id, "member", sender_name, message)
 
         elif cmd == "memory" and args.strip():
             parts2 = args.split()

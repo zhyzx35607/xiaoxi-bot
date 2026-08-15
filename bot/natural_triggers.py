@@ -55,15 +55,28 @@ MUSIC_PREFIXES = [
 ]
 
 
+# Trailing aspect particles allowed right after a CJK keyword, so everyday
+# phrasing like "踢了 @xxx" or "把 @xxx 禁言了" still matches. The set is
+# deliberately tiny: arbitrary hanzi must keep blocking matches, otherwise
+# "踢球" or "踢踏舞" would fire the kick trigger.
+_CJK_TRAILING_PARTICLES = "了吧掉"
+
+
 def _keyword_boundary_pattern(kw):
     """Build a regex that matches `kw` at word boundaries.
-    
-    A word boundary means: preceded by start-of-string, space, or CJK punctuation,
-    and followed by space, CJK punctuation, @, or end-of-string.
-    This prevents false matches like "飞" in "飞八分钱" or "出去" in "发出去".
+
+    A word boundary means: preceded by start-of-string, space, or CJK punctuation.
+    ASCII keywords (ban/unban) keep a strict trailing boundary (space, CJK
+    punctuation, @, or end-of-string); CJK keywords additionally accept the
+    aspect particles in _CJK_TRAILING_PARTICLES as a trailing boundary.
+    This prevents false matches like "飞" in "飞八分钱", "出去" in "发出去",
+    or "踢" in "踢球".
     """
     boundary = r"(?:^|[\s,，。！？!])"
-    end_boundary = r"(?:[\s,，。！？!@]|$)"
+    if kw.isascii():
+        end_boundary = r"(?:[\s,，。！？!@]|$)"
+    else:
+        end_boundary = r"(?:[\s,，。！？!@]|$|(?=[" + _CJK_TRAILING_PARTICLES + "]))"
     return boundary + re.escape(kw) + end_boundary
 
 
