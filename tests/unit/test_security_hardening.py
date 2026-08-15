@@ -189,7 +189,7 @@ class ClearDataConfirmationTests(unittest.IsolatedAsyncioTestCase):
                 await system.cmd_clear_ai(
                     dispatcher, 100, 10, "", "member", "", [])
                 self.assertTrue(all(path.exists() for path in files))
-                code = re.search(r"/确认 ([0-9a-f]{6})", dispatcher.replies[-1][0][2]).group(1)
+                code = re.search(r"/确认 ([0-9a-f]{8})", dispatcher.replies[-1][0][2]).group(1)
 
                 ok, message = await confirmations.execute_confirmation(
                     dispatcher, code, 10, 100, "member")

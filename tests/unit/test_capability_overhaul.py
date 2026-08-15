@@ -402,3 +402,23 @@ class UApiEnhancementTests(unittest.TestCase):
                 uapi, "_STATE_PATH", os.path.join(directory, "uapi.json")):
             uapi.reset_state_for_test()
             self.assertIsNone(asyncio.run(uapi.uapi_get(dispatcher, "/misc/hotboard")))
+
+
+class ApiRegistryMetadataTests(unittest.TestCase):
+    def test_each_action_has_exactly_one_category(self):
+        from api_registry import _NAMES
+
+        seen = {}
+        for category, names in _NAMES.items():
+            for name in names:
+                self.assertNotIn(name, seen, "duplicate category for %s" % name)
+                seen[name] = category
+
+    def test_set_group_add_request_is_request_category_management_risk(self):
+        from api_registry import REGISTRY
+
+        spec = REGISTRY["set_group_add_request"]
+        self.assertEqual(spec.category, "request")
+        self.assertEqual(spec.risk, "management")
+        self.assertFalse(spec.ai_allowed)
+        self.assertFalse(spec.automation_allowed)

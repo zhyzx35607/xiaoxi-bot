@@ -318,7 +318,8 @@ async def execute_interaction_tool(dispatcher, name, arguments,
         log.warning("interaction tool %s failed: %s", name, exc)
         return {"ok": False, "error": "tool_failed", "tool": name,
                 "message": _clip(exc, 200)}
-    _record_interaction_usage(group_id)
+    if result.get("status") == "ok":
+        _record_interaction_usage(group_id)
     log.info("INTERACTION_TOOL group=%s user=%s tool=%s status=%s",
              group_id, user_id, name, result.get("status"))
     return {"ok": result.get("status") == "ok", "tool": name,
@@ -535,10 +536,11 @@ async def execute_playful_ban(dispatcher, args, ctx):
         return {"ok": False, "error": "cooldown_active", "tool": "playful_ban"}
     result = await dispatcher.client.set_group_ban(group_id, target_id, duration)
     ok = result.get("status") == "ok"
-    _playful_ban_group_usage[gkey] = _playful_ban_group_usage.get(gkey, 0) + 1
-    _playful_ban_target_usage[tkey] = True
-    _playful_ban_last_ts[group_id] = now
-    _prune_playful_ban_state(today)
+    if ok:
+        _playful_ban_group_usage[gkey] = _playful_ban_group_usage.get(gkey, 0) + 1
+        _playful_ban_target_usage[tkey] = True
+        _playful_ban_last_ts[group_id] = now
+        _prune_playful_ban_state(today)
     log.warning("PLAYFUL_BAN group=%s actor=AI target=%s duration=%ss reason=%s status=%s",
                 group_id, target_id, duration, reason, result.get("status"))
     _audit_playful_ban({
@@ -767,7 +769,8 @@ async def execute_ai_tool(dispatcher, name, arguments, group_id=0, user_id=0,
         return {"ok": False, "error": "tool_failed", "tool": name,
                 "message": _clip(exc, 200)}
     if tier == "interaction":
-        _record_interaction_usage(context_group)
+        if isinstance(result, dict) and result.get("ok"):
+            _record_interaction_usage(context_group)
         log.info("INTERACTION_TOOL group=%s user=%s tool=%s", context_group,
                  context_user, name)
     if isinstance(result, dict):
