@@ -119,6 +119,10 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
         })
         if _PROVIDER_COOLDOWNS.get(provider_key, 0) > time.monotonic():
             return None
+        if tools and provider_key in _PROVIDER_NO_TOOLS:
+            # Known to reject the tools parameter: skip straight to the next
+            # provider instead of paying for a guaranteed 400 every round.
+            return None
         stats["attempts"] += 1
         stats["last_attempt"] = time.time()
         started_at = time.monotonic()
