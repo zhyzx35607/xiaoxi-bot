@@ -351,10 +351,12 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 long_mem_ctx = "【你和对方的历史话题摘要】\n" + "\n".join(long_lines)
     # Web search for unknown topics
     web_text = ""
-    if web_search_results is not None:
+    # 问的是小汐自身功能时，联网搜索只会带来无关结果，跳过
+    help_intent = _should_lookup_bot_help(raw_message)
+    if web_search_results is not None and not help_intent:
         # Use pre-searched results from dispatcher (avoids redundant API call)
         web_text = web_search_results[:500] if web_search_results else ""
-    elif raw_message:
+    elif raw_message and not help_intent:
         import re as _re_clean2
         search_text = _re_clean2.sub(r"\[CQ:[^\]]+\]", "", raw_message).strip()[:100]
         if search_text:
@@ -422,7 +424,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             caller_level, in_group=bool(group_id))
     # 功能咨询类问题：flash 级模型几乎从不主动调工具（生产实证），
     # 帮助文本由代码确定性查好注入，与联网搜索同一机制。
-    if _should_lookup_bot_help(raw_message):
+    if help_intent:
         from bot.commands.system import build_help_digest
         help_status, _cmd, help_text = build_help_digest(
             getattr(dispatcher, "commands", {}) or {}, caller_level, "",

@@ -280,7 +280,9 @@ def build_help_digest(commands, level, query="", *, group_id=0, bot_role="member
         visible = [name for name in _visible_names(names) if name not in assigned]
         assigned.update(visible)
         if visible:
-            lines.append("【{}】{}".format(category, " ".join("/" + name for name in visible)))
+            # 概览带一句话说明：AI 拿到就能直接回答，不必再调工具查详情
+            lines.append("【{}】".format(category))
+            lines.extend(_help_command_line(name, commands[name]) for name in visible)
     lines.append("问具体命令用法：get_bot_help(\"命令名\")")
     return "ok", None, "\n".join(lines)
 
