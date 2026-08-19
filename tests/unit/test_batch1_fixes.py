@@ -234,8 +234,13 @@ class LegacyToolLoopTests(unittest.IsolatedAsyncioTestCase):
 
         dispatcher = type("Stub", (), {"config": {}})()
         fake = {"ok": True, "data": {"results": []}}
-        with patch.object(ai_tools, "uapi_search",
-                          new=AsyncMock(return_value=dict(fake))):
+
+        # 用真实 async 函数替换：execute_tool 会做 inspect.signature，
+        # Python 3.10 无法内省 AsyncMock 的签名。
+        async def fake_search(dispatcher, query):
+            return dict(fake)
+
+        with patch.object(ai_tools, "uapi_search", new=fake_search):
             result = await ai_tools.execute_tool(
                 dispatcher, "uapi_search", {"query": "测试"})
         self.assertTrue(result["ok"])
