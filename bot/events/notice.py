@@ -19,6 +19,70 @@ def _read_json_file(path, default):
         return default
 
 
+# 只把与群秩序相关的通知喂给 Agent 事件流，戳一戳/表情等高频噪声不喂
+_OBSERVED_NOTICE_TYPES = {
+    "group_increase", "group_decrease", "group_admin",
+    "group_recall", "group_ban", "group_upload",
+}
+
+
+def _describe_notice(event):
+    notice_type = event.get("notice_type", "")
+    sub_type = event.get("sub_type", "")
+    user_id = event.get("user_id", 0)
+    if notice_type == "group_increase":
+        return "用户{} 加入了本群".format(user_id)
+    if notice_type == "group_decrease":
+        if sub_type == "kick_me":
+            return "小汐被移出了本群"
+        action = "被移出本群" if sub_type == "kick" else "退出了本群"
+        return "用户{} {}".format(user_id, action)
+    if notice_type == "group_admin":
+        return "用户{} 的管理员身份变更（{}）".format(user_id, sub_type)
+    if notice_type == "group_recall":
+        return "用户{} 撤回了一条消息（message_id={}）".format(
+            event.get("operator_id", 0), event.get("message_id", 0))
+    if notice_type == "group_ban":
+        if sub_type == "lift_ban":
+            return "用户{} 被解除禁言".format(user_id)
+        return "用户{} 被禁言 {} 秒".format(user_id, event.get("duration", 0))
+    if notice_type == "group_upload":
+        file_info = event.get("file", {}) or {}
+        name = file_info.get("name") or file_info.get("file_name") or ""
+        return "用户{} 上传了群文件 {}".format(user_id, str(name)[:80])
+    return ""
+
+
+def _observe_notice(dispatcher, event):
+    """Trim a group notice into the Agent event stream (observe only)."""
+    agent_settings = dispatcher.config.get("agent", {})
+    if not agent_settings.get("observation_enabled", False):
+        return
+    runtime = getattr(dispatcher, "agent_runtime", None)
+    if runtime is None:
+        return
+    group_id = event.get("group_id", 0)
+    notice_type = event.get("notice_type", "")
+    if not group_id or notice_type not in _OBSERVED_NOTICE_TYPES:
+        return
+    description = _describe_notice(event)
+    if not description:
+        return
+    user_id = event.get("user_id") or event.get("operator_id") or event.get("target_id") or 0
+    try:
+        runtime.observe({
+            "post_type": "notice",
+            "user_id": user_id,
+            "group_id": group_id,
+            "message_type": "group",
+            "raw_message": "[notice] " + description,
+            "time": event.get("time", time.time()),
+            "sender": {"role": "member"},
+        })
+    except Exception:
+        log.exception("Agent notice observation failed")
+
+
 async def handle_notice(dispatcher, event):
     notice_type = event.get("notice_type", "")
     group_id = event.get("group_id", 0)
@@ -68,6 +132,7 @@ async def handle_notice(dispatcher, event):
                      event.get("target_id"), sorted(event.keys()))
     else:
         log.info("Unhandled notice type=%s keys=%s", notice_type, sorted(event.keys()))
+    _observe_notice(dispatcher, event)
 
 
 async def _generate_welcome_text(dispatcher, nickname, sex=""):

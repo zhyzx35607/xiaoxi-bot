@@ -515,6 +515,9 @@ def migrate_config(config):
         "companion_temperature": 0.85,
         "companion_outbox_max_attempts": 3,
         "owner_group_direct_reply": True,
+        "moderation_enabled": False,
+        "moderation_daily_limit": 20,
+        "moderation_ban_max_seconds": 600,
     }
     agent = config.setdefault("agent", {})
     for key, value in agent_defaults.items():
@@ -553,5 +556,11 @@ def migrate_config(config):
         agent.setdefault("owner_hourly_limit", 1)
         agent.setdefault("companion_min_gap_seconds", 21600)
         agent.setdefault("companion_idle_seconds", 28800)
+        migrated = True
+    if int(agent.get("schema_version", 0) or 0) < 6:
+        agent["schema_version"] = 6
+        agent.setdefault("moderation_enabled", False)
+        agent.setdefault("moderation_daily_limit", 20)
+        agent.setdefault("moderation_ban_max_seconds", 600)
         migrated = True
     return config, migrated

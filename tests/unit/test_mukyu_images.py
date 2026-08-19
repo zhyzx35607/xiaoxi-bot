@@ -216,7 +216,7 @@ class MukyuConfigTests(unittest.TestCase):
         }
         migrated, changed = migrate_config(config)
         self.assertTrue(changed)
-        self.assertEqual(migrated["agent"]["schema_version"], 5)
+        self.assertEqual(migrated["agent"]["schema_version"], 6)
         self.assertEqual(migrated["agent"]["owner_daily_limit"], 12)
         self.assertEqual(migrated["agent"]["owner_hourly_limit"], 3)
         self.assertEqual(migrated["agent"]["companion_min_gap_seconds"], 1800)

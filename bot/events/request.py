@@ -102,6 +102,25 @@ async def handle_request(dispatcher, event):
         pending = dict(newest)
     save_pending_requests(pending)
 
+    if req_type == "group" and group_id and is_group_enabled(dispatcher, group_id):
+        # 入群申请只 observe 进 Agent 事件流，不触发决策
+        agent_settings = dispatcher.config.get("agent", {})
+        runtime = getattr(dispatcher, "agent_runtime", None)
+        if agent_settings.get("observation_enabled", False) and runtime is not None:
+            try:
+                runtime.observe({
+                    "post_type": "request",
+                    "user_id": user_id,
+                    "group_id": group_id,
+                    "message_type": "group",
+                    "raw_message": "[request] 用户{} 申请加入本群（{}），验证消息：{}".format(
+                        user_id, sub_type, safe_comment),
+                    "time": event.get("time", time.time()),
+                    "sender": {"role": "member"},
+                })
+            except Exception:
+                log.exception("Agent request observation failed")
+
     if dispatcher.config.get("notify_owner_on_request", False):
         owner = dispatcher.config.get("bot_owner")
         if owner:
