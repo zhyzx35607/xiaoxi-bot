@@ -113,12 +113,14 @@ def _capability_overview(level, *, in_group=True):
         lines.append("主人专属：/master 管理群主人、/enable 开关群、/AI聊天 和 /私聊AI 开关、/b站推送 等。")
     if level >= LEVEL_SUPER:
         lines.append("最高主人还可用 /group、/approve、/sysmsg、/api 等维护命令。")
-    lines.append("用户问某个功能怎么用时，调用 get_bot_help 工具查准确用法，别凭印象编。")
+    lines.append("用户问某个功能怎么用时：上下文里已有【小汐功能参考】就直接照它回答；没有再调用 get_bot_help 工具查，别凭印象编。")
     return "\n".join(lines)
 _HELP_INTENT_HINTS = (
     "怎么设置", "怎么用", "如何使用", "使用方法", "用法", "命令",
     "功能", "帮助", "help", "你会什么", "你会啥", "你能干嘛", "你能干什么",
     "能做什么", "有什么功能", "怎么开启", "怎么关闭", "怎么开", "怎么关",
+    "怎么添加", "怎么弄", "怎么搞", "怎么改", "如何设置", "如何添加",
+    "在哪设置", "哪里设置", "什么命令", "哪个命令",
 )
 
 
