@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from .policy import is_quiet_hours
 from .storage.json_store import new_record_id
+from ..ai.reply import strip_command_prefix
 from ..utils import bot_timezone, configured_timezone_name
 
 log = logging.getLogger("qqbot")
@@ -73,7 +74,8 @@ class AgentWorker:
         delivered = failed = 0
         for reminder in self.dispatcher.agent_runtime.reminders.due(limit=20):
             try:
-                text = "\u63d0\u9192\u4f60\uff1a{}".format(reminder.get("text", ""))
+                # 提醒文本来自 AI/用户输入，行首 "/" 会在回环里被当成命令，统一中和
+                text = strip_command_prefix("\u63d0\u9192\u4f60\uff1a{}".format(reminder.get("text", "")))
                 scope_key = str(reminder.get("scope_key", ""))
                 if scope_key.startswith("group:"):
                     result = await self.dispatcher.client.send_group_msg_with_at(
@@ -127,7 +129,8 @@ class AgentWorker:
                     if not str(text).strip():
                         continue
                     result = await self.dispatcher.client.send_private_msg(
-                        owner_id, [{"type": "text", "data": {"text": str(text).strip()}}])
+                        owner_id, [{"type": "text", "data": {
+                            "text": strip_command_prefix(str(text).strip())}}])
                     if isinstance(result, dict) and result.get("status") not in {None, "ok"}:
                         raise RuntimeError(result.get("message") or result.get("msg") or result)
                     if index < len(parts) - 1:
@@ -233,8 +236,8 @@ class AgentWorker:
                         metadata={"task_id": task.get("id", ""), "plan_id": task.get("plan_id", "")})
                 except Exception:
                     log.exception("Agent task completion bookkeeping failed id=%s", task.get("id"))
-                summary = "\u540e\u53f0\u4efb\u52a1 {} \u5df2\u5b8c\u6210\n{}".format(
-                    task["id"], result.get("reply") or result.get("evidence") or "\u5df2\u901a\u8fc7\u9a8c\u6536")
+                summary = strip_command_prefix("\u540e\u53f0\u4efb\u52a1 {} \u5df2\u5b8c\u6210\n{}".format(
+                    task["id"], result.get("reply") or result.get("evidence") or "\u5df2\u901a\u8fc7\u9a8c\u6536"))
                 try:
                     await self.dispatcher.client.send_private_msg(
                         int(task["owner_id"]), summary[:3500])
@@ -359,7 +362,8 @@ class AgentWorker:
                 )
                 return "empty"
             await self.dispatcher.client.send_private_msg(
-                owner_id, "\u76ee\u6807\u4e3b\u52a8\u590d\u76d8\uff1a\n{}".format(reply)[:3500])
+                owner_id, strip_command_prefix(
+                    "\u76ee\u6807\u4e3b\u52a8\u590d\u76d8\uff1a\n{}".format(reply))[:3500])
             self.dispatcher.agent_runtime.goals.update(
                 scope_key, goal["id"], progress=reply[:1000])
             self.dispatcher.agent_runtime.proactive.record(
@@ -490,7 +494,9 @@ class AgentWorker:
                     state[str(group_id)] = {"last_run": now, "status": "empty", "run_id": run_id}
                     runtime.store.write("worker/group_reviews.json", state)
                     return "empty"
-                await self.dispatcher.client.send_group_msg(int(group_id), reply[:3500])
+                # 巡检回复是 AI 生成文本，行首 "/" 会在回环里被当成命令，统一中和
+                await self.dispatcher.client.send_group_msg(
+                    int(group_id), strip_command_prefix(reply[:3500]))
                 runtime.proactive.record(self.dispatcher.config, scope_key, topic=topic, now=now)
                 runtime.timeline.add(
                     scope_key, "proactive_group_review", reply[:1000],

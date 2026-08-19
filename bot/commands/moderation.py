@@ -40,6 +40,26 @@ async def cmd_reject_request(d, group_id, user_id, args, role, sender_card, mess
     ok, msg = await approve_request(d, parts[0], False, reason)
     await d._reply(group_id, user_id, msg if ok else "处理失败：" + msg)
 
+async def cmd_join_review(d, group_id, user_id, args, role, sender_card, message):
+    if not group_id:
+        return
+    arg = args.strip().lower()
+    if arg not in ("on", "off"):
+        await d._reply(group_id, user_id, "这样用：/审批 on 或 /审批 off")
+        return
+    enable = arg == "on"
+    gid = str(group_id)
+    groups = d.config.setdefault("groups", {})
+    group_cfg = groups.setdefault(gid, {})
+    group_cfg["join_review"] = enable
+    save_group_config(d)
+    if enable:
+        await d._reply(
+            group_id, user_id,
+            "入群群内审批已开启：新申请会发到群里，管理员回复「同意/拒绝」即可处理")
+    else:
+        await d._reply(group_id, user_id, "入群群内审批已关闭")
+
 async def cmd_group_notice(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
         return

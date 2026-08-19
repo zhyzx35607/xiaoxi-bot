@@ -198,7 +198,7 @@ _HELP_CATEGORIES = {
     "图片与媒体": {"图片描述", "ocr", "生图", "随机图"},
     "群资料与成员": {"群信息", "成员", "成员列表", "陌生人信息", "info", "群荣誉", "禁言列表", "精华列表", "history"},
     "文件与内容": {"群文件", "文件状态", "文件链接", "删除文件", "新建文件夹", "删除文件夹", "移动文件", "重命名文件", "精华", "删精华", "公告", "删公告", "setgroupavatar"},
-    "群管理": {"kick", "ban", "unban", "allban", "welcome", "badword", "安全", "全体", "title"},
+    "群管理": {"kick", "ban", "unban", "allban", "welcome", "badword", "安全", "全体", "title", "审批"},
     "功能与自动化": {"enable", "disable", "group", "list", "clearai", "ai聊天", "私聊ai", "acg图", "热榜推送", "b站解析", "b站推送", "gal资源", "积分"},
     "主人与维护": {"api", "health", "好友列表", "sysmsg", "approve", "reject", "master", "admin"},
 }
@@ -285,6 +285,12 @@ def build_help_digest(commands, level, query="", *, group_id=0, bot_role="member
     return "ok", None, "\n".join(lines)
 
 
+def _help_command_line(name, info):
+    """完整菜单用的紧凑单行：命令名 + 一句话说明（详细用法走 /help 命令名）。"""
+    summary = str(info.get("help") or "").strip() or "暂无说明"
+    return "/{} {}".format(name, summary)
+
+
 def _help_command_text(name, info, bot_role, group_id):
     detail_name = _COMMAND_DETAIL_ALIASES.get(name, name)
     detail = COMMAND_DETAILS.get(detail_name)
@@ -357,6 +363,10 @@ async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
         role_names.get(caller_level, caller_name),
         bot_role if group_id else "不适用",
     )
+    if not selected_category:
+        # 完整菜单用紧凑列表（每条一行）：逐命令详细格式全量超过一万字，
+        # 合并转发和普通消息都发不出去；详情走 /help 分类名 或 /help 命令名。
+        header += "\n发 /help 分类名 看某类详情，发 /help 命令名 看单个命令用法。"
     sections = [header]
     categories = [selected_category] if selected_category else list(_HELP_CATEGORIES)
     assigned = set()
@@ -372,10 +382,14 @@ async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
                 continue
             if not _help_visible(info, caller_level, group_id):
                 continue
-            entries.append(_help_command_text(name, info, bot_role, group_id))
+            if selected_category:
+                entries.append(_help_command_text(name, info, bot_role, group_id))
+            else:
+                entries.append(_help_command_line(name, info))
             assigned.add(name)
         if entries:
-            sections.append("【{}】\n\n{}".format(category, "\n\n".join(entries)))
+            joiner = "\n\n" if selected_category else "\n"
+            sections.append("【{}】\n{}".format(category, joiner.join(entries)))
 
     if not selected_category:
         other_entries = []
@@ -384,9 +398,9 @@ async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
                 continue
             if not group_id and caller_level < LEVEL_SUPER and name not in _PRIVATE_VISIBLE:
                 continue
-            other_entries.append(_help_command_text(name, info, bot_role, group_id))
+            other_entries.append(_help_command_line(name, info))
         if other_entries:
-            sections.append("【其他功能】\n\n" + "\n\n".join(other_entries))
+            sections.append("【其他功能】\n" + "\n".join(other_entries))
 
     title = "小汐的{}帮助".format(selected_category or "完整")
     await d._reply(
