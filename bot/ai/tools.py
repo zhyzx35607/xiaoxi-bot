@@ -17,6 +17,7 @@ def _should_consider_napcat_tool(text):
         "天气", "热榜", "热搜", "一言", "答案之书", "epic", "免费游戏",
         "精华", "翻译", "链接安全", "@全体", "全体", "壁纸",
         "表情回应", "贴表情", "点赞",
+        "搜索", "查一下", "几点",
     )
     return any(keyword in value for keyword in keywords)
 
@@ -39,6 +40,7 @@ _READ_TOOL_SPEC = (
     "uapi_saying 无参数 (随机一言)\n"
     "uapi_answerbook 参数 question (答案之书)\n"
     "uapi_epic_free 无参数 (Epic免费游戏)\n"
+    "uapi_search 参数 query (联网搜索)\n"
 )
 
 _INTERACTION_TOOL_SPEC = (

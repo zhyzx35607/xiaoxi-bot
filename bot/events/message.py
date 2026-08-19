@@ -355,7 +355,7 @@ class GroupMessageMixin:
             return False
         names = nm_cfg.get("names", ["小汐", "汐汐"])
         for name in names:
-            if name in raw_message:
+            if name and name in raw_message:
                 return True
         return False
 

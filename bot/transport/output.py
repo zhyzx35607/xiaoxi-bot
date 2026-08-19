@@ -5,6 +5,9 @@ import logging
 import os
 import re
 
+from app.logging_setup import sanitize_log_message
+
+from ..ai.reply import strip_command_prefix
 from ..permission import (
     LEVEL_ADMIN,
     LEVEL_GOWNER,
@@ -15,6 +18,16 @@ from ..permission import (
 from ..storage.runtime_paths import create_runtime_temp_file
 
 log = logging.getLogger("qqbot")
+
+# NapCat rejects forward nodes with oversized content; caller-supplied
+# sections (e.g. help categories) bypass _split_sections, so re-split here.
+_FORWARD_NODE_HARD_CHARS = 1000
+
+# Degradation chain after merged-forward failure: a few plain messages first,
+# text-file upload only when those also fail.
+_PLAIN_FALLBACK_MAX_MESSAGES = 5
+_PLAIN_FALLBACK_MAX_CHARS = 400
+_PLAIN_FALLBACK_INTERVAL = 0.5
 
 
 def _write_text_file(path, text):
@@ -64,7 +77,16 @@ def _split_sections(text, target_chars=800):
 def build_forward_nodes(dispatcher, text, title="小汐整理的内容", sections=None):
     config = _output_config(dispatcher)
     target = max(300, int(config.get("forward_node_target_chars", 800) or 800))
-    body_sections = list(sections or _split_sections(text, target))
+    hard_cap = max(target, int(config.get("forward_node_hard_chars",
+                                         _FORWARD_NODE_HARD_CHARS) or _FORWARD_NODE_HARD_CHARS))
+    raw_sections = list(sections or _split_sections(text, target))
+    body_sections = []
+    for section in raw_sections:
+        section = str(section)
+        if len(section) <= hard_cap:
+            body_sections.append(section)
+        else:
+            body_sections.extend(_split_sections(section, target))
     bot_qq = str(dispatcher.config.get("bot_qq", 0))
     nodes = [{
         "type": "node",
@@ -139,6 +161,57 @@ async def _summarize(dispatcher, text, level, kind):
     return _fallback_notice(level, kind)
 
 
+def _plain_fallback_chunks(sections):
+    """Merge sections into a few plain messages; empty list means give up."""
+    chunks = []
+    current = ""
+    for section in sections:
+        section = str(section).strip()
+        if not section:
+            continue
+        while len(section) > _PLAIN_FALLBACK_MAX_CHARS:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(section[:_PLAIN_FALLBACK_MAX_CHARS])
+            section = section[_PLAIN_FALLBACK_MAX_CHARS:].strip()
+        candidate = section if not current else current + "\n" + section
+        if len(candidate) <= _PLAIN_FALLBACK_MAX_CHARS:
+            current = candidate
+        else:
+            chunks.append(current)
+            current = section
+    if current:
+        chunks.append(current)
+    if not chunks or len(chunks) > _PLAIN_FALLBACK_MAX_MESSAGES:
+        return []
+    return chunks
+
+
+async def _send_plain_fallback(dispatcher, group_id, user_id, text, sections):
+    """Last-resort plain messages before the text-file upload fallback."""
+    config = _output_config(dispatcher)
+    target = max(300, int(config.get("forward_node_target_chars", 800) or 800))
+    chunks = _plain_fallback_chunks(sections or _split_sections(text, target))
+    if not chunks:
+        return False
+    for index, chunk in enumerate(chunks):
+        if index:
+            await asyncio.sleep(_PLAIN_FALLBACK_INTERVAL)
+        # 帮助文本等含行首 "/命令" 的输出经 message_sent 回环会被当成主人命令
+        # 执行，普通消息降级同样走 bot 输出侧的统一中和。
+        chunk = strip_command_prefix(chunk)
+        if group_id:
+            result = await dispatcher.client.send_group_msg(group_id, chunk)
+        else:
+            result = await dispatcher.client.send_private_msg(user_id, chunk)
+        if not (isinstance(result, dict) and result.get("status") == "ok"):
+            log.warning("plain fallback send failed: group=%s user=%s chunk=%d/%d",
+                        group_id, user_id, index + 1, len(chunks))
+            return False
+    return True
+
+
 async def _upload_text_fallback(dispatcher, group_id, user_id, text, title):
     path = ""
     try:
@@ -211,10 +284,13 @@ async def send_text_response(dispatcher, group_id, user_id, text, *, force_forwa
             if isinstance(history, dict) and title[:20] in str(history.get("data") or ""):
                 continue
         log.warning(
-            "forward send failed: group=%s user=%s nodes=%d status=%s retcode=%s",
+            "forward send failed: group=%s user=%s nodes=%d status=%s retcode=%s wording=%s",
             group_id, user_id, len(chunk_nodes),
             result.get("status") if isinstance(result, dict) else result,
             result.get("retcode") if isinstance(result, dict) else None,
+            sanitize_log_message(str(
+                result.get("wording") or result.get("msg") or ""
+            ), limit=200) if isinstance(result, dict) else "",
         )
         result = None
         break
@@ -226,7 +302,7 @@ async def send_text_response(dispatcher, group_id, user_id, text, *, force_forwa
             messages=nodes,
         )
     if isinstance(result, dict) and result.get("status") == "ok":
-        summary = await _summarize(dispatcher, text, level, kind)
+        summary = strip_command_prefix(await _summarize(dispatcher, text, level, kind))
         message_id = first_message_id or (result.get("data") or {}).get("message_id")
         if group_id:
             segments = []
@@ -244,6 +320,8 @@ async def send_text_response(dispatcher, group_id, user_id, text, *, force_forwa
             ])
         return result
 
+    if await _send_plain_fallback(dispatcher, group_id, user_id, text, sections):
+        return {"status": "ok", "fallback": "plain_messages"}
     if await _upload_text_fallback(dispatcher, group_id, user_id, text, title):
         fallback = "太长了，转发没发出去，我放到文本文件里了"
     else:

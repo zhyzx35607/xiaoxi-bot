@@ -4,6 +4,8 @@ import asyncio
 import logging
 import os
 
+from app.logging_setup import sanitize_log_message
+
 from ..permission import get_group_config, is_group_enabled
 
 chat_log = logging.getLogger("qqbot.chat")
@@ -59,12 +61,15 @@ def _log_chat_message(dispatcher, direction, raw, group_id=None, user_id=0, send
     if not group_id and not _private_chat_allowed(dispatcher, user_id):
         return False
     text = str(raw or "").replace("\r", "\\r").replace("\n", "\\n")[:500]
+    # 昵称也是用户输入：脱敏并去掉换行，防止伪造日志行
+    safe_name = sanitize_log_message(
+        str(sender_name or "").replace("\r", " ").replace("\n", " "), limit=40)
     if group_id:
         chat_log.info("%s group=%s user=%s name=%s text=%s",
-                      direction, group_id, user_id, sender_name, text)
+                      direction, group_id, user_id, safe_name, text)
     else:
         chat_log.info("%s user=%s name=%s text=%s",
-                      direction, user_id, sender_name, text)
+                      direction, user_id, safe_name, text)
     return True
 
 def _cq_unescape(text):

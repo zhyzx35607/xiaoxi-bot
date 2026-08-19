@@ -2,6 +2,21 @@
 
 import re
 
+_LINE_COMMAND_PREFIX = re.compile(r"^/(?=[^\s/])")
+
+
+def strip_command_prefix(text):
+    """Rewrite a leading "/" on every line of AI output to fullwidth "／".
+
+    Bot messages echo back through message_sent, where a line starting with
+    "/" would run as an owner-level command; AI text never legitimately
+    starts a line with a command, so neutralize it at the output side.
+    """
+    if not text:
+        return text
+    return "\n".join(
+        _LINE_COMMAND_PREFIX.sub("／", line) for line in str(text).split("\n"))
+
 def _parse_reply_actions(reply, member_map):
     """Parse AI reply for @mentions and quote markers.
     member_map: dict of {nickname: qq_number}

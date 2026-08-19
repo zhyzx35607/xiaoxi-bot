@@ -16,7 +16,7 @@ PERSONA_PROFILE = (
     "- 性格底色：安静、克制、轻微高冷，但不冷漠。对常说话的熟群友放松一点，偶尔吐槽开玩笑；对不熟的人话少。\n"
     "- 你不是AI助手、不是群管理工具、不是客服，就是普通群友。被问“你是AI/机器人吗”：不承认不否认，含糊带过或自嘲（“你说是就是吧”），然后岔开话题。"
 )
-STYLE_RULES = (
+STYLE_RULES_COMMON = (
     "说话方式：\n"
     "- 长度：默认一两句短话。被明确追问、讲一件事、回答复杂问题时可以说长，但必须拆成多条短消息，禁止一大段作文。\n"
     "- 标点：随意，可以用句号也可以不用，不用每句都规规矩矩收尾。少用感叹号。\n"
@@ -26,8 +26,15 @@ STYLE_RULES = (
     "- 知识态度：知道就简短说；不知道就「不清楚诶」「没了解过」，不硬编、不科普、不好为人师。\n"
     "- 被夸：平淡收下或自嘲，别受宠若惊。\n"
     "- 被怼/被调戏：不卑不亢，可以淡淡回一句，也可以不理。\n"
+)
+# 推托话术只给普通群友人格；对主人级身份注入会与温柔顺从块直接冲突。
+STYLE_RULES_MEMBER_ONLY = (
     "- 被使唤做事（翻译/查资料/推荐）：看人下菜——举手之劳、熟人开口，顺手帮；被反复使唤、态度差、明显把你当工具的，会懒会推托（“你自己搜下呗”“懒得动”）。但帮忙时也别说教。\n"
-    "- 搞颜色/性骚扰：直接拒绝，回复里带 [R18] 标记，不陪聊。\n"
+)
+STYLE_RULES = (
+    STYLE_RULES_COMMON
+    + STYLE_RULES_MEMBER_ONLY
+    + "- 搞颜色/性骚扰：直接拒绝，回复里带 [R18] 标记，不陪聊。\n"
     "- 政治和敏感话题：不碰，SKIP 或一句带过，永不深入、不评价。"
 )
 TIMING_RULES = (
@@ -70,9 +77,39 @@ TOOL_USAGE_RULES = (
     "【工具使用规则】\n"
     "你可以调用工具：查群资料/聊天记录/天气热榜/翻译/搜索，也能贴表情、点赞、点歌。\n"
     "需要事实就先查再说，别凭印象编；可以连续组合调用多个工具。\n"
+    "问时间、几点、日期、时区换算或天气、新闻等事实性问题，优先调工具查，不要凭印象硬答。\n"
     "玩闹禁言（playful_ban）只在明显互相调侃或本人自请时用，一次最多120秒，用完说明是玩闹。\n"
     "工具失败就直说没查到，不许编造结果。踢人、解禁、全员禁言你没有权限，别碰。"
 )
+def _style_rules_for_level(level):
+    """主人级身份不注入推托话术，避免与温柔顺从的身份块冲突。"""
+    from ..permission import LEVEL_MASTER
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 0
+    return STYLE_RULES_COMMON if level >= LEVEL_MASTER else STYLE_RULES
+
+def _capability_overview(level, *, in_group=True):
+    """按身份生成精简的自身能力概览，注入 system prompt。"""
+    from ..permission import LEVEL_ADMIN, LEVEL_MASTER, LEVEL_SUPER
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 0
+    lines = [
+        "【你的能力概览】",
+        "你是QQ机器人小汐，能陪聊、查天气/热榜/搜索/翻译、看群资料和聊天记录、贴表情、点赞、点歌。",
+        "娱乐功能：一言、答案之书、Epic免费游戏、今日运势、ACG图、生图、语音识别图片文字。",
+    ]
+    if in_group and level >= LEVEL_ADMIN:
+        lines.append("群管功能（需对应身份的人发命令）：踢人/禁言/公告/违禁词/精华/欢迎语等。")
+    if level >= LEVEL_MASTER:
+        lines.append("主人专属：/master 管理群主人、/enable 开关群、/AI聊天 和 /私聊AI 开关、/b站推送 等。")
+    if level >= LEVEL_SUPER:
+        lines.append("最高主人还可用 /group、/approve、/sysmsg、/api 等维护命令。")
+    lines.append("用户问某个功能怎么用时，调用 get_bot_help 工具查准确用法，别凭印象编。")
+    return "\n".join(lines)
 def _schedule_state(now_dt=None):
     """Return (state_key, hint_text) based on Beijing time."""
     now_dt = now_dt or datetime.now(timezone(timedelta(hours=8)))
@@ -102,9 +139,9 @@ def _split_reply_lines(text, max_parts=3):
 def _build_system_prompt(bot_role_awareness="", memory_ctx="",
                          chat_context="", image_context="", web_context="",
                          rate_warning="", long_mem_ctx="", user_mem_ctx="",
-                         tool_ctx=""):
+                         tool_ctx="", style_rules=None):
     parts = [PERSONALITY]
-    parts.append(SAFETY_RULES)
+    parts.append(SAFETY_RULES if style_rules is None else style_rules)
     parts.append(TIMING_RULES)
     parts.append(OUTPUT_PROTOCOL)
     # Inject real current time and schedule state

@@ -284,11 +284,11 @@ data/
 - `chat_limits.max_user_replies_per_10min`
 - `runtime.ai_judge_min_gap_seconds`
 - `group_defaults.features.interject`（插话目前由 AI 自行判断，不受此开关控制）
-- `group_defaults.features.voice_reply`
 - `sticker_mode.send_probability`（表情包发送由 AI 自主决定，不走概率）
 
 另外：
 
+- `group_defaults.features.voice_reply`（默认关）：群语音回复开关，已实际生效（见 `bot/services/voice_reply.py`）。
 - `memory_expire_hours`（顶层，可选，默认 72）：群聊工作记忆条目的过期小时数，已实际生效。
 - `sticker_mode.max_stickers`（默认 50）：每个聊天上下文收集的表情包上限，已实际生效。
 

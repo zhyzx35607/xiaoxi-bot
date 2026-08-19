@@ -4,6 +4,8 @@ import logging
 import os
 import time
 
+from app.logging_setup import sanitize_log_message
+
 from ..guard import is_blacklisted
 from ..permission import is_group_enabled
 from ..utils import atomic_write_json
@@ -73,8 +75,10 @@ async def handle_request(dispatcher, event):
         # Keep the request available for owner approval without filling the
         # normal log with events from groups the bot has not enabled.
         request_log = log.debug
+    # 验证消息是用户输入：脱敏并去掉换行，避免日志注入和 QQ 号直记
+    safe_comment = sanitize_log_message(comment.replace("\n", " "), limit=80)
     request_log("Request event type=%s subtype=%s group=%s user=%s flag=%s comment=%s",
-                req_type, sub_type, group_id, user_id, _short_flag(flag), comment[:80])
+                req_type, sub_type, group_id, user_id, _short_flag(flag), safe_comment)
 
     if req_type == "group" and group_id and is_blacklisted(group_id, user_id):
         reason = "黑名单用户"

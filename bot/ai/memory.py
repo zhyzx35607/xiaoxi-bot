@@ -40,9 +40,12 @@ def _sanitize_entries(entries):
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
             continue
+        # 缺 content 的条目会在拼 prompt 时 KeyError，直接丢弃（长期记忆条目
+        # 只有 ts/content，没有 role，不能按 role 过滤）。
+        if "content" not in entry:
+            continue
         item = dict(entry)
-        if "content" in item:
-            item["content"] = sanitize_for_memory(item.get("content", ""))
+        item["content"] = sanitize_for_memory(item.get("content", ""))
         sanitized.append(item)
     return sanitized
 

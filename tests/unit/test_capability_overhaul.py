@@ -92,6 +92,11 @@ class LongOutputTests(unittest.IsolatedAsyncioTestCase):
             async def send_forward_msg(self, **kwargs):
                 return {"status": "failed", "retcode": 1200}
 
+            async def send_group_msg(self, group_id, message):
+                # Plain-message degradation must also fail before the notice.
+                self.group_messages.append((group_id, message))
+                return {"status": "failed", "retcode": 1200}
+
         dispatcher = self._dispatcher()
         dispatcher.client = FailingClient()
         await send_text_response(
