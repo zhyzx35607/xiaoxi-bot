@@ -123,11 +123,12 @@ class ForwardDegradationTests(unittest.IsolatedAsyncioTestCase):
                 dispatcher, 100, 1, "ignored", force_forward=True,
                 sections=sections)
         self.assertEqual(result.get("fallback"), "plain_messages")
-        self.assertEqual(len(client.group_messages), 3)
+        # 300+换行+300=601 ≤900 合并为一条，再加 300 变 902 超出，共 2 条
+        self.assertEqual(len(client.group_messages), 2)
         for _group, message in client.group_messages:
-            self.assertLessEqual(len(str(message)), 400)
+            self.assertLessEqual(len(str(message)), 900)
 
-    async def test_plain_fallback_over_five_goes_to_text_file(self):
+    async def test_plain_fallback_over_eight_goes_to_text_file(self):
         class FailingForwardClient(_OutputClient):
             async def send_group_forward_msg(self, group_id, nodes):
                 return {"status": "failed", "retcode": 1200}
@@ -137,12 +138,12 @@ class ForwardDegradationTests(unittest.IsolatedAsyncioTestCase):
 
         client = FailingForwardClient()
         dispatcher = _output_dispatcher(client)
-        sections = ["第{}段".format(i) + "x" * 380 for i in range(10)]
+        sections = ["第{}段".format(i) + "x" * 500 for i in range(20)]
         with patch("asyncio.sleep", new=AsyncMock()):
             await send_text_response(
                 dispatcher, 100, 1, "ignored", force_forward=True,
                 sections=sections)
-        # 超过 5 条上限，普通消息降级放弃，直接走 txt 文件兜底
+        # 超过 8 条上限，普通消息降级放弃，直接走 txt 文件兜底
         self.assertEqual(len(client.group_messages), 1)
         self.assertIn("文本文件", str(client.group_messages[0][1]))
 
@@ -156,13 +157,13 @@ class ForwardDegradationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_plain_chunk_merge_rules(self):
         self.assertEqual(output_module._plain_fallback_chunks([]), [])
-        # 总量超过 5 条 * 400 字时放弃，留给 txt 兜底
+        # 总量超过 8 条 * 900 字时放弃，留给 txt 兜底
         self.assertEqual(
-            output_module._plain_fallback_chunks(["x" * 380] * 10), [])
-        chunks = output_module._plain_fallback_chunks(["x" * 200, "y" * 200])
-        # 200+换行+200=401 超过 400 上限，必须拆成两条
+            output_module._plain_fallback_chunks(["x" * 890] * 9), [])
+        chunks = output_module._plain_fallback_chunks(["x" * 800, "y" * 200])
+        # 800+换行+200=1001 超过 900 上限，必须拆成两条
         self.assertEqual(len(chunks), 2)
-        chunks = output_module._plain_fallback_chunks(["x" * 199, "y" * 200])
+        chunks = output_module._plain_fallback_chunks(["x" * 699, "y" * 200])
         self.assertEqual(len(chunks), 1)
 
 
@@ -244,6 +245,20 @@ class LegacyToolLoopTests(unittest.IsolatedAsyncioTestCase):
             result = await ai_tools.execute_tool(
                 dispatcher, "uapi_search", {"query": "测试"})
         self.assertTrue(result["ok"])
+
+    async def test_execute_tool_allows_get_bot_help(self):
+        import ai_tools
+        dispatcher = type("Stub", (), {"config": {}, "commands": {
+            "天气": {"help": "查天气 /天气 城市"}}})()
+        result = await ai_tools.execute_tool(
+            dispatcher, "get_bot_help", {"command_or_category": "天气"})
+        self.assertTrue(result["ok"])
+        self.assertIn("/天气", result["data"])
+
+    def test_legacy_spec_and_keywords_cover_bot_help(self):
+        from bot.ai.tools import _READ_TOOL_SPEC, _should_consider_napcat_tool
+        self.assertIn("get_bot_help", _READ_TOOL_SPEC)
+        self.assertTrue(_should_consider_napcat_tool("这个命令怎么用"))
 
 
 class GetBotHelpTests(unittest.IsolatedAsyncioTestCase):
@@ -436,6 +451,42 @@ class SmallFixesTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("12345678", joined)
         self.assertIn("坏人<id>", joined)
         self.assertTrue(all("\n" not in entry for entry in captured.output))
+
+
+class HelpIntentTests(unittest.TestCase):
+    def test_help_intent_detection(self):
+        from bot.ai.prompts import _should_lookup_bot_help
+        self.assertTrue(_should_lookup_bot_help("群主人怎么设置"))
+        self.assertTrue(_should_lookup_bot_help("小汐你会什么功能"))
+        self.assertTrue(_should_lookup_bot_help("这个命令怎么用"))
+        self.assertFalse(_should_lookup_bot_help("/help"))
+        self.assertFalse(_should_lookup_bot_help("今天天气真好"))
+        self.assertFalse(_should_lookup_bot_help(""))
+
+
+class StyleRulesSafetyTests(unittest.TestCase):
+    def test_super_owner_unconditional(self):
+        # 最高主人无条件顺从：推托话术和安全底线提示都不注入
+        from bot.ai.prompts import _style_rules_for_level
+        rules = _style_rules_for_level(LEVEL_SUPER)
+        self.assertNotIn("[R18]", rules)
+        self.assertNotIn("政治", rules)
+        self.assertNotIn("懒得动", rules)
+
+    def test_master_keeps_safety_rules_but_not_dismissive(self):
+        # 群主人保留 R18/政治底线，但去掉推托话术
+        from bot.ai.prompts import _style_rules_for_level
+        from bot.permission import LEVEL_MASTER
+        rules = _style_rules_for_level(LEVEL_MASTER)
+        self.assertIn("[R18]", rules)
+        self.assertIn("政治", rules)
+        self.assertNotIn("懒得动", rules)
+
+    def test_member_keeps_full_rules(self):
+        from bot.ai.prompts import _style_rules_for_level
+        rules = _style_rules_for_level(LEVEL_MEMBER)
+        self.assertIn("[R18]", rules)
+        self.assertIn("懒得动", rules)
 
 
 if __name__ == "__main__":

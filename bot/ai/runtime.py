@@ -19,6 +19,7 @@ from .prompts import (
     _build_system_prompt,
     _capability_overview,
     _schedule_state,
+    _should_lookup_bot_help,
     _split_reply_lines,
     _style_rules_for_level,
     _typing_delay_secs,
@@ -419,6 +420,16 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     if tools:
         system_prompt += "\n\n" + _capability_overview(
             caller_level, in_group=bool(group_id))
+    # 功能咨询类问题：flash 级模型几乎从不主动调工具（生产实证），
+    # 帮助文本由代码确定性查好注入，与联网搜索同一机制。
+    if _should_lookup_bot_help(raw_message):
+        from bot.commands.system import build_help_digest
+        help_status, _cmd, help_text = build_help_digest(
+            getattr(dispatcher, "commands", {}) or {}, caller_level, "",
+            group_id=group_id or 0, bot_role=bot_role_display)
+        if help_status == "ok" and help_text:
+            system_prompt += ("\n\n【小汐功能参考（用户问功能/命令用法时以此为准回答）】\n"
+                              + help_text)
     if roleplay_prompt:
         system_prompt += "\n\n" + roleplay_prompt
     

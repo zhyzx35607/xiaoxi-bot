@@ -18,6 +18,7 @@ def _should_consider_napcat_tool(text):
         "精华", "翻译", "链接安全", "@全体", "全体", "壁纸",
         "表情回应", "贴表情", "点赞",
         "搜索", "查一下", "几点",
+        "怎么用", "怎么设置", "命令", "功能",
     )
     return any(keyword in value for keyword in keywords)
 
@@ -41,6 +42,7 @@ _READ_TOOL_SPEC = (
     "uapi_answerbook 参数 question (答案之书)\n"
     "uapi_epic_free 无参数 (Epic免费游戏)\n"
     "uapi_search 参数 query (联网搜索)\n"
+    "get_bot_help 参数 command_or_category 可空 (查询小汐自身功能和命令用法)\n"
 )
 
 _INTERACTION_TOOL_SPEC = (
@@ -131,6 +133,9 @@ async def _chat_with_tools(dispatcher, messages, tools, group_id, user_id,
             tool_calls = message.get("tool_calls") or []
             content = (message.get("content") or "").strip()
             if not tool_calls:
+                if _round == 0:
+                    # flash 级模型经常直接回答不调工具；debug 级记录便于排查
+                    log.debug("AI answered directly with %d tools offered", len(tools))
                 return content or None
             # Only the answered subset goes back into the conversation: an
             # assistant message carrying unanswered tool_call ids violates the
