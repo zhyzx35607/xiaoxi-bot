@@ -214,6 +214,7 @@ async def execute_tool(dispatcher, name, arguments):
         "uapi_saying": uapi_saying,
         "uapi_answerbook": uapi_answerbook,
         "uapi_epic_free": uapi_epic_free,
+        "uapi_search": uapi_search,
     }
     handler = tools.get(name)
     if not handler:
@@ -708,6 +709,28 @@ for _name, _fn, _desc, _params in _INTERACTION_TOOLS:
     _register(_name, _fn, "interaction", _desc, _params)
 for _name, _fn, _desc, _params in _PLAYFUL_TOOLS:
     _register(_name, _fn, "playful", _desc, _params)
+
+
+async def _tool_get_bot_help(dispatcher, args, ctx):
+    """Self-knowledge tool: reuse the /help digest with caller-level filtering."""
+    from bot.commands.system import build_help_digest
+    status, _matched, text = build_help_digest(
+        getattr(dispatcher, "commands", {}) or {},
+        int(ctx.get("actor_level") or 0),
+        str(args.get("command_or_category") or ""),
+        group_id=int(ctx.get("group_id") or 0),
+        bot_role=str(ctx.get("bot_role") or "member"),
+    )
+    if status != "ok":
+        return {"ok": False, "error": "help_" + status,
+                "message": "没有这个命令，或它不在你当前身份的菜单里"}
+    return {"ok": True, "data": text}
+
+
+_register(
+    "get_bot_help", _tool_get_bot_help, "read",
+    "查询小汐的功能和命令用法：留空返回按你身份过滤的功能分类概览，传入命令名或分类名返回详细用法",
+    _schema({"command_or_category": _p_str("命令名或功能分类名，可空")}))
 
 
 def build_tool_schemas(explicit=False, *, actor_level=None, group_id=0,

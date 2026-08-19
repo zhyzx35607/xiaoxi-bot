@@ -235,6 +235,56 @@ def _help_visible(info, level, group_id):
     return True
 
 
+def build_help_digest(commands, level, query="", *, group_id=0, bot_role="member"):
+    """按调用者身份生成帮助文本，供 /help 与 AI 工具 get_bot_help 共用。
+
+    返回 (status, name, text)：status 为 "ok" / "not_found" / "denied"。
+    空 query 返回分类概览；命令名返回详细用法；分类名返回该分类的命令列表。
+    """
+    query = str(query or "").strip().lstrip("/").lower()
+
+    def _visible_names(names):
+        visible = []
+        for name, info in commands.items():
+            if name not in names:
+                continue
+            if not group_id and level < LEVEL_SUPER and name not in _PRIVATE_VISIBLE:
+                continue
+            if not _help_visible(info, level, group_id):
+                continue
+            visible.append(name)
+        return visible
+
+    if query:
+        category = next(
+            (name for name in _HELP_CATEGORIES if name.lower() == query), None)
+        if category:
+            names = _visible_names(_HELP_CATEGORIES[category])
+            if not names:
+                return "denied", category, ""
+            return "ok", category, "【{}】\n{}".format(
+                category, " ".join("/" + name for name in names))
+        matched = next((name for name in commands if name.lower() == query), None)
+        if not matched:
+            matched = next((name for name in commands if query in name.lower()), None)
+        if not matched:
+            return "not_found", None, ""
+        info = commands.get(matched, {})
+        if not _help_visible(info, level, group_id):
+            return "denied", matched, ""
+        return "ok", matched, _help_command_text(matched, info, bot_role, group_id)
+
+    lines = ["小汐功能概览（按你的身份过滤）"]
+    assigned = set()
+    for category, names in _HELP_CATEGORIES.items():
+        visible = [name for name in _visible_names(names) if name not in assigned]
+        assigned.update(visible)
+        if visible:
+            lines.append("【{}】{}".format(category, " ".join("/" + name for name in visible)))
+    lines.append("问具体命令用法：get_bot_help(\"命令名\")")
+    return "ok", None, "\n".join(lines)
+
+
 def _help_command_text(name, info, bot_role, group_id):
     detail_name = _COMMAND_DETAIL_ALIASES.get(name, name)
     detail = COMMAND_DETAILS.get(detail_name)
@@ -273,17 +323,14 @@ async def cmd_help(d, group_id, user_id, args, role, sender_card, message):
         bot_role, _ = await get_bot_role(d, group_id)
 
     if query and query not in {name.lower() for name in _HELP_CATEGORIES}:
-        matched = next((name for name in d.commands if name.lower() == query), None)
-        if not matched:
-            matched = next((name for name in d.commands if query in name.lower()), None)
-        if not matched:
+        status, matched, text = build_help_digest(
+            d.commands, caller_level, query, group_id=group_id, bot_role=bot_role)
+        if status == "not_found":
             await d._reply(group_id, user_id, "没有这个命令，发 /help 看全部命令")
             return
-        info = d.commands.get(matched, {})
-        if not _help_visible(info, caller_level, group_id):
+        if status == "denied":
             await d._reply(group_id, user_id, "这个功能不在你当前身份的菜单里")
             return
-        text = _help_command_text(matched, info, bot_role, group_id)
         await d._reply(group_id, user_id, text, title="/{} 的用法".format(matched),
                        role_hint=role)
         return

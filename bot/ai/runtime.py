@@ -9,6 +9,7 @@ from .reply import (
     _parse_reply_actions,
     _parse_reply_tags,
     _prepare_group_reply,
+    strip_command_prefix,
 )
 from .prompts import (
     OUTPUT_PROTOCOL,
@@ -16,8 +17,10 @@ from .prompts import (
     SAFETY_RULES,
     TOOL_USAGE_RULES,
     _build_system_prompt,
+    _capability_overview,
     _schedule_state,
     _split_reply_lines,
+    _style_rules_for_level,
     _typing_delay_secs,
 )
 from .search import (
@@ -178,7 +181,7 @@ def _post_process_roleplay_reply(reply):
     reply = reply.replace("```", "")
     while "\n\n\n" in reply:
         reply = reply.replace("\n\n\n", "\n\n")
-    return reply.strip()
+    return strip_command_prefix(reply.strip())
 
 
 def _split_roleplay_reply(text, max_chars=900, max_parts=10):
@@ -296,9 +299,10 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         recent = memory[-6:]
         lines = []
         for m in recent:
-            label = "群友" if m["role"] == "user" else "小汐"
-            content = m["content"][:80].replace("\n", " ")
-            lines.append("{}: {}".format(label, content))
+            label = "群友" if m.get("role") == "user" else "小汐"
+            content = str(m.get("content") or "")[:80].replace("\n", " ")
+            if content:
+                lines.append("{}: {}".format(label, content))
         if lines:
             mem_ctx = "【你对群里最近话题的记忆】\n" + "\n".join(lines)
     # Load user-specific memory for this person (group or private)
@@ -310,9 +314,10 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             recent_user = user_memory[-6:]
             ulines = []
             for m in recent_user:
-                label = "Ta" if m["role"] == "user" else "你"
-                content = m["content"][:80].replace("\n", " ")
-                ulines.append("{}: {}".format(label, content))
+                label = "Ta" if m.get("role") == "user" else "你"
+                content = str(m.get("content") or "")[:80].replace("\n", " ")
+                if content:
+                    ulines.append("{}: {}".format(label, content))
             if ulines:
                 if group_id:
                     user_mem_ctx = "【你和 {} 之前在这个群的对话记录】\n".format(sender_name if sender_name else "此人") + "\n".join(ulines)
@@ -324,12 +329,14 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         long_mem = _load_long_memory(group_id)
         long_mem_ctx = ""
         if long_mem:
-            long_lines = ["- " + e["content"][:120] for e in long_mem[-5:]]
+            long_lines = ["- " + str(e.get("content") or "")[:120]
+                          for e in long_mem[-5:] if e.get("content")]
             if long_lines:
                 long_mem_ctx = "【本群历史话题摘要】\n" + "\n".join(long_lines)
         u_long = _load_user_long_memory(group_id, user_id) if user_id else []
         if u_long:
-            u_long_lines = ["- " + e["content"][:120] for e in u_long[-5:]]
+            u_long_lines = ["- " + str(e.get("content") or "")[:120]
+                            for e in u_long[-5:] if e.get("content")]
             if u_long_lines:
                 long_mem_ctx += "\n\n【你和 {} 之前聊过的长期话题】\n".format(
                     sender_name if sender_name else "此人") + "\n".join(u_long_lines)
@@ -337,7 +344,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         long_mem = _load_user_long_memory(0, user_id) if user_id else []
         long_mem_ctx = ""
         if long_mem:
-            long_lines = ["- " + e["content"][:120] for e in long_mem[-5:]]
+            long_lines = ["- " + str(e.get("content") or "")[:120]
+                          for e in long_mem[-5:] if e.get("content")]
             if long_lines:
                 long_mem_ctx = "【你和对方的历史话题摘要】\n" + "\n".join(long_lines)
     # Web search for unknown topics
@@ -406,7 +414,11 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         long_mem_ctx=long_mem_ctx,
         user_mem_ctx=user_mem_ctx,
         tool_ctx=TOOL_USAGE_RULES if tools else "",
+        style_rules=_style_rules_for_level(caller_level),
     )
+    if tools:
+        system_prompt += "\n\n" + _capability_overview(
+            caller_level, in_group=bool(group_id))
     if roleplay_prompt:
         system_prompt += "\n\n" + roleplay_prompt
     
@@ -419,7 +431,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         '对方发个表情包没说话 → 可以不回。\n'
         '对方只回「嗯」「好」「行」「知道了」→ 说明不想聊了，打住。\n'
         '聊得差不多了可以自然收尾（「先溜了」「晚点聊」「睡了」）。\n'
-        '遇到不确定的事就说不知道，别编。\n'
+        '遇到不确定的事实（时间/天气/新闻/资料）先调用工具查，查不到再坦白说不知道，别编。\n'
         '像安静的朋友聊天，克制一点，不主动追问，不需要每条都回。\n'
         '普通问候和短回应默认只发一段，不要用“有需要随时找我”之类的套话收尾。'
         )
@@ -449,7 +461,10 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     # Add recent conversation history as structured messages
     if group_id:
         if memory:
-            messages.extend(memory[-30:])
+            messages.extend(
+                m for m in memory[-30:]
+                if m.get("role") in ("user", "assistant", "system")
+                and m.get("content"))
     else:
         if roleplay_active:
             messages.extend(roleplay_history[-20:])
@@ -795,5 +810,5 @@ def _post_process_reply(reply):
     # Limit length
     if len(reply) > 500:
         reply = reply[:500] + "..."
-    return reply
+    return strip_command_prefix(reply)
 # ========== REPLY TAG PARSER (STICKER/REPLY/POKE/AT) ==========

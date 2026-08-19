@@ -2451,7 +2451,7 @@ class AIToolRegistryTests(unittest.TestCase):
         "translate_en2zh", "get_group_at_all_remain", "uapi_weather",
         "uapi_hotboard", "uapi_saying", "uapi_answerbook", "uapi_epic_free",
         "get_group_msg_history", "get_forward_msg", "get_friend_list",
-        "get_recent_contact", "uapi_search", "uapi_translate",
+        "get_recent_contact", "uapi_search", "uapi_translate", "get_bot_help",
     }
 
     def test_three_tiers_complete(self):

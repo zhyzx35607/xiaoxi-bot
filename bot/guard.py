@@ -80,7 +80,14 @@ def add_blacklist(group_id, user_id, duration_hours=48, bot_owner=None, bot_qq=N
                 bot_qq = cfg.get("bot_qq")
         except (OSError, _json.JSONDecodeError, TypeError, ValueError) as error:
             log.warning("Unable to read protected account IDs from config: %s", error)
-    if user_id == bot_owner or user_id == bot_qq:
+    # user_id 可能来自事件字符串，与 config 的 int 比较前统一转换
+    def _protected_id(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    protected = {_protected_id(bot_owner), _protected_id(bot_qq)} - {None}
+    if _protected_id(user_id) in protected:
         log.info("Skipped blacklist for bot owner/self: %s", user_id)
         return
 
