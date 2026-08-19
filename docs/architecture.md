@@ -40,10 +40,11 @@ imports remain valid while canonical code uses the focused packages.
 
 The Agent tool gateway (`bot/agent/tools/gateway.py`) exposes three layers:
 read-only tools (registry reads, `SAFE_ACTIONS`, native read tools); low-risk
-moderation (`delete_msg`, `set_group_ban`, `set_group_add_request`), which
+moderation (`delete_msg`, `set_group_ban`), which
 executes only when the per-group switch, the bot's real-time group role,
 target protection and the daily quota all pass; and high-risk moderation
-(`set_group_kick`), which additionally requires a human-confirmed plan
+(`set_group_kick`, `set_group_add_request`), which additionally requires a
+human-confirmed plan
 (`confirmed` metadata) or the super owner. Every layer fails closed.
 
 ## Stable public interfaces

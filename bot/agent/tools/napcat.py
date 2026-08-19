@@ -46,14 +46,16 @@ def action_description(name):
 # 受控群管层：不进 SAFE_ACTIONS，避免改变只读目录与 is_read_only 的现有语义。
 # 低风险动作门控全部通过后可自动执行；高风险动作只允许经确认流（confirmed）
 # 或最高主人触发。
-LOW_RISK_MODERATION = {"delete_msg", "set_group_ban", "set_group_add_request"}
-HIGH_RISK_MODERATION = {"set_group_kick"}
+# 入群申请处理是高风险：验证消息的对错没有确定性依据，误放广告号或误拒
+# 真群友的代价都高，必须人工确认。
+LOW_RISK_MODERATION = {"delete_msg", "set_group_ban"}
+HIGH_RISK_MODERATION = {"set_group_kick", "set_group_add_request"}
 MODERATION_ACTIONS = LOW_RISK_MODERATION | HIGH_RISK_MODERATION
 
 MODERATION_TOOL_DESCRIPTIONS = {
     "delete_msg": "撤回本群消息（低风险群管，需本群开启管群自治）；参数 message_id，可选 reason",
     "set_group_ban": "禁言本群成员（低风险群管，时长有硬上限）；参数 user_id、duration（秒），可选 reason",
-    "set_group_add_request": "处理入群申请（低风险群管）；参数 flag、approve（布尔），可选 reason",
+    "set_group_add_request": "处理入群申请（高风险，需主人确认后才会执行）；参数 flag、approve（布尔），可选 reason",
     "set_group_kick": "移出本群成员（高风险，需主人确认后才会执行）；参数 user_id，可选 reject_add_request、reason",
 }
 

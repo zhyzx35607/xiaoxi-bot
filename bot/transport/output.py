@@ -24,9 +24,10 @@ log = logging.getLogger("qqbot")
 _FORWARD_NODE_HARD_CHARS = 1000
 
 # Degradation chain after merged-forward failure: a few plain messages first,
-# text-file upload only when those also fail.
-_PLAIN_FALLBACK_MAX_MESSAGES = 5
-_PLAIN_FALLBACK_MAX_CHARS = 400
+# text-file upload only when those also fail. QQ single messages safely carry
+# ~900 chars; 8 messages cover the full owner /help (~4-5k chars).
+_PLAIN_FALLBACK_MAX_MESSAGES = 8
+_PLAIN_FALLBACK_MAX_CHARS = 900
 _PLAIN_FALLBACK_INTERVAL = 0.5
 
 
@@ -194,6 +195,9 @@ async def _send_plain_fallback(dispatcher, group_id, user_id, text, sections):
     target = max(300, int(config.get("forward_node_target_chars", 800) or 800))
     chunks = _plain_fallback_chunks(sections or _split_sections(text, target))
     if not chunks:
+        log.warning(
+            "plain fallback skipped: group=%s user=%s text_chars=%d exceeds %d messages",
+            group_id, user_id, len(str(text or "")), _PLAIN_FALLBACK_MAX_MESSAGES)
         return False
     for index, chunk in enumerate(chunks):
         if index:

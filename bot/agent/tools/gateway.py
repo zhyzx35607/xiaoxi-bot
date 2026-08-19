@@ -38,6 +38,7 @@ class AgentToolGateway:
                     "get_group_honor", "get_shut_list", "get_friend_info",
                     "get_image_ocr", "get_essence_list", "get_group_info_ex",
                     "check_url_safety", "translate_text", "get_at_all_remain",
+                    "get_bot_help",
                 }
             }
         return self._registry
@@ -55,6 +56,7 @@ class AgentToolGateway:
 
     def catalog(self, agent_event=None):
         catalog = {name: "\u5df2\u6ce8\u518c\u7684\u53ea\u8bfb\u67e5\u8be2\u5de5\u5177" for name in self._load()}
+        catalog["get_bot_help"] = "查询小汐自身的功能和命令用法；参数 command_or_category（可空）"
         catalog.update({name: action_description(name) for name in SAFE_ACTIONS})
         catalog.update(NATIVE_TOOL_DESCRIPTIONS)
         if self._moderation_visible(agent_event):
@@ -82,6 +84,18 @@ class AgentToolGateway:
                 }
         if tool_name in MODERATION_ACTIONS:
             return await napcat_moderation(self.dispatcher, agent_event, tool_name, **arguments)
+        if tool_name == "get_bot_help":
+            # 身份感知的帮助查询：用已验证的 Agent 身份等级过滤命令可见性
+            from ...commands.system import build_help_digest
+            status, _matched, text = build_help_digest(
+                getattr(self.dispatcher, "commands", {}) or {},
+                int(agent_event.identity.level),
+                str(arguments.get("command_or_category") or ""),
+                group_id=0 if agent_event.scope.is_private
+                else int(agent_event.scope.group_id))
+            if status != "ok":
+                return {"ok": False, "error": "help_" + status}
+            return {"ok": True, "data": text}
         if tool_name in SAFE_ACTIONS:
             return await napcat_read(self.dispatcher, agent_event, tool_name, **arguments)
         tool = self._load().get(tool_name)

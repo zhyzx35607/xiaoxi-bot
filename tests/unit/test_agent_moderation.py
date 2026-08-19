@@ -245,8 +245,9 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         bad_user = await self.execute(
             runtime, dispatcher, event, "set_group_ban", user_id="abc", duration=60)
         bad_bool = await self.execute(
-            runtime, dispatcher, event, "set_group_add_request",
-            flag="f1", approve="yes")
+            runtime, dispatcher,
+            replace(event, metadata={"confirmed": True}),
+            "set_group_add_request", flag="f1", approve="yes")
         for result in (bad_msg, bad_user, bad_bool):
             self.assertFalse(result["ok"])
             self.assertEqual(result["error"], "invalid_tool_argument")
@@ -285,14 +286,22 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "group_id_required_for_owner_private")
 
-    async def test_add_request_low_risk_succeeds(self):
+    async def test_add_request_requires_confirmation(self):
+        # 入群申请处理是高风险动作：验证消息对错无确定性依据，必须人工确认
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin", 101: "owner"})
         dispatcher = make_dispatcher(runtime, client)
-        result = await self.execute(
+        denied = await self.execute(
             runtime, dispatcher, group_event(runtime),
             "set_group_add_request", flag="flag123", approve=False, reason="可疑")
-        self.assertTrue(result["ok"])
+        self.assertFalse(denied["ok"])
+        self.assertEqual(denied["error"], "moderation_requires_confirmation")
+        self.assertEqual(client.calls, [])
+        confirmed = await self.execute(
+            runtime, dispatcher,
+            replace(group_event(runtime), metadata={"confirmed": True}),
+            "set_group_add_request", flag="flag123", approve=False, reason="可疑")
+        self.assertTrue(confirmed["ok"])
         self.assertEqual(
             client.calls, [("set_group_add_request", "flag123", "add", False, "可疑")])
 
@@ -615,6 +624,40 @@ class ModerationCommandTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("agent", dispatcher.config["groups"]["300"])
             reply_text = dispatcher._reply.await_args[0][2]
             self.assertIn("只能由", reply_text)
+
+
+class AgentBotHelpTests(unittest.IsolatedAsyncioTestCase):
+    COMMANDS = {
+        "天气": {"help": "查天气 /天气 城市"},
+        "master": {"help": "管理群主人 /master add QQ号", "bot_owner_only": True},
+    }
+
+    def _dispatcher(self, runtime):
+        return type("D", (), {
+            "config": runtime.config, "client": FakeClient(),
+            "agent_runtime": runtime, "commands": dict(self.COMMANDS)})()
+
+    def test_catalog_advertises_bot_help(self):
+        runtime = make_runtime()
+        gateway = AgentToolGateway(self._dispatcher(runtime))
+        self.assertIn("get_bot_help", gateway.catalog())
+        self.assertTrue(gateway.is_read_only("get_bot_help"))
+
+    async def test_execute_filters_by_identity_level(self):
+        runtime = make_runtime()
+        gateway = AgentToolGateway(self._dispatcher(runtime))
+        member_event = runtime.build_event({
+            "user_id": 201, "group_id": 300, "message_type": "group",
+            "raw_message": "x", "sender": {"role": "member"}})
+        denied = await gateway.execute(
+            member_event, "get_bot_help", command_or_category="master")
+        self.assertFalse(denied["ok"])
+        owner_event = runtime.build_event({
+            "user_id": 999, "message_type": "private", "raw_message": "x"})
+        allowed = await gateway.execute(
+            owner_event, "get_bot_help", command_or_category="master")
+        self.assertTrue(allowed["ok"])
+        self.assertIn("/master", allowed["data"])
 
 
 if __name__ == "__main__":

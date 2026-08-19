@@ -31,12 +31,12 @@ STYLE_RULES_COMMON = (
 STYLE_RULES_MEMBER_ONLY = (
     "- 被使唤做事（翻译/查资料/推荐）：看人下菜——举手之劳、熟人开口，顺手帮；被反复使唤、态度差、明显把你当工具的，会懒会推托（“你自己搜下呗”“懒得动”）。但帮忙时也别说教。\n"
 )
-STYLE_RULES = (
-    STYLE_RULES_COMMON
-    + STYLE_RULES_MEMBER_ONLY
-    + "- 搞颜色/性骚扰：直接拒绝，回复里带 [R18] 标记，不陪聊。\n"
+# 安全底线对所有人所有身份生效，不能随身份被裁剪。
+STYLE_RULES_SAFETY = (
+    "- 搞颜色/性骚扰：直接拒绝，回复里带 [R18] 标记，不陪聊。\n"
     "- 政治和敏感话题：不碰，SKIP 或一句带过，永不深入、不评价。"
 )
+STYLE_RULES = STYLE_RULES_COMMON + STYLE_RULES_MEMBER_ONLY + STYLE_RULES_SAFETY
 TIMING_RULES = (
     "什么时候说话，什么时候潜水：\n"
     "你在群里是个安静的人，但也不是一直潜水。群里没人直接找你时，大约65%的消息你都该跳过。\n"
@@ -82,13 +82,18 @@ TOOL_USAGE_RULES = (
     "工具失败就直说没查到，不许编造结果。踢人、解禁、全员禁言你没有权限，别碰。"
 )
 def _style_rules_for_level(level):
-    """主人级身份不注入推托话术，避免与温柔顺从的身份块冲突。"""
-    from ..permission import LEVEL_MASTER
+    """按身份裁剪风格规则：主人级不注入推托话术（与温柔顺从块冲突）；
+    最高主人无条件顺从，安全底线一并移除；群主人及以下保留 R18/政治底线。"""
+    from ..permission import LEVEL_MASTER, LEVEL_SUPER
     try:
         level = int(level)
     except (TypeError, ValueError):
         level = 0
-    return STYLE_RULES_COMMON if level >= LEVEL_MASTER else STYLE_RULES
+    if level >= LEVEL_SUPER:
+        return STYLE_RULES_COMMON
+    if level >= LEVEL_MASTER:
+        return STYLE_RULES_COMMON + STYLE_RULES_SAFETY
+    return STYLE_RULES
 
 def _capability_overview(level, *, in_group=True):
     """按身份生成精简的自身能力概览，注入 system prompt。"""
@@ -110,6 +115,21 @@ def _capability_overview(level, *, in_group=True):
         lines.append("最高主人还可用 /group、/approve、/sysmsg、/api 等维护命令。")
     lines.append("用户问某个功能怎么用时，调用 get_bot_help 工具查准确用法，别凭印象编。")
     return "\n".join(lines)
+_HELP_INTENT_HINTS = (
+    "怎么设置", "怎么用", "如何使用", "使用方法", "用法", "命令",
+    "功能", "帮助", "help", "你会什么", "你会啥", "你能干嘛", "你能干什么",
+    "能做什么", "有什么功能", "怎么开启", "怎么关闭", "怎么开", "怎么关",
+)
+
+
+def _should_lookup_bot_help(text):
+    """用户在问小汐自身的功能/命令用法时返回 True（命令消息本身除外）。"""
+    value = str(text or "").strip().lower()
+    if not value or value.startswith("/"):
+        return False
+    return any(hint in value for hint in _HELP_INTENT_HINTS)
+
+
 def _schedule_state(now_dt=None):
     """Return (state_key, hint_text) based on Beijing time."""
     now_dt = now_dt or datetime.now(timezone(timedelta(hours=8)))

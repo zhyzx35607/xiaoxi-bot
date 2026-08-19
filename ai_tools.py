@@ -190,6 +190,20 @@ async def uapi_epic_free(dispatcher):
     }}
 
 
+async def get_bot_help(dispatcher, command_or_category=""):
+    """Caller-agnostic help lookup (legacy loop / agent registry fallback):
+    member-level filtering only, identity-aware paths build the digest
+    themselves with the verified caller level."""
+    from bot.commands.system import build_help_digest
+    status, _matched, text = build_help_digest(
+        getattr(dispatcher, "commands", {}) or {}, 0,
+        str(command_or_category or ""),
+        group_id=0, bot_role="member")
+    if status != "ok":
+        return {"ok": False, "error": "help_" + status}
+    return {"ok": True, "data": text}
+
+
 async def execute_tool(dispatcher, name, arguments):
     """Dispatch only registered low-risk tools; never accepts a raw OneBot action."""
     args = arguments if isinstance(arguments, dict) else {}
@@ -215,6 +229,7 @@ async def execute_tool(dispatcher, name, arguments):
         "uapi_answerbook": uapi_answerbook,
         "uapi_epic_free": uapi_epic_free,
         "uapi_search": uapi_search,
+        "get_bot_help": get_bot_help,
     }
     handler = tools.get(name)
     if not handler:
