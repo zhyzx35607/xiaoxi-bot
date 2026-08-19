@@ -90,7 +90,7 @@ class ContentConfigMigrationTests(unittest.TestCase):
         self.assertEqual(config["runtime"]["owner_private_merge_seconds"], 5)
         self.assertEqual(
             config["runtime"]["owner_reply_similarity_cooldown_seconds"], 300)
-        self.assertEqual(config["agent"]["schema_version"], 5)
+        self.assertEqual(config["agent"]["schema_version"], 6)
         self.assertEqual(config["agent"]["owner_daily_limit"], 2)
         self.assertEqual(config["agent"]["owner_hourly_limit"], 1)
         self.assertEqual(config["agent"]["companion_min_gap_seconds"], 21600)

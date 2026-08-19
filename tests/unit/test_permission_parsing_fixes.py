@@ -346,7 +346,8 @@ class AgentConfirmationTests(unittest.IsolatedAsyncioTestCase):
         create.assert_not_called()
         runtime.run_autonomous.assert_called_once()
 
-    async def test_moderation_action_never_reaches_gateway_execution(self):
+    async def test_moderation_action_fails_closed_at_gateway(self):
+        """Moderation actions route to the gated layer and fail closed by default."""
         from bot.agent.tools.gateway import AgentToolGateway
         from bot.agent.runtime import AgentRuntime
 
@@ -358,7 +359,7 @@ class AgentConfirmationTests(unittest.IsolatedAsyncioTestCase):
             result = await AgentToolGateway(dispatcher).execute(
                 event, "set_group_ban", group_id=1, user_id=2, duration=60)
         self.assertFalse(result["ok"])
-        self.assertEqual("unknown_agent_tool", result["error"])
+        self.assertEqual("moderation_disabled", result["error"])
 
 
 class ScopeGateTests(unittest.TestCase):

@@ -616,7 +616,7 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_group_router_can_run_while_owner_router_is_in_observation_mode(self):
         config = {
-            "bot_owner": 100,
+            "bot_owner": 100, "bot_qq": 888,
             "agent": {"primary_router": False, "observation_only": True, "owner_autonomy_enabled": False},
             "groups": {"300": {"agent": {"primary_router": True}}},
         }
@@ -626,7 +626,7 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
             async def plan(self, agent_event, context):
                 return {"reply": "群域回复", "tools": [], "needs_confirmation": False, "intent": "group", "task": None}
         runtime.planner = Planner()
-        runtime.tools = type("Tools", (), {"catalog": lambda self: {}})()
+        runtime.tools = type("Tools", (), {"catalog": lambda self, agent_event=None: {}})()
         runtime.executor = object()
         runtime.verifier = object()
         async def run(*args, **kwargs):
@@ -870,7 +870,7 @@ class AgentExecutionEvidenceTests(unittest.IsolatedAsyncioTestCase):
             async def execute(self, agent_event, calls, remaining_budget):
                 return [{"name": "fake_read", "step_id": "s1", "arguments": {}, "result": {"ok": True, "data": "healthy"}}]
         runtime.planner = Planner()
-        runtime.tools = type("Tools", (), {"catalog": lambda self: {"fake_read": "read"}})()
+        runtime.tools = type("Tools", (), {"catalog": lambda self, agent_event=None: {"fake_read": "read"}})()
         runtime.executor = Executor()
         dispatcher = type("D", (), {})()
         plan, results = await runtime.run_autonomous(dispatcher, event)
@@ -900,13 +900,13 @@ class AgentExecutionEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 executions.append(True)
                 return []
         runtime.planner = Planner()
-        runtime.tools = type("Tools", (), {"catalog": lambda self: {"fake_write": "write"}})()
+        runtime.tools = type("Tools", (), {"catalog": lambda self, agent_event=None: {"fake_write": "write"}})()
         runtime.executor = Executor()
         class Client:
             def __init__(self): self.sent = []
             async def send_group_msg_with_at(self, group_id, text, users):
                 self.sent.append((group_id, text, users)); return {"status": "ok"}
-        dispatcher = type("D", (), {"client": Client()})()
+        dispatcher = type("D", (), {"client": Client(), "config": {"bot_qq": 888}})()
         event = {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "执行方案", "sender": {"role": "owner"}}
         with patch("bot.services.confirmations.create_agent_confirmation", return_value="abc123"):
             self.assertTrue(await runtime.handle_event(dispatcher, event, explicit=True))
@@ -925,13 +925,13 @@ class AgentExecutionEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 executed.extend(item["name"] for item in calls)
                 return [{"name": item["name"], "result": {"ok": True}} for item in calls]
         runtime.planner = Planner()
-        runtime.tools = type("Tools", (), {"catalog": lambda self: {}})()
+        runtime.tools = type("Tools", (), {"catalog": lambda self, agent_event=None: {}})()
         runtime.executor = Executor()
         class Client:
             def __init__(self): self.sent = []
             async def send_group_msg_with_at(self, group_id, text, users):
                 self.sent.append((group_id, text, users)); return {"status": "ok"}
-        dispatcher = type("D", (), {"client": Client()})()
+        dispatcher = type("D", (), {"client": Client(), "config": {"bot_qq": 888}})()
         frozen = {"intent": "approved", "reply": "", "needs_confirmation": True, "tools": [{"name": "approved_tool", "arguments": {}}], "task": None}
         result = await runtime.execute_confirmed_plan(dispatcher, {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}}, frozen, role="owner")
         self.assertTrue(result["success"])
@@ -949,7 +949,7 @@ class AgentGroupProactiveTests(unittest.IsolatedAsyncioTestCase):
                     {"name": "get_group_info", "arguments": {}},
                 ]}
         class Tools:
-            def catalog(self): return {}
+            def catalog(self, agent_event=None): return {}
             def is_read_only(self, name): return name != "agent_create_goal"
         captured = []
         class Executor:
@@ -960,7 +960,7 @@ class AgentGroupProactiveTests(unittest.IsolatedAsyncioTestCase):
         runtime.tools = Tools()
         runtime.executor = Executor()
         runtime.verifier = object()
-        await runtime.run_autonomous(type("D", (), {})(), event, read_only_tools=True)
+        await runtime.run_autonomous(type("D", (), {"config": {"bot_qq": 888}})(), event, read_only_tools=True)
         self.assertEqual(captured, ["get_group_info"])
 
     async def test_group_review_requires_opt_in_and_uses_group_scope(self):

@@ -336,6 +336,17 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
         save_group_config(dispatcher)
         await dispatcher._reply(group_id, user_id, "\u672c\u7fa4\u4e3b\u52a8 Agent \u5df2{}".format("\u5f00\u542f" if enabled else "\u5173\u95ed"))
         return
+    if action in {"管群", "moderation"}:
+        if level < LEVEL_GOWNER or not group_id:
+            await dispatcher._reply(group_id, user_id, "Agent 管群自治只能由最高主人或当前群主在群里设置")
+            return
+        enabled = value.lower() in {"on", "开启", "1", "true"}
+        group_agent = dispatcher.config.setdefault("groups", {}).setdefault(
+            str(group_id), {}).setdefault("agent", {})
+        group_agent["moderation_enabled"] = enabled
+        save_group_config(dispatcher)
+        await dispatcher._reply(group_id, user_id, "本群 Agent 管群自治已{}".format("开启" if enabled else "关闭"))
+        return
     if not group_id and level >= LEVEL_SUPER and action in {
         "追问", "followup", "媒体", "media", "情绪", "emotion", "mood",
         "事件", "events", "清空", "clear", "状态", "status", "search",
@@ -398,11 +409,14 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
     skills = dispatcher.agent_runtime.skills.list(scope)
     insights = dispatcher.agent_runtime.insights.list(scope, limit=100)
     settings = dispatcher.config.get("agent", {})
+    group_agent = dispatcher.config.get("groups", {}).get(
+        str(group_id), {}).get("agent", {}) if group_id else {}
     lines = [
         "Agent \u72b6\u6001\uff1a{}".format("\u5f00\u542f" if settings.get("enabled", True) else "\u5173\u95ed"),
         "\u8fd0\u884c\u9636\u6bb5\uff1a{}".format("\u89c2\u5bdf\u6a21\u5f0f" if settings.get("observation_only", True) else "\u81ea\u6cbb\u89c4\u5212\u6a21\u5f0f"),
         "目标：{}；计划：{}；提醒：{}；后台任务：{}；技能：{}；洞察：{}；待确认记忆：{}".format(
             len(goals), len(plans), len(reminders), len(tasks), len(skills), len(insights), len(pending)),
-        "命令：/agent 目标 | 计划 | 提醒 | 任务 | 记忆 | 技能 | 画像 | 时间线 | 洞察 | 自治 on/off | 主动 on/off",
+        "管群自治：{}".format("开启" if group_agent.get("moderation_enabled", False) else "关闭"),
+        "命令：/agent 目标 | 计划 | 提醒 | 任务 | 记忆 | 技能 | 画像 | 时间线 | 洞察 | 自治 on/off | 主动 on/off | 管群 on/off",
     ]
     await dispatcher._reply(group_id, user_id, "\n".join(lines))

@@ -4,7 +4,14 @@ import inspect
 
 from ...memory import sanitize_for_memory
 from ..policy import tool_allowed
-from .napcat import SAFE_ACTIONS, action_description, napcat_read
+from .napcat import (
+    MODERATION_ACTIONS,
+    MODERATION_TOOL_DESCRIPTIONS,
+    SAFE_ACTIONS,
+    action_description,
+    napcat_moderation,
+    napcat_read,
+)
 from .native import NATIVE_TOOL_DESCRIPTIONS, WRITE_TOOLS, execute_native
 
 
@@ -35,10 +42,23 @@ class AgentToolGateway:
             }
         return self._registry
 
-    def catalog(self):
+    def _moderation_visible(self, agent_event):
+        """Moderation tools appear in the catalog only where they may run."""
+        if agent_event is None:
+            return False
+        if agent_event.scope.is_private:
+            return bool(agent_event.identity.is_super_owner)
+        group = self.dispatcher.config.get("groups", {}).get(
+            str(agent_event.scope.group_id), {})
+        group_agent = group.get("agent", {}) if isinstance(group, dict) else {}
+        return bool(group_agent.get("moderation_enabled", False))
+
+    def catalog(self, agent_event=None):
         catalog = {name: "\u5df2\u6ce8\u518c\u7684\u53ea\u8bfb\u67e5\u8be2\u5de5\u5177" for name in self._load()}
         catalog.update({name: action_description(name) for name in SAFE_ACTIONS})
         catalog.update(NATIVE_TOOL_DESCRIPTIONS)
+        if self._moderation_visible(agent_event):
+            catalog.update(MODERATION_TOOL_DESCRIPTIONS)
         return catalog
 
     def is_read_only(self, tool_name):
@@ -60,6 +80,8 @@ class AgentToolGateway:
                     "error": "invalid_tool_arguments",
                     "argument": "image",
                 }
+        if tool_name in MODERATION_ACTIONS:
+            return await napcat_moderation(self.dispatcher, agent_event, tool_name, **arguments)
         if tool_name in SAFE_ACTIONS:
             return await napcat_read(self.dispatcher, agent_event, tool_name, **arguments)
         tool = self._load().get(tool_name)

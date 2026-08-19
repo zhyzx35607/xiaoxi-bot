@@ -5,6 +5,7 @@ import json
 import logging
 import random
 import time
+from dataclasses import replace
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -380,6 +381,29 @@ class AgentWorker:
             log.exception("Owner goal review failed goal=%s: %s", goal.get("id"), error)
             return "failed"
 
+    def _writeback_insights(self, runtime, scope_key):
+        """Merge high-confidence insights into the scope profile customs once."""
+        try:
+            insights = runtime.insights.list(scope_key, limit=50)
+            profile = runtime.profiles.get(scope_key)
+            written = {str(item) for item in profile.get("insight_writebacks", [])}
+            new_ids = []
+            for item in insights:
+                insight_id = str(item.get("id") or "")
+                if not insight_id or insight_id in written:
+                    continue
+                if float(item.get("confidence", 0) or 0) < 0.8:
+                    continue
+                text = str(item.get("content") or "").strip()[:120]
+                if not text:
+                    continue
+                runtime.profiles.append_custom(scope_key, text)
+                new_ids.append(insight_id)
+            if new_ids:
+                runtime.profiles.record_insight_writebacks(scope_key, new_ids)
+        except Exception as error:
+            log.warning("Insight writeback failed scope=%s: %s", scope_key, error)
+
     async def _review_group_scope(self):
         settings = self.dispatcher.config.get("agent", {})
         if not settings.get("proactive_enabled", True):
@@ -401,7 +425,8 @@ class AgentWorker:
             goals = runtime.goals.list(scope_key)
             plans = runtime.plans.list(scope_key, statuses={"active", "running"})
             topics = profile.get("proactive_topics", []) if profile else []
-            if not goals and not plans and not topics:
+            moderation_configured = bool(agent.get("moderation_enabled", False))
+            if not goals and not plans and not topics and not moderation_configured:
                 continue
             group_state = state.get(str(group_id)) or {}
             if self._review_in_progress(group_state, now, lease_seconds):
@@ -419,21 +444,43 @@ class AgentWorker:
             run_id = new_record_id(16)
             state[str(group_id)] = {"status": "running", "run_id": run_id, "started_at": now}
             runtime.store.write("worker/group_reviews.json", state)
+            # 管群巡检只在配置开启且 bot 实时角色确认为管理/群主时放开写工具；
+            # 角色查询失败按只读复盘处理。
+            moderation_active = False
+            if moderation_configured:
+                from ..permission import get_bot_role
+                bot_role, _ = await get_bot_role(self.dispatcher, int(group_id))
+                moderation_active = bot_role in ("owner", "admin")
+            if moderation_active:
+                raw_message = "请巡检本群最近消息，识别广告、刷屏和违规内容。"
+                task_context = (
+                    "这是群管巡检。查看本群最近消息，识别广告/刷屏/违规；"
+                    "发现违规用低风险工具处置（撤回/短时禁言）并简短说明；"
+                    "没有违规就按原复盘逻辑或保持安静；"
+                    "处置必须基于你实际读到的消息证据。不得泄露其他群或最高主人私域。")
+            else:
+                raw_message = "请根据本群画像、目标、计划和最近事件，主动提出一个具体、有用且不过度打扰的推进。"
+                task_context = "这是群域主动复盘。不得泄露其他群或最高主人私域；没有明确价值就保持安静。"
             event = runtime.build_event({
                 "user_id": owner_id,
                 "group_id": int(group_id),
                 "message_type": "group",
                 "sender": {"role": "owner"},
-                "raw_message": "请根据本群画像、目标、计划和最近事件，主动提出一个具体、有用且不过度打扰的推进。",
+                "raw_message": raw_message,
                 "time": now,
             })
+            # 巡检是系统事件而非主人亲口指令：标记 auto_patrol，
+            # napcat_moderation 对高风险动作拒绝主人身份豁免，必须走人工确认。
+            event = replace(
+                event, metadata={**dict(event.metadata), "auto_patrol": True})
             try:
                 plan, results = await runtime.run_autonomous(
                     self.dispatcher, event,
-                    task_context="这是群域主动复盘。不得泄露其他群或最高主人私域；没有明确价值就保持安静。",
+                    task_context=task_context,
                     allow_background_queue=False,
-                    read_only_tools=True,
+                    read_only_tools=not moderation_active,
                 )
+                self._writeback_insights(runtime, scope_key)
                 if plan.get("needs_confirmation", False):
                     state[str(group_id)] = {"last_run": now, "status": "confirmation_required", "run_id": run_id}
                     runtime.store.write("worker/group_reviews.json", state)

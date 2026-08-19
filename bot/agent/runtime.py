@@ -5,8 +5,10 @@ import json
 import os
 import re
 import time
+from dataclasses import replace
 
 from ..memory import contains_sensitive_data
+from ..permission import get_bot_role
 from .context import AgentContextBuilder
 from .companion_runtime import CompanionRuntime
 from .executor import AgentExecutor
@@ -26,6 +28,7 @@ from .skills import AgentSkillStore
 from .storage.json_store import AgentJsonStore
 from .timeline import AgentTimeline
 from .tools.gateway import AgentToolGateway
+from .tools.napcat import MODERATION_ACTIONS
 from .tools.native import WRITE_TOOLS
 from .workers import AgentTaskStore
 from .verifier import AgentVerifier
@@ -34,9 +37,9 @@ from .verifier import AgentVerifier
 def _plan_requires_confirmation(plan):
     """Deterministic confirmation rule for Agent plans.
 
-    AI output is not proof of safety: a plan containing native write tools
-    or an execution_plan always needs human confirmation, regardless of the
-    model's self-assessed needs_confirmation flag.
+    AI output is not proof of safety: a plan containing native write tools,
+    moderation tools or an execution_plan always needs human confirmation,
+    regardless of the model's self-assessed needs_confirmation flag.
     """
     if not isinstance(plan, dict):
         return True
@@ -44,7 +47,7 @@ def _plan_requires_confirmation(plan):
         return True
     for tool in plan.get("tools") or []:
         name = tool.get("name") if isinstance(tool, dict) else tool
-        if name in WRITE_TOOLS:
+        if name in WRITE_TOOLS or name in MODERATION_ACTIONS:
             return True
     return False
 
@@ -165,10 +168,20 @@ class AgentRuntime:
         if self.verifier is None:
             self.verifier = AgentVerifier(dispatcher)
 
-    def _planning_context(self, agent_event, task_context=""):
+    async def _planning_context(self, dispatcher, agent_event, task_context=""):
         context = self.context.build(agent_event)
+        if not agent_event.scope.is_private:
+            # AI 输出不是权限证明，但身份线索能让 planner 做出符合角色的规划；
+            # 真正的处置权限仍在 napcat_moderation 里逐次复核。
+            bot_role, _ = await get_bot_role(dispatcher, agent_event.scope.group_id)
+            role_name = {"owner": "群主", "admin": "管理"}.get(bot_role, "成员")
+            context += "\n小汐在本群的身份：" + role_name
+            if bot_role in ("owner", "admin"):
+                context += "；你是本群管理，发现广告/刷屏/违规时应主动维护秩序"
+            else:
+                context += "；你只是成员，只观察不处置"
         catalog_method = getattr(self.tools, "catalog", None)
-        tool_catalog = catalog_method() if callable(catalog_method) else {}
+        tool_catalog = catalog_method(agent_event) if callable(catalog_method) else {}
         if tool_catalog:
             context += "\n可用工具目录：\n" + "\n".join(
                 "- {}: {}".format(name, description)
@@ -190,7 +203,7 @@ class AgentRuntime:
             12 if owner_private else 5))
         max_rounds = max(1, min(max_rounds, 10))
         tool_budget = max(0, min(tool_budget, 24))
-        context = self._planning_context(agent_event, task_context)
+        context = await self._planning_context(dispatcher, agent_event, task_context)
         transcript = []
         last_plan = None
         persisted_plan = None
@@ -276,6 +289,10 @@ class AgentRuntime:
         event.setdefault("sender", {})
         event["sender"]["role"] = role or event["sender"].get("role") or "owner"
         agent_event = self.build_event(event)
+        # 人工确认过的计划获得 confirmed 标记，高风险群管工具只认这个标记
+        # （或最高主人身份），模型自己编不出。
+        agent_event = replace(
+            agent_event, metadata={**dict(agent_event.metadata), "confirmed": True})
         if agent_event.scope.is_private or not agent_event.identity.can_manage_agent:
             return {"success": False, "reason": "confirmed_scope_denied"}
         frozen_plan = dict(plan or {})
@@ -332,7 +349,7 @@ class AgentRuntime:
         if not agent_event.identity.is_super_owner:
             self._ensure_execution(dispatcher)
             initial_plan = await self.planner.plan(
-                agent_event, self._planning_context(agent_event))
+                agent_event, await self._planning_context(dispatcher, agent_event))
             # The model may only tighten confirmation, never waive it.
             if _plan_requires_confirmation(initial_plan) or bool(initial_plan.get("needs_confirmation", True)):
                 from ..services.confirmations import create_agent_confirmation
