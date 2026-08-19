@@ -197,8 +197,11 @@ class AgentRuntime:
                 group_id=0 if agent_event.scope.is_private
                 else int(agent_event.scope.group_id or 0))
             if help_status == "ok" and help_text:
-                context += ("\n【小汐功能参考（用户问功能/命令用法时以此为准回答）】\n"
-                            + help_text)
+                context += (
+                    "\n【小汐功能参考】对方正在问你（小汐）自身的功能/命令用法。"
+                    "以下是按对方身份过滤后的真实功能清单：必须照清单直接回答，"
+                    "禁止说不知道/没弄过/不清楚；清单里确实没有的才说没有。\n"
+                    + help_text)
         if task_context:
             context += "\n后台任务上下文：" + task_context[:3000]
         return context

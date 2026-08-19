@@ -457,6 +457,8 @@ class HelpIntentTests(unittest.TestCase):
     def test_help_intent_detection(self):
         from bot.ai.prompts import _should_lookup_bot_help
         self.assertTrue(_should_lookup_bot_help("群主人怎么设置"))
+        self.assertTrue(_should_lookup_bot_help("怎么添加群主人"))
+        self.assertTrue(_should_lookup_bot_help("违禁词在哪设置"))
         self.assertTrue(_should_lookup_bot_help("小汐你会什么功能"))
         self.assertTrue(_should_lookup_bot_help("这个命令怎么用"))
         self.assertFalse(_should_lookup_bot_help("/help"))
