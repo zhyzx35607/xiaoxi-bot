@@ -124,6 +124,8 @@ def register_all(d):
                bot_owner_only=True)
     d.register("reject", cmd_reject_request, "拒绝好友/入群请求",
                bot_owner_only=True)
+    d.register("审批", cmd_join_review, "入群申请群内审批开关 /审批 on|off",
+               admin_only=True)
     # System (bot_owner only)
     d.register("enable", cmd_enable, "开启群聊机器人", bot_owner=True)
     d.register("disable", cmd_disable, "关闭群聊机器人", bot_owner=True)

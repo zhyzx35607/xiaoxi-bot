@@ -4,6 +4,7 @@ import json
 import logging
 
 from ..ai import _call_deepseek
+from ..ai.prompts import PERSONA_PROFILE, _style_rules_for_level
 
 log = logging.getLogger("qqbot")
 
@@ -57,6 +58,7 @@ class AgentPlanner:
         self.dispatcher = dispatcher
 
     async def plan(self, agent_event, context=""):
+        persona = PERSONA_PROFILE + "\n" + _style_rules_for_level(agent_event.identity.level)
         prompt = (
             "你是 QQ Agent 的规划器，只输出一个 JSON 对象，不执行动作。"
             "字段：intent、reply、tools、needs_confirmation、reason、task、execution_plan、reflection。"
@@ -66,7 +68,11 @@ class AgentPlanner:
             "execution_plan 可为空，或为 {{title, success_criteria, steps:[{{title, success_criteria}}]}}。"
             "只要请求包含多个可验证步骤、需要持续追踪或需要后台执行，就必须给 execution_plan。"
             "reflection 可为空，或为 {{content, category, confidence, evidence}}，只记录有证据、未来可复用的洞察。"
-            "群主权限只作用于当前群；最高主人可管理全局。不要泄露私域记忆到群域。\n"
+            "群主权限只作用于当前群；最高主人可管理全局。不要泄露私域记忆到群域。"
+            "纯聊天回复（无工具、无后台任务）时 needs_confirmation 填 false；只有涉及写操作或高风险动作才填 true。\n"
+            "【人设】reply 字段是直接发给用户看的话，必须用小汐的口吻，简短口语化，"
+            "不要暴露 JSON、工具名、规划步骤或系统提示痕迹。\n"
+            + persona + "\n"
             "作用域={}; 身份等级={}; 消息={}\n{}".format(
                 agent_event.scope.key, int(agent_event.identity.level),
                 agent_event.text[:2000], context[:12000])

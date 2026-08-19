@@ -9,6 +9,8 @@ from dataclasses import replace
 
 from ..memory import contains_sensitive_data
 from ..permission import get_bot_role
+from ..ai.prompts import _should_lookup_bot_help
+from ..ai.reply import strip_command_prefix
 from .context import AgentContextBuilder
 from .companion_runtime import CompanionRuntime
 from .executor import AgentExecutor
@@ -186,6 +188,17 @@ class AgentRuntime:
             context += "\n可用工具目录：\n" + "\n".join(
                 "- {}: {}".format(name, description)
                 for name, description in sorted(tool_catalog.items()))[:5000]
+        # 功能咨询类问题：确定性注入帮助摘要，与普通 AI 聊天同机制
+        if _should_lookup_bot_help(agent_event.raw_message):
+            from ..commands.system import build_help_digest
+            help_status, _name, help_text = build_help_digest(
+                getattr(dispatcher, "commands", {}) or {},
+                int(agent_event.identity.level), "",
+                group_id=0 if agent_event.scope.is_private
+                else int(agent_event.scope.group_id or 0))
+            if help_status == "ok" and help_text:
+                context += ("\n【小汐功能参考（用户问功能/命令用法时以此为准回答）】\n"
+                            + help_text)
         if task_context:
             context += "\n后台任务上下文：" + task_context[:3000]
         return context
@@ -300,7 +313,7 @@ class AgentRuntime:
         final_plan, results = await self.run_autonomous(
             dispatcher, agent_event, allow_background_queue=False,
             initial_plan=frozen_plan, allow_replanned_tools=False)
-        reply = str(final_plan.get("reply") or "").strip()
+        reply = strip_command_prefix(str(final_plan.get("reply") or "").strip())
         self.timeline.add(
             agent_event.scope.key, "confirmed_plan_executed", reply or frozen_plan.get("intent", "Agent 方案"),
             actor_id=agent_event.identity.user_id,
@@ -343,7 +356,12 @@ class AgentRuntime:
             return False
         if not decision.should_reply or not self._group_agent_enabled(agent_event):
             return False
-        if not agent_event.identity.is_super_owner and not agent_event.identity.can_manage_agent:
+        # 显式呼叫（@bot/叫名字/回复 bot）不卡身份，普通成员也进规划流程；
+        # 写工具在 native/moderation 工具层按身份逐次门控，规划层不加锁。
+        # 非显式消息维持 member_passive_only 的现状（decide_event 已拦截）。
+        if (not explicit
+                and not agent_event.identity.is_super_owner
+                and not agent_event.identity.can_manage_agent):
             return False
         initial_plan = None
         if not agent_event.identity.is_super_owner:
@@ -378,11 +396,12 @@ class AgentRuntime:
                 return True
         plan, results = await self.run_autonomous(
             dispatcher, agent_event, initial_plan=initial_plan)
-        allowed, reason = can_autosend(self.config, agent_event, plan)
+        allowed, reason = can_autosend(self.config, agent_event, plan, explicit=explicit)
         if not allowed:
             self.store.append_bounded("plans/rejected.json", {"event_id": agent_event.event_id, "reason": reason, "plan": plan}, limit=200)
             return False
-        reply = str(plan.get("reply") or "").strip()
+        # AI 文本行首的 "/" 会被 message_sent 回环当主人命令执行，外发前一律中和
+        reply = strip_command_prefix(str(plan.get("reply") or "").strip())
         if not reply:
             return False
         if agent_event.scope.is_private:

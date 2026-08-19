@@ -312,6 +312,12 @@ class GroupMessageMixin:
                 if await self._check_repeat(group_id, raw, user_id):
                     return
 
+            # 入群申请群内审批（确定性「同意/拒绝」匹配），在 Agent 路由与 AI 聊天之前
+            if not is_self_msg:
+                from .request import try_handle_join_review
+                if await try_handle_join_review(self, event):
+                    return
+
             # Optional Agent primary router; disabled by default for safe rollout.
             if not is_self_msg and raw and not raw.lstrip().startswith(prefix):
                 agent_event_input = dict(event)

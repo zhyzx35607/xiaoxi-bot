@@ -161,6 +161,33 @@ class GroupHelpCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(replies[0][1]["force_forward"])
         self.assertIn("help", replies[0][0][2])
 
+    async def test_full_help_is_compact_and_drill_down_hinted(self):
+        # 完整菜单必须紧凑：逐命令详细格式全量超一万字，转发和普通消息都发不出
+        from bot.commands.system import COMMAND_DETAILS, cmd_help
+        from bot.permission import LEVEL_SUPER
+
+        replies = []
+        dispatcher = type("Dispatcher", (), {})()
+        dispatcher.commands = {
+            "help": {"help": "查看可用命令"},
+            "master": {"help": "管理群主人", "bot_owner_only": True},
+        }
+        dispatcher.config = {"bot_owner": 100, "bot_qq": 200}
+
+        async def reply(*args, **kwargs):
+            replies.append((args, kwargs))
+
+        dispatcher._reply = reply
+        with patch("bot.commands.system.get_user_level", new=AsyncMock(return_value=(LEVEL_SUPER, "super"))), \
+                patch("bot.commands.system.get_bot_role", new=AsyncMock(return_value=("owner", "owner"))):
+            await cmd_help(dispatcher, 100, 100, "", "owner", "主人", [])
+
+        text = replies[0][0][2]
+        # 紧凑菜单不含逐命令详情，且指引 drill-down
+        self.assertNotIn(COMMAND_DETAILS["master"], text)
+        self.assertIn("/help 命令名", text)
+        self.assertIn("/master", text)
+
 
 class OwnerReplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_owner_name_call_bypasses_disabled_group_and_rate_limits(self):
