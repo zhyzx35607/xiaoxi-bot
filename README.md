@@ -8,7 +8,7 @@
 
 **聊天方面：**
 - 群里 @她或者叫"小汐"，她就会回你
-- 有时候她会自己判断语境插话——比如有人在问问题、聊到她懂的话题，她可能就冒出来了
+- 有时候她会自己判断语境插话——由 LLM 参与判断器自主决定（事件驱动 + urgency 冷却 + 预算硬上限），判断依据写入 Agent 时间线可复盘；配置见 config.json 的 `engagement` 段，`enabled=false` 可回退旧的固定冷却机制
 - 遇到她不确定的事实性问题，会自动去网上搜一下再回答（用的 Bing，免费）
 - 能看懂图片：你发张图她可以说说是什么，也能 OCR 提取上面的文字（优先用 Vision API（如 qwen-vl-plus）识图，失败则用 QQ 自带摘要）
 - 能看合并转发的内容
@@ -286,6 +286,7 @@ data/
 
 - `chat_limits.user_cooldown_seconds`
 - `chat_limits.max_user_replies_per_10min`
+- `runtime.non_explicit_judge_cooldown`：插话已改由 LLM 参与判断器自主决定（urgency 驱动冷却），此键仅在 `engagement.enabled=false` 回退路径生效
 - `runtime.ai_judge_min_gap_seconds`
 - `group_defaults.features.interject`（插话目前由 AI 自行判断，不受此开关控制）
 - `sticker_mode.send_probability`（表情包发送由 AI 自主决定，不走概率）
