@@ -128,9 +128,11 @@ async def execute_confirmation(dispatcher, code, user_id, group_id, role):
         if int(item.get("group_id", 0)) != int(group_id or 0):
             _save_unlocked(data)
             return False, "这个确认码不属于当前群"
-        if level < LEVEL_ADMIN or int(item.get("user_id", 0)) != int(user_id):
+        if level < LEVEL_ADMIN:
             _save_unlocked(data)
-            return False, "只能由发起操作的管理员确认"
+            return False, "需要管理员及以上身份确认"
+        # 发起人或任意管理员都可确认：管理身份本身就是闸门，只绑定发起人
+        # 会让普通成员发起的计划陷入无人能确认的死锁。
         action = item.get("action")
         params = sanitize_persistent_value(item.get("params") or {})
         description = item.get("description")
