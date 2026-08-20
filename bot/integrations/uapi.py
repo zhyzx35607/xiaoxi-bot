@@ -66,6 +66,10 @@ _MISSING_KEY_LOG_INTERVAL = 3600
 _RATE_LIMIT_COOLDOWN_DEFAULT = 60.0
 _RATE_LIMIT_COOLDOWN_MAX = 21600.0
 _MAX_JSON_RESPONSE_BYTES = 1024 * 1024
+# Retries only apply to truncated bodies (decode/parse failures); each attempt
+# is billed by the server, so normal API errors must not be retried.
+_TRUNCATION_RETRIES = 2
+_TRUNCATION_RETRY_DELAY = 0.5
 
 
 def _log_missing_key(path):
@@ -447,6 +451,12 @@ async def _read_json_bounded(response, max_bytes=_MAX_JSON_RESPONSE_BYTES):
     return await response.json(content_type=None)
 
 
+def _is_truncation_error(error):
+    """Truncated bodies surface as decode/parse failures or premature EOF."""
+    return isinstance(error, (json.JSONDecodeError, UnicodeDecodeError,
+                              aiohttp.ClientPayloadError))
+
+
 async def _json_request_unlocked(dispatcher, method, path, params=None, json_body=None,
                                  kind="user", timeout=8, use_cache=False):
     cooldown = await _cooldown_remaining_locked(dispatcher, path)
@@ -467,7 +477,10 @@ async def _json_request_unlocked(dispatcher, method, path, params=None, json_bod
     if headers and _endpoint_cost(path) == 0:
         auth_attempts.append({})
     session = dispatcher.client.session
-    for auth_index, attempt_headers in enumerate(auth_attempts):
+    auth_index = 0
+    truncation_retries = 0
+    while auth_index < len(auth_attempts):
+        attempt_headers = auth_attempts[auth_index]
         try:
             async with _request_semaphore(dispatcher):
                 async with session.request(
@@ -479,6 +492,7 @@ async def _json_request_unlocked(dispatcher, method, path, params=None, json_bod
                         dispatcher, path, kind, response.status, response.headers)
                     if response.status == 401 and auth_index + 1 < len(auth_attempts):
                         log.warning("uapi %s rejected configured key; retrying free endpoint as visitor", path)
+                        auth_index += 1
                         continue
                     if response.status == 429:
                         delay = await _start_cooldown_locked(
@@ -497,6 +511,14 @@ async def _json_request_unlocked(dispatcher, method, path, params=None, json_bod
                             _cache_put(path, params, data)
                         return data
         except Exception as error:
+            if _is_truncation_error(error) and truncation_retries < _TRUNCATION_RETRIES:
+                truncation_retries += 1
+                log.warning(
+                    "uapi %s truncated response, retry %d/%d: %s",
+                    path, truncation_retries, _TRUNCATION_RETRIES, error,
+                )
+                await asyncio.sleep(_TRUNCATION_RETRY_DELAY * truncation_retries)
+                continue
             log.warning("uapi %s failed: %s", path, error)
             return None
     return None
