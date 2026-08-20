@@ -139,6 +139,16 @@ class CoreBehaviorTests(unittest.TestCase):
                 self.assertFalse(REGISTRY[name].ai_allowed)
                 self.assertNotEqual(REGISTRY[name].risk, "read")
 
+    def test_ark_share_apis_are_not_ai_allowed(self):
+        # 对外分享群/联系人卡片是有副作用的交互动作，不能当只读工具暴露给模型
+        from bot.agent.tools.napcat import SAFE_ACTIONS
+
+        for name in ("ark_share_group", "ark_share_peer", "ArkShareGroup", "ArkSharePeer"):
+            with self.subTest(name=name):
+                self.assertEqual(REGISTRY[name].risk, "interaction")
+                self.assertFalse(REGISTRY[name].ai_allowed)
+                self.assertNotIn(name, SAFE_ACTIONS)
+
     def test_napcat_tool_gate(self):
         self.assertFalse(_should_consider_napcat_tool("今天晚饭吃什么"))
         self.assertTrue(_should_consider_napcat_tool("看看群公告写了什么"))
@@ -515,6 +525,54 @@ class AsyncCoreBehaviorTests(unittest.IsolatedAsyncioTestCase):
             with open(path, encoding="utf-8") as f:
                 saved = json.load(f)
             self.assertNotIn("deepseek_api_key", saved)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_commit_config_updates_existing_dict_in_place(self):
+        from bot.commands import common
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            config = {"groups": {"100": {"enabled": True}}, "bot_qq": 222}
+            dispatcher = type("DispatcherStub", (), {"config": config})()
+            with patch.object(common, "CONFIG_PATH", path):
+                common._commit(dispatcher, {"groups": {"100": {"enabled": False}},
+                                            "bot_qq": 222})
+            # Long-lived holders (AgentRuntime, RoleplayService) keep the same
+            # object and must observe the refreshed values.
+            self.assertIs(dispatcher.config, config)
+            self.assertEqual(dispatcher.config["groups"]["100"]["enabled"], False)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_config_write_paths_share_one_lock(self):
+        from bot import permission
+        from bot.commands import common
+        self.assertIs(common._CONFIG_WRITE_LOCK, permission._CONFIG_WRITE_LOCK)
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        try:
+            acquisitions = []
+            real_lock = permission._CONFIG_WRITE_LOCK
+
+            class CountingLock:
+                def __enter__(self):
+                    acquisitions.append(1)
+                    return real_lock.__enter__()
+
+                def __exit__(self, *args):
+                    return real_lock.__exit__(*args)
+
+            dispatcher = type("DispatcherStub", (), {
+                "config": {"groups": {}}, "_config_path": path})()
+            with patch.object(common, "CONFIG_PATH", path), \
+                    patch.object(common, "_CONFIG_WRITE_LOCK", CountingLock()), \
+                    patch.object(permission, "_CONFIG_WRITE_LOCK", CountingLock()):
+                common._commit(dispatcher, {"groups": {}})
+                permission.save_group_config(dispatcher)
+            self.assertEqual(len(acquisitions), 2)
         finally:
             if os.path.exists(path):
                 os.remove(path)
@@ -1502,6 +1560,37 @@ class InteractionQuotaTests(unittest.IsolatedAsyncioTestCase):
         ai_tools.reset_quota_for_test()
 
 
+class MemberCacheKeyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_member_cache_keys_are_normalized_to_int(self):
+        from bot.services.member_cache import MemberCacheMixin
+
+        class Stub(MemberCacheMixin):
+            def __init__(self):
+                self._group_msg_buffer = {100: [(9, "raw", 0.0, "昵称")]}
+                self._group_member_cache = {}
+                self._member_cache_ts = {}
+
+        stub = Stub()
+        await stub._refresh_member_cache("100")
+        # Written under the int key so readers with either type hit the cache.
+        self.assertEqual(stub._group_member_cache, {100: {"昵称": 9}})
+        self.assertEqual(set(stub._member_cache_ts), {100})
+
+    async def test_member_cache_rejects_non_numeric_group_id(self):
+        from bot.services.member_cache import MemberCacheMixin
+
+        class Stub(MemberCacheMixin):
+            def __init__(self):
+                self._group_msg_buffer = {}
+                self._group_member_cache = {}
+                self._member_cache_ts = {}
+
+        stub = Stub()
+        with self.assertLogs("qqbot", level="WARNING"):
+            await stub._refresh_member_cache("abc")
+        self.assertEqual(stub._group_member_cache, {})
+
+
 class SchedulerJobTests(unittest.TestCase):
     def test_scheduled_jobs_include_all(self):
         class Stub:
@@ -1779,6 +1868,83 @@ class BiliPushWatermarkTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(announced, 0)
             self.assertEqual(bilibili.push_watermark(100, 42), 1000)
             self.assertNotIn("BV_failed", bilibili.pushed_bvids(100, 42))
+
+    async def test_delivery_gives_up_after_max_attempts(self):
+        from bot import bilibili
+
+        class Client:
+            def __init__(self):
+                self.send_calls = 0
+
+            async def get_group_msg_history(self, group_id, count=30):
+                return {"status": "ok", "data": {"messages": []}}
+
+            async def send_group_msg(self, group_id, message):
+                self.send_calls += 1
+                return {"status": "failed"}
+
+        dispatcher = type("Stub", (), {
+            "config": {"bot_qq": 222,
+                       "bilibili": {"delivery_max_attempts": 3}},
+            "client": Client(),
+        })()
+        retry_key = "bili video:100:BV_dead"
+        for _ in range(2):
+            with self.assertRaises(RuntimeError) as ctx:
+                await bilibili._send_group_confirmed(
+                    dispatcher, 100, [], "BV_dead", "bili video")
+            self.assertNotIsInstance(ctx.exception, bilibili.BiliDeliveryExhausted)
+            dispatcher._bili_delivery_retries[retry_key]["next_retry_at"] = 0
+        with self.assertRaises(bilibili.BiliDeliveryExhausted):
+            await bilibili._send_group_confirmed(
+                dispatcher, 100, [], "BV_dead", "bili video")
+        self.assertEqual(dispatcher.client.send_calls, 3)
+        state = dispatcher._bili_delivery_retries
+        self.assertNotIn(retry_key, state)
+        self.assertEqual(state["last_failure"]["reason"], "attempts_exhausted")
+        self.assertEqual(state["last_failure"]["attempts"], 3)
+
+    async def test_exhausted_delivery_skips_marker_and_continues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._setup(tmp)
+            bilibili = self.bilibili
+
+            class Client:
+                _running = True
+
+                async def get_group_msg_history(self, group_id, count=30):
+                    return {"status": "ok", "data": {"messages": []}}
+
+                async def send_group_msg(self, group_id, message):
+                    if "BV_dead" in json.dumps(message):
+                        return {"status": "failed"}
+                    return {"status": "ok"}
+
+                async def get_group_member_info(self, group_id, user_id,
+                                                no_cache=False):
+                    return {"status": "ok", "data": {"role": "member"}}
+
+            class Stub:
+                config = {
+                    "bot_qq": 222,
+                    "bilibili": {"delivery_max_attempts": 1},
+                    "groups": {"100": {"enabled": True,
+                                          "bili_push": {"mids": [42]}}},
+                }
+                client = Client()
+
+            async def fake_archives(dispatcher, mid, count=5):
+                return [{"bvid": "BV_dead", "title": "旧", "created": 1000},
+                        {"bvid": "BV_ok", "title": "新", "created": 2000}]
+
+            with patch.object(bilibili, "get_archives", fake_archives), \
+                    patch("bot.bilibili.asyncio.sleep", new=AsyncMock()):
+                announced = await bilibili.poll_once(Stub())
+            self.assertEqual(announced, 1)
+            # The dead marker is skipped (marked seen) and later videos still push.
+            self.assertIn("BV_dead", bilibili.pushed_bvids(100, 42))
+            self.assertIn("BV_ok", bilibili.pushed_bvids(100, 42))
+            self.assertEqual(bilibili.push_watermark(100, 42), 2000)
 
 
 class BiliDynamicsTests(unittest.TestCase):
@@ -2116,6 +2282,90 @@ class HotboardPushTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(nodes), 3)
         self.assertEqual(nodes[0]["data"]["content"], '【微博热榜】\n热点概况')
         self.assertIn("热点一（999）", nodes[1]["data"]["content"])
+
+    async def test_retry_skips_already_delivered_groups(self):
+        from unittest.mock import AsyncMock
+        from bot import scheduler
+
+        class Client:
+            is_connected = True
+
+            def __init__(self):
+                self.sent = []
+                self.fail_groups = {200}
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                self.sent.append(group_id)
+                if group_id in self.fail_groups:
+                    return {"status": "failed"}
+                return {"status": "ok", "retcode": 0}
+
+        dispatcher = type("Stub", (), {
+            "config": {
+                "bot_qq": 222,
+                "uapi_api_key": "test",
+                "hotboard_push": {"enabled": True, "types": ["weibo"]},
+                "groups": {"100": {"enabled": True, "features": {}},
+                           "200": {"enabled": True, "features": {}}},
+            },
+            "client": Client(),
+        })()
+
+        async def fake_uapi_get(dispatcher, path, params=None, kind="auto"):
+            return {"list": [{"title": "热点一", "url": "https://example.com/1"}]}
+
+        async def fake_digest(dispatcher, board, items):
+            return {"summary": "概况", "details": [], "items": items}
+
+        with patch("bot.uapi.credits_available", return_value=True), \
+                patch("bot.uapi.uapi_get", fake_uapi_get), \
+                patch.object(scheduler, "build_detailed_hotboard", fake_digest), \
+                patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+            first = await scheduler._daily_hotboard_push(dispatcher)
+            dispatcher.client.fail_groups.clear()
+            second = await scheduler._daily_hotboard_push(dispatcher)
+
+        self.assertFalse(first)
+        self.assertTrue(second)
+        # First run reaches both groups; the retry only re-sends the failed one.
+        self.assertEqual(dispatcher.client.sent, [100, 200, 200])
+
+    async def test_empty_board_fetch_completes_without_retry(self):
+        from unittest.mock import AsyncMock
+        from bot import scheduler
+
+        class Client:
+            is_connected = True
+
+            def __init__(self):
+                self.sent = []
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                self.sent.append(group_id)
+                return {"status": "ok", "retcode": 0}
+
+        dispatcher = type("Stub", (), {
+            "config": {
+                "bot_qq": 222,
+                "uapi_api_key": "test",
+                "hotboard_push": {"enabled": True, "types": ["weibo"]},
+                "groups": {"100": {"enabled": True, "features": {}}},
+            },
+            "client": Client(),
+        })()
+
+        async def fake_uapi_get(dispatcher, path, params=None, kind="auto"):
+            return None
+
+        with patch("bot.uapi.credits_available", return_value=True), \
+                patch("bot.uapi.uapi_get", fake_uapi_get), \
+                patch("bot.scheduler.asyncio.sleep", new=AsyncMock()):
+            # A failed fetch returns True so the scheduler does not burn uapi
+            # credits on a 900s retry with nothing new to deliver.
+            completed = await scheduler._daily_hotboard_push(dispatcher)
+
+        self.assertTrue(completed)
+        self.assertEqual(dispatcher.client.sent, [])
 
 
 class HotboardDigestTests(unittest.IsolatedAsyncioTestCase):
@@ -2628,6 +2878,22 @@ class PlayfulBanTests(unittest.IsolatedAsyncioTestCase):
                     stub, {"user_id": target}, self._ctx())
                 self.assertFalse(r["ok"], "target %s must be protected" % target)
                 self.assertEqual(r["error"], "target_protected")
+            self.assertEqual(bans, [])
+
+    async def test_owner_and_bot_protected_even_if_level_check_is_bypassed(self):
+        # can_moderate_target 层独立保护 bot_owner/bot_qq，不依赖等级解析结果
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_tools = self._ai_tools(tmp)
+            stub, bans = self._dispatcher()
+            with patch(
+                    "bot.permission.get_user_level",
+                    new=AsyncMock(return_value=(1, "member"))):
+                for target in (111, 222):  # bot_owner / bot_qq
+                    ai_tools._playful_ban_last_ts.clear()
+                    r = await ai_tools.execute_playful_ban(
+                        stub, {"user_id": target}, self._ctx())
+                    self.assertFalse(r["ok"], "target %s must be protected" % target)
+                    self.assertEqual(r["error"], "target_protected")
             self.assertEqual(bans, [])
 
     async def test_group_cooldown_60s(self):

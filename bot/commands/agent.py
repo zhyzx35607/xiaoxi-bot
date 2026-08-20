@@ -1,5 +1,6 @@
 """Human-controlled Agent controls; no AI path can call these implicitly."""
 
+import asyncio
 import re
 import time
 
@@ -231,36 +232,38 @@ async def _companion_command(dispatcher, user_id, action, value):
         return
     if action in {"on", "off", "主动"}:
         enabled = value.lower() in {"on", "开启", "1", "true"} if action == "主动" else action == "on"
-        companion.set_control("proactive_enabled", enabled)
+        await asyncio.to_thread(companion.set_control, "proactive_enabled", enabled)
         await dispatcher._reply(None, user_id, "最高主人主动陪伴已{}".format("开启" if enabled else "关闭"))
         return
     if action in {"追问", "followup"}:
         enabled = value.lower() in {"on", "开启", "1", "true"}
-        companion.set_control("followup_enabled", enabled)
+        await asyncio.to_thread(companion.set_control, "followup_enabled", enabled)
         await dispatcher._reply(None, user_id, "主动追问已{}".format("开启" if enabled else "关闭"))
         return
     if action in {"媒体", "media"}:
         enabled = value.lower() in {"on", "开启", "1", "true"}
-        companion.set_control("media_enabled", enabled)
+        await asyncio.to_thread(companion.set_control, "media_enabled", enabled)
         await dispatcher._reply(None, user_id, "主动媒体已{}".format("开启" if enabled else "关闭"))
         return
     if action in {"情绪", "emotion", "mood"}:
-        state = companion.state()
+        state = await asyncio.to_thread(companion.state)
         await dispatcher._reply(None, user_id, "情绪：{mood}\n正向：{valence:.2f}\n精力：{energy:.2f}\n亲近：{attachment:.2f}\n牵挂：{concern:.2f}".format(**state))
         return
     if action in {"事件", "events"}:
-        events = companion.store.due_events(companion.owner_id, time.localtime().tm_mon, time.localtime().tm_mday)
-        facts = companion.store.list_facts(companion.owner_id, "生日", 20)
+        events = await asyncio.to_thread(
+            companion.store.due_events, companion.owner_id,
+            time.localtime().tm_mon, time.localtime().tm_mday)
+        facts = await asyncio.to_thread(companion.store.list_facts, companion.owner_id, "生日", 20)
         lines = ["今天事件：{}".format("；".join(item.get("title", "") for item in events) or "无")]
         lines.append("关键记忆：{}".format("；".join(item.get("content", "") for item in facts[:10]) or "无"))
         await dispatcher._reply(None, user_id, "\n".join(lines))
         return
     if action in {"清空", "clear"}:
-        companion.store.cancel_followups(companion.owner_id, value)
+        await asyncio.to_thread(companion.store.cancel_followups, companion.owner_id, value)
         await dispatcher._reply(None, user_id, "已清理{}相关主动追问".format(value or "全部"))
         return
     if action in {"记忆", "memory", "search"}:
-        result = companion.search_memory(value)
+        result = await asyncio.to_thread(companion.search_memory, value)
         facts = result["facts"]
         episodes = result["episodes"]
         lines = ["长期事实："] + ["- {}".format(item.get("content", "")[:180]) for item in facts[:20]]
@@ -268,12 +271,13 @@ async def _companion_command(dispatcher, user_id, action, value):
         lines.extend("- {}".format(item.get("content", "")[:180]) for item in episodes[:10])
         await dispatcher._reply(None, user_id, "\n".join(lines))
         return
-    state = companion.state()
+    state = await asyncio.to_thread(companion.state)
+    fact_count = len(await asyncio.to_thread(companion.store.list_facts, companion.owner_id))
     await dispatcher._reply(None, user_id, "陪伴：{}；追问：{}；媒体：{}；心情：{}；长期事实：{}".format(
         "开启" if state.get("proactive_enabled", True) else "关闭",
         "开启" if state.get("followup_enabled", True) else "关闭",
         "开启" if state.get("media_enabled", True) else "关闭",
-        state.get("mood", "calm"), len(companion.store.list_facts(companion.owner_id))))
+        state.get("mood", "calm"), fact_count))
 
 
 async def _insight_command(dispatcher, group_id, user_id):
@@ -360,13 +364,16 @@ async def cmd_agent(dispatcher, group_id, user_id, args, role, sender_card, mess
             return
         dispatcher.agent_runtime.proactive.mute(_scope_key(group_id, user_id), seconds=seconds)
         if not group_id and user_id == dispatcher.config.get("bot_owner"):
-            dispatcher.agent_runtime.companion.set_control("muted_until", time.time() + seconds)
+            await asyncio.to_thread(
+                dispatcher.agent_runtime.companion.set_control,
+                "muted_until", time.time() + seconds)
         await dispatcher._reply(group_id, user_id, "当前作用域主动消息已静默约 {}".format(value or "12小时"))
         return
     if action in {"恢复主动", "unmute", "resume"}:
         dispatcher.agent_runtime.proactive.unmute(_scope_key(group_id, user_id))
         if not group_id and user_id == dispatcher.config.get("bot_owner"):
-            dispatcher.agent_runtime.companion.set_control("muted_until", 0)
+            await asyncio.to_thread(
+                dispatcher.agent_runtime.companion.set_control, "muted_until", 0)
         await dispatcher._reply(group_id, user_id, "当前作用域主动消息已恢复")
         return
     if action in {"\u76ee\u6807", "goal", "goals"}:

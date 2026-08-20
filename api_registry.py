@@ -81,6 +81,9 @@ _INTERACTION = {
     "send_like", "send_group_sign", "set_group_sign", "send_group_ai_record",
     "mark_msg_as_read", "mark_group_msg_as_read", "mark_private_msg_as_read",
     "mark_all_as_read", "_mark_all_as_read", "set_input_status",
+    # 对外分享群/联系人卡片是有副作用的交互动作，不是只读能力；
+    # 归入 interaction 使其 ai_allowed=False，不再经 Agent 网关暴露给模型。
+    "ark_share_group", "ark_share_peer", "ArkShareGroup", "ArkSharePeer",
 }
 _MANAGEMENT = set(_NAMES["management"]) | {
     # Categorized under "request" but still a management-risk action.

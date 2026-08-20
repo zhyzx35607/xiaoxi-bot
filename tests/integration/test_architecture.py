@@ -34,14 +34,16 @@ class ArchitectureRegressionTests(unittest.TestCase):
     def test_historical_monoliths_remain_thin(self):
         budgets = {
             "main.py": 80,
-            "bot/ai/runtime.py": 840,
+            # ai/runtime and security/core grew slightly for injection
+            # screening of history/memory and punish-failure isolation.
+            "bot/ai/runtime.py": 850,
             "bot/commands/runtime.py": 100,
             "bot/dispatcher.py": 800,
             "bot/bilibili.py": 80,
             "bot/scheduler.py": 80,
             "bot/touchgal.py": 80,
             "bot/uapi.py": 80,
-            "bot/security/core.py": 260,
+            "bot/security/core.py": 275,
             "deploy/napcat-login-watchdog.py": 80,
         }
         for relative_path, limit in budgets.items():

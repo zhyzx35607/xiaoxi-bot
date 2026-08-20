@@ -495,7 +495,8 @@ async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
                 limit = int(parts[1])
             except ValueError:
                 limit = 10
-        await d._reply(group_id, user_id, format_security_events(group_id=group_id, limit=limit))
+        await d._reply(group_id, user_id, await asyncio.to_thread(
+            format_security_events, group_id=group_id, limit=limit))
         return
     parts = sub.split()
     if len(parts) >= 2 and parts[0] in ("url", "gray", "灰条", "punish", "处罚"):

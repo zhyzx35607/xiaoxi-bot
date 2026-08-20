@@ -8,6 +8,58 @@ from bot.utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
 
+def _coerce_qq_id(value):
+    """Coerce a QQ id to int; return None for values that are not plain digits."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isdigit():
+            return int(text)
+    return None
+
+
+def _normalize_identity_fields(config):
+    """Normalize bot_owner/bot_qq and per-group masters to int.
+
+    OneBot event user_id is always an int; a string bot_owner/bot_qq/masters
+    entry in config.json would silently disable the top-level permission
+    comparisons (fail-closed, but wrong). Unconvertible values are kept
+    as-is with a warning; QQ ids are not written to the log.
+    Returns True when any value changed.
+    """
+    changed = False
+    for key in ("bot_owner", "bot_qq"):
+        if key not in config:
+            continue
+        coerced = _coerce_qq_id(config[key])
+        if coerced is None:
+            log.warning("Config field %s is not a valid QQ id; keeping raw value", key)
+        elif config[key] != coerced:
+            config[key] = coerced
+            changed = True
+    groups = config.get("groups", {})
+    if isinstance(groups, dict):
+        for group_key, group_cfg in groups.items():
+            if not isinstance(group_cfg, dict):
+                continue
+            masters = group_cfg.get("masters")
+            if not isinstance(masters, list):
+                continue
+            for index, value in enumerate(masters):
+                coerced = _coerce_qq_id(value)
+                if coerced is None:
+                    log.warning(
+                        "Group %s masters entry is not a valid QQ id; keeping raw value",
+                        group_key)
+                elif value != coerced:
+                    masters[index] = coerced
+                    changed = True
+    return changed
+
+
 def apply_env_overrides(config):
     """Load secrets/runtime endpoints from environment without writing them to config.json."""
     env_map = {
@@ -58,6 +110,9 @@ def apply_env_overrides(config):
     if vision_model:
         config.setdefault("vision_api", {})["model"] = vision_model
 
+    # env 覆盖路径同样可能带进字符串身份字段，和文件加载路径保持一致归一。
+    _normalize_identity_fields(config)
+
     return config
 
 def _read_config_object(path, label):
@@ -66,6 +121,28 @@ def _read_config_object(path, label):
     if not isinstance(config, dict):
         raise ValueError(f"{label} root must be a JSON object")
     return config
+
+
+def _safe_int(value, default, label):
+    """Coerce a config value to int; fall back to default for dirty values."""
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        log.warning("Config value %s is not a number; using default %s", label, default)
+        return default
+
+
+def _require_config_keys(config):
+    """Fail fast with a readable message when startup-critical keys are missing.
+
+    bootstrap and the OneBot client dereference bot_qq directly, and unlike
+    ws_url/token it has no environment override, so it must be in config.json.
+    """
+    if config.get("bot_qq") in (None, ""):
+        raise RuntimeError(
+            'config.json is missing required key "bot_qq": '
+            'set "bot_qq" to the bot QQ number in config.json'
+        )
 
 
 def load_config(config_path):
@@ -92,6 +169,7 @@ def load_config(config_path):
         log.error("Recovered invalid config.json from %s: %s", backup_path, error)
     except OSError as error:
         raise RuntimeError(f"cannot read config.json: {error}") from error
+    _require_config_keys(config)
     try:
         atomic_write_json(backup_path, config, indent=2)
     except OSError as backup_error:
@@ -105,6 +183,9 @@ def load_config(config_path):
 def migrate_config(config):
     """Migrate old config format to new group-based format."""
     migrated = False
+
+    if _normalize_identity_fields(config):
+        migrated = True
 
     # Ensure group_defaults exists
     if "group_defaults" not in config:
@@ -166,6 +247,14 @@ def migrate_config(config):
         "rss_log_mb": 400,
     }
     runtime = config.setdefault("runtime", {})
+    # Legacy Agnes timeout must be folded into the SigmaI key before the
+    # defaults below are filled; the unconditional sigmai_timeout_seconds
+    # default would otherwise mask the custom value and leave the stale key.
+    if "agnes_timeout_seconds" in runtime:
+        legacy_timeout = runtime.pop("agnes_timeout_seconds")
+        if "sigmai_timeout_seconds" not in runtime:
+            runtime["sigmai_timeout_seconds"] = legacy_timeout
+        migrated = True
     for key, value in runtime_defaults.items():
         if key not in runtime:
             runtime[key] = value
@@ -202,9 +291,6 @@ def migrate_config(config):
         migrated = True
 
     runtime = config.setdefault("runtime", {})
-    if "agnes_timeout_seconds" in runtime and "sigmai_timeout_seconds" not in runtime:
-        runtime["sigmai_timeout_seconds"] = runtime.pop("agnes_timeout_seconds")
-        migrated = True
     # The fallback-delay keys never had an implementation (SigmaI falls back
     # serially); drop them so stale config cannot masquerade as a live knob.
     for dead_key in ("agnes_fallback_delay_seconds", "sigmai_fallback_delay_seconds"):
@@ -288,7 +374,8 @@ def migrate_config(config):
     if str(acg.get("provider") or "").strip().lower() != "mukyu":
         acg["provider"] = "mukyu"
         migrated = True
-    interval = max(5, int(acg.get("collector_interval_seconds", 5) or 5))
+    interval = max(5, _safe_int(acg.get("collector_interval_seconds", 5), 5,
+                                "acg_images.collector_interval_seconds"))
     if acg.get("collector_interval_seconds") != interval:
         acg["collector_interval_seconds"] = interval
         migrated = True
@@ -524,12 +611,12 @@ def migrate_config(config):
         if key not in agent:
             agent[key] = value
             migrated = True
-    if int(agent.get("schema_version", 0) or 0) < 2:
+    if _safe_int(agent.get("schema_version", 0), 0, "agent.schema_version") < 2:
         agent["schema_version"] = 2
         agent["worker_enabled"] = True
         agent["worker_interval_seconds"] = 30
         migrated = True
-    if int(agent.get("schema_version", 0) or 0) < 3:
+    if _safe_int(agent.get("schema_version", 0), 0, "agent.schema_version") < 3:
         agent["schema_version"] = 3
         agent.setdefault("group_max_rounds", 3)
         agent.setdefault("group_tool_budget", 5)
@@ -537,11 +624,10 @@ def migrate_config(config):
         agent.setdefault("group_review_interval_seconds", 10800)
         agent.setdefault("rejection_mute_seconds", 43200)
         migrated = True
-    if int(agent.get("schema_version", 0) or 0) < 4:
+    if _safe_int(agent.get("schema_version", 0), 0, "agent.schema_version") < 4:
         agent["schema_version"] = 4
-        if int(agent.get("owner_daily_limit", 6) or 6) == 6:
+        if _safe_int(agent.get("owner_daily_limit", 6), 6, "agent.owner_daily_limit") == 6:
             agent["owner_daily_limit"] = 12
-        agent.setdefault("owner_hourly_limit", 3)
         agent.setdefault("owner_hourly_limit", 3)
         agent.setdefault("companion_enabled", True)
         agent.setdefault("companion_min_gap_seconds", 1800)
@@ -550,14 +636,14 @@ def migrate_config(config):
         agent.setdefault("companion_outbox_max_attempts", 3)
         agent.setdefault("owner_group_direct_reply", True)
         migrated = True
-    if int(agent.get("schema_version", 0) or 0) < 5:
+    if _safe_int(agent.get("schema_version", 0), 0, "agent.schema_version") < 5:
         agent["schema_version"] = 5
         agent.setdefault("owner_daily_limit", 2)
         agent.setdefault("owner_hourly_limit", 1)
         agent.setdefault("companion_min_gap_seconds", 21600)
         agent.setdefault("companion_idle_seconds", 28800)
         migrated = True
-    if int(agent.get("schema_version", 0) or 0) < 6:
+    if _safe_int(agent.get("schema_version", 0), 0, "agent.schema_version") < 6:
         agent["schema_version"] = 6
         agent.setdefault("moderation_enabled", False)
         agent.setdefault("moderation_daily_limit", 20)

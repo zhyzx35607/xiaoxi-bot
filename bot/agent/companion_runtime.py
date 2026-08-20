@@ -223,12 +223,12 @@ class CompanionRuntime:
         if not self.owner_id:
             return None
         now = float(now or time.time())
-        state = self.state()
+        state = await asyncio.to_thread(self.state)
         if not self.config.get("agent", {}).get("enabled", True):
             return None
         if not state.get("proactive_enabled", True) or float(state.get("muted_until", 0) or 0) > now:
             return None
-        reason, payload = self._due_reason(now)
+        reason, payload = await asyncio.to_thread(self._due_reason, now)
         if reason == "none" and not force:
             return None
         settings = dispatcher.config.get("agent", {})
@@ -240,10 +240,10 @@ class CompanionRuntime:
         try:
             roleplay = getattr(dispatcher, "roleplay", None)
             if roleplay is not None and roleplay.enabled():
-                roleplay_hint = roleplay.status(self.owner_id, None)
+                roleplay_hint = await asyncio.to_thread(roleplay.status, self.owner_id, None)
         except Exception as error:
             log.debug("Companion roleplay state unavailable: %s", error)
-        prompt = self._build_prompt(reason, payload, now, roleplay_hint)
+        prompt = await asyncio.to_thread(self._build_prompt, reason, payload, now, roleplay_hint)
         try:
             async with self._lock:
                 raw = await _call_deepseek(dispatcher.config, [{"role": "user", "content": prompt}],
@@ -252,7 +252,7 @@ class CompanionRuntime:
                                            session=getattr(dispatcher.client, "session", None))
         except Exception as error:
             log.warning("Companion decide AI call failed reason=%s: %s", reason, error)
-            self._consume_trigger(reason, payload, now, state)
+            await asyncio.to_thread(self._consume_trigger, reason, payload, now)
             return None
         result = self._parse_result(raw)
         if result is None and reason == "event" and payload:
@@ -264,30 +264,46 @@ class CompanionRuntime:
                 "memory_candidates": [], "followup": {"enabled": True, "max_attempts": 3}, "media_request": {},
             }
         if not result or not result.get("message_parts"):
-            self._consume_trigger(reason, payload, now, state)
+            await asyncio.to_thread(self._consume_trigger, reason, payload, now)
             return None
         if reason not in {"event", "followup"} and str(
                 result.get("priority") or "normal") != "urgent":
             result["message_parts"] = result["message_parts"][:1]
         if reason != "event":
             result["message_parts"] = [part[:120] for part in result["message_parts"]]
-        self._apply_delta(state, result.get("emotion_delta") or {}, now)
-        state["last_decision_at"] = now
-        if reason == "time":
-            state["last_time_bucket"] = self._local_time(now).strftime("%Y%m%d%H")
-        self.store.save_state(self.owner_id, state)
+        # Re-read state and merge in one thread task: observe_owner_message
+        # may have updated the state during the AI call above, and saving the
+        # stale snapshot taken before the call would silently drop that update.
+        state = await asyncio.to_thread(
+            self._record_decision_state, result.get("emotion_delta") or {}, now, reason)
         topic = str(result.get("topic") or (payload or {}).get("topic") or reason)[:160]
         priority = str(result.get("priority") or ("urgent" if reason == "event" else "normal"))
-        key = "{}:{}:{}".format(topic, self._local_time(now).strftime("%Y%m%d%H"), reason)
+        # Include the payload digest: the hour bucket alone silently dropped
+        # distinct follow-ups sharing topic+reason within the same hour.
+        import hashlib
+        digest = hashlib.sha1(
+            json.dumps(result.get("message_parts") or [], ensure_ascii=False).encode("utf-8"),
+            usedforsecurity=False,
+        ).hexdigest()[:10]
+        key = "{}:{}:{}:{}".format(
+            topic, self._local_time(now).strftime("%Y%m%d%H"), reason, digest)
         media_request = result.get("media_request")
         if not isinstance(media_request, dict):
             media_request = {}
-        self.store.enqueue(self.owner_id, topic, {"message_parts": result["message_parts"], "media_request": media_request}, now, priority, key)
+        await asyncio.to_thread(
+            self.store.enqueue, self.owner_id, topic,
+            {"message_parts": result["message_parts"], "media_request": media_request},
+            now, priority, key)
         for candidate in result.get("memory_candidates") or []:
             if isinstance(candidate, dict) and candidate.get("content") and not contains_sensitive_data(candidate["content"]):
-                self.store.upsert_fact(self.owner_id, candidate.get("category", "note"), candidate.get("key", candidate["content"][:80]), candidate["content"], candidate.get("value"), "sigmai", _clamp(candidate.get("confidence", 0.65)))
+                await asyncio.to_thread(
+                    self.store.upsert_fact, self.owner_id, candidate.get("category", "note"),
+                    candidate.get("key", candidate["content"][:80]), candidate["content"],
+                    candidate.get("value"), "sigmai", _clamp(candidate.get("confidence", 0.65)))
         if reason == "event" and payload:
-            self.store.mark_event_triggered(payload.get("id"), self._local_time(now).strftime("%Y"))
+            await asyncio.to_thread(
+                self.store.mark_event_triggered, payload.get("id"),
+                self._local_time(now).strftime("%Y"))
         followup = result.get("followup")
         if not isinstance(followup, dict):
             # LLM output or legacy state may put a plain string here; treat
@@ -295,28 +311,45 @@ class CompanionRuntime:
             # crashing the whole worker tick on .get().
             followup = {}
         if reason == "followup" and payload:
-            self.store.finish_followup(payload.get("id"), now + 12 * 3600)
+            await asyncio.to_thread(self.store.finish_followup, payload.get("id"), now + 12 * 3600)
             next_attempt = int(payload.get("attempt", 0)) + 1
             max_attempts = int(_clamp(payload.get("max_attempts", 4), 1, 5))
             delays = (45 * 60, 90 * 60, 180 * 60)
             if next_attempt < max_attempts and state.get("followup_enabled", True):
                 delay = delays[min(next_attempt - 1, len(delays) - 1)]
-                self.store.add_followup(
+                await asyncio.to_thread(
+                    self.store.add_followup,
                     self.owner_id, topic, {"seed": result["message_parts"][-1]},
                     now + delay, next_attempt, max_attempts)
         elif followup.get("enabled") and state.get("followup_enabled", True):
-            self.store.add_followup(
+            await asyncio.to_thread(
+                self.store.add_followup,
                 self.owner_id, topic, {"seed": result["message_parts"][-1]},
                 now + 20 * 60, 0, int(_clamp(followup.get("max_attempts", 4), 1, 5)))
         return {"topic": topic, "priority": priority, "reason": reason, "message_parts": result["message_parts"]}
 
-    def _consume_trigger(self, reason, payload, now, state):
+    def _record_decision_state(self, delta, now, reason):
+        """Apply a decision's state delta onto a fresh snapshot and save.
+
+        Runs in one worker-thread task so concurrent observe_owner_message
+        updates made during the AI call are merged instead of overwritten.
+        """
+        state = self.state()
+        self._apply_delta(state, delta, now)
+        state["last_decision_at"] = now
+        if reason == "time":
+            state["last_time_bucket"] = self._local_time(now).strftime("%Y%m%d%H")
+        self.store.save_state(self.owner_id, state)
+        return state
+
+    def _consume_trigger(self, reason, payload, now):
         """Advance the trigger source so a failed decision is not retried every tick."""
         if reason == "event" and payload:
             self.store.mark_event_triggered(payload.get("id"), self._local_time(now).strftime("%Y"))
         elif reason == "followup" and payload:
             self.store.finish_followup(payload.get("id"), now + 12 * 3600)
         if reason == "time":
+            state = self.state()
             state["last_time_bucket"] = self._local_time(now).strftime("%Y%m%d%H")
             self.store.save_state(self.owner_id, state)
 

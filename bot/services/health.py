@@ -177,7 +177,7 @@ class HealthServiceMixin:
                     try:
                         log.warning("GC histogram at restart: %s",
                                     self._gc_type_histogram())
-                        self.save_runtime_state(force=True)
+                        await self.save_runtime_state_async(force=True)
                     except Exception as error:
                         log.exception("Failed to persist runtime state before RSS restart: %s", error)
                     os.kill(os.getpid(), 15)  # SIGTERM -> clean shutdown, systemd restarts
@@ -230,6 +230,9 @@ class HealthServiceMixin:
             self._background_tasks.difference_update(final_done)
             if final_pending:
                 log.error(
-                    "%d background tasks ignored cancellation and remain tracked",
+                    "%d background tasks ignored cancellation; dropping them from tracking",
                     len(final_pending),
                 )
+                # Tasks that ignore cancellation would otherwise occupy
+                # _max_background_tasks slots forever.
+                self._background_tasks.difference_update(final_pending)

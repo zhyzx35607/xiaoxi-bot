@@ -16,9 +16,9 @@ QQBOT_DISABLE_FILE_LOG=1 python -m unittest discover -v
 
 - 代码：`/opt/qqbot`，由 root 管理，运行用户只读。
 - 配置：`/var/lib/qqbot/config.json`，权限 `0600`。
-- 运行数据：`/opt/qqbot/data`，仅 `qqbot` 用户可写。
-- 临时文件：`/opt/qqbot/data/tmp`，不写入代码目录。
-- 诊断文件：`/opt/qqbot/data/diagnostics`，服务重启后仍保留。
+- 运行数据：`/opt/qqbot/data`，仅 `qqbot` 用户可写；目录权限 `0751`（其他用户只能穿越、不能列目录）。
+- 临时文件：`/opt/qqbot/data/tmp`，权限 `0755`，只放通过 `file://` 交给 NapCat（`napcat` 用户）读取的媒体临时文件；不写入代码目录。
+- 诊断文件：`/opt/qqbot/data/diagnostics`，权限 `0700`，服务重启后仍保留。
 - 日志：`/var/log/qqbot`，应用日志轮转并限制为 `0600`。
 - 聊天正文日志：生产服务默认通过 `QQBOT_DISABLE_CHAT_LOG=1` 关闭。
 - journald：最多使用 `192 MB`，保留 `7` 天，单个日志文件最多保留 `1` 天。

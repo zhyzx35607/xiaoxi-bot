@@ -206,6 +206,21 @@ class ServiceInstallScriptTests(unittest.TestCase):
             script.index("systemctl disable --now napcat-login-watchdog.timer"),
         )
 
+    def test_data_tree_keeps_shareable_media_path_traversable(self):
+        script = (ROOT / "deploy" / "install-qqbot-service.sh").read_text(encoding="utf-8")
+
+        # data/tmp media files are read by the separate napcat user via file://;
+        # data/ itself only gets traverse (o+x), everything else stays 0700/0600.
+        self.assertIn('install -d -m 0751 -o qqbot -g qqbot "${project_root}/data"', script)
+        self.assertIn('install -d -m 0755 -o qqbot -g qqbot "${project_root}/data/tmp"', script)
+        self.assertIn(
+            'install -d -m 0700 -o qqbot -g qqbot "${project_root}/data/diagnostics"',
+            script,
+        )
+        self.assertIn('chmod 0751 "${project_root}/data"', script)
+        self.assertIn('chmod 0755 "${project_root}/data/tmp"', script)
+        self.assertIn('find "${project_root}/data" -type f -exec chmod 0600 {} +', script)
+
     def test_napcat_install_hardens_account_config_permissions(self):
         script = (ROOT / "deploy" / "install-napcat-service.sh").read_text(encoding="utf-8")
         self.assertIn("-name 'onebot11_*.json'", script)
@@ -240,6 +255,11 @@ class ServiceInstallScriptTests(unittest.TestCase):
 
         self.assertIn("/var/lib/napcat/.config/QQ/NapCat/temp", service)
         self.assertNotIn("/root/.config/QQ", service)
+        self.assertIn("NoNewPrivileges=true", service)
+        self.assertIn("ProtectSystem=strict", service)
+        self.assertIn(
+            "ReadWritePaths=/var/lib/napcat/.config/QQ/NapCat/temp", service)
+        self.assertIn("CapabilityBoundingSet=", service)
         self.assertIn("napcat-cache-cleanup.service", script)
         self.assertIn("napcat-cache-cleanup.timer", script)
         self.assertIn("systemctl enable --now napcat-cache-cleanup.timer", script)

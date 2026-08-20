@@ -9,6 +9,11 @@ class MemberCacheMixin:
     async def _refresh_member_cache(self, group_id):
         """Build nickname->QQ cache from recent message buffer (zero API calls).
         Only active speakers are cached — silent members don't need @-resolution."""
+        try:
+            group_id = int(group_id)
+        except (TypeError, ValueError):
+            log.warning("Member cache skipped: non-numeric group id %r", group_id)
+            return
         now = time.time()
         if group_id in self._member_cache_ts and now - self._member_cache_ts.get(group_id, 0) < 600:
             return

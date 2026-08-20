@@ -1,8 +1,11 @@
 """Bounded execution of structured Agent tool plans."""
 
 import asyncio
+import logging
 
 from .policy import tool_allowed
+
+log = logging.getLogger("qqbot")
 
 
 class AgentExecutor:
@@ -27,5 +30,11 @@ class AgentExecutor:
                     self.gateway.execute(agent_event, name, **arguments), timeout=timeout)
             except asyncio.TimeoutError:
                 result = {"ok": False, "error": "tool_timeout"}
+            except Exception as error:
+                # A single broken tool (e.g. OneBot connection drop inside
+                # gateway.execute) must not abort the whole message dispatch.
+                log.warning("Agent tool %s failed: %s: %s", name,
+                            type(error).__name__, error)
+                result = {"ok": False, "error": "tool_execution_failed"}
             results.append({"name": name, "step_id": step_id, "arguments": arguments, "result": result})
         return results

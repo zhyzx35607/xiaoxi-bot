@@ -331,6 +331,16 @@ async def _budget_available(dispatcher, kind, path):
         return credits_available(dispatcher.config, kind, path=path)
 
 
+async def _cooldown_remaining_locked(dispatcher, path):
+    async with _state_lock(dispatcher):
+        return _rate_limit_cooldown_remaining(dispatcher, path)
+
+
+async def _start_cooldown_locked(dispatcher, path, headers):
+    async with _state_lock(dispatcher):
+        return _start_rate_limit_cooldown(dispatcher, path, headers)
+
+
 async def _record_response_locked(dispatcher, path, kind, status, headers):
     async with _state_lock(dispatcher):
         _record_response(dispatcher.config, path, kind, status, headers)
@@ -439,7 +449,7 @@ async def _read_json_bounded(response, max_bytes=_MAX_JSON_RESPONSE_BYTES):
 
 async def _json_request_unlocked(dispatcher, method, path, params=None, json_body=None,
                                  kind="user", timeout=8, use_cache=False):
-    cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
+    cooldown = await _cooldown_remaining_locked(dispatcher, path)
     if cooldown > 0:
         log.debug("uapi %s rate-limit cooldown active for %.1fs", path, cooldown)
         return None
@@ -471,7 +481,7 @@ async def _json_request_unlocked(dispatcher, method, path, params=None, json_bod
                         log.warning("uapi %s rejected configured key; retrying free endpoint as visitor", path)
                         continue
                     if response.status == 429:
-                        delay = _start_rate_limit_cooldown(
+                        delay = await _start_cooldown_locked(
                             dispatcher, path, response.headers)
                         log.warning(
                             "uapi %s rate limited; cooling down for %.1fs",
@@ -513,7 +523,7 @@ async def uapi_post(dispatcher, path, json_body=None, kind="user", timeout=8):
 
 async def _uapi_get_binary_unlocked(dispatcher, path, params=None, kind="user",
                           max_bytes=6 * 1024 * 1024, timeout=20):
-    cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
+    cooldown = await _cooldown_remaining_locked(dispatcher, path)
     if cooldown > 0:
         log.debug("uapi %s rate-limit cooldown active for %.1fs", path, cooldown)
         return None
@@ -538,8 +548,8 @@ async def _uapi_get_binary_unlocked(dispatcher, path, params=None, kind="user",
                 if response.status == 401 and index + 1 < len(attempts):
                     continue
                 if response.status == 429:
-                    delay = _start_rate_limit_cooldown(
-                        dispatcher, path, response.headers)
+                    delay = await _start_cooldown_locked(
+                            dispatcher, path, response.headers)
                     log.warning(
                         "uapi %s rate limited; cooling down for %.1fs",
                         path, delay,
@@ -572,7 +582,7 @@ async def uapi_get_binary(dispatcher, path, params=None, kind="user",
 
 
 async def _uapi_resolve_image_url_unlocked(dispatcher, path, params=None, timeout=8):
-    cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
+    cooldown = await _cooldown_remaining_locked(dispatcher, path)
     if cooldown > 0:
         log.debug("uapi %s rate-limit cooldown active for %.1fs", path, cooldown)
         return None
@@ -598,8 +608,8 @@ async def _uapi_resolve_image_url_unlocked(dispatcher, path, params=None, timeou
                 if response.status == 401 and index + 1 < len(attempts):
                     continue
                 if response.status == 429:
-                    delay = _start_rate_limit_cooldown(
-                        dispatcher, path, response.headers)
+                    delay = await _start_cooldown_locked(
+                            dispatcher, path, response.headers)
                     log.warning(
                         "uapi %s rate limited; cooling down for %.1fs",
                         path, delay,
@@ -627,7 +637,7 @@ async def uapi_resolve_image_url(dispatcher, path, params=None, timeout=8):
 
 async def uapi_post_form(dispatcher, path, fields, kind="user", timeout=20):
     """POST multipart form data for OCR/NSFW without exposing arbitrary targets."""
-    cooldown = _rate_limit_cooldown_remaining(dispatcher, path)
+    cooldown = await _cooldown_remaining_locked(dispatcher, path)
     if cooldown > 0:
         log.debug("uapi %s rate-limit cooldown active for %.1fs", path, cooldown)
         return None
@@ -649,8 +659,8 @@ async def uapi_post_form(dispatcher, path, fields, kind="user", timeout=20):
                 await _record_response_locked(
                     dispatcher, path, kind, response.status, response.headers)
                 if response.status == 429:
-                    delay = _start_rate_limit_cooldown(
-                        dispatcher, path, response.headers)
+                    delay = await _start_cooldown_locked(
+                            dispatcher, path, response.headers)
                     log.warning(
                         "uapi %s rate limited; cooling down for %.1fs",
                         path, delay,

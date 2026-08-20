@@ -16,7 +16,10 @@ from ..permission import (
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
 )
 from ..utils import atomic_write_json
-from .common import CONFIG_PATH, _commit, _load, _save
+from .common import (
+    CONFIG_PATH, _commit, _load, _save,
+    parse_target_qqs, format_user_label,
+)
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -86,16 +89,12 @@ async def cmd_group_notice(d, group_id, user_id, args, role, sender_card, messag
 async def cmd_kick(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
         return
-    mentions = d._extract_mentions(message)
+    mentions, _ = parse_target_qqs(args, d._extract_mentions(message))
     if not mentions:
-        try:
-            mentions = [int(args.strip())]
-        except ValueError:
-            pass
-    if not mentions:
-        await d._reply(group_id, user_id, "请 @要踢出的人")
+        await d._reply(group_id, user_id, "请 @要踢出的人，或写 QQ 号（多个都行）")
         return
     for tid in mentions:
+        label = await format_user_label(d, group_id, tid)
         target_ok, target_error = await can_moderate_target(d, group_id, user_id, tid, role)
         if not target_ok:
             await d._reply(group_id, user_id, target_error)
@@ -103,33 +102,39 @@ async def cmd_kick(d, group_id, user_id, args, role, sender_card, message):
         r = await d.client.set_group_kick(group_id, tid, False)
         if r.get("status") == "ok":
             log.warning("ADMIN_ACTION actor=%s group=%s action=kick target=%s", user_id, group_id, tid)
-            await d._reply(group_id, user_id, "踢掉了：" + str(tid))
+            await d._reply(group_id, user_id, "踢掉了：" + label)
         else:
             err = r.get("msg", "") or r.get("wording", "") or str(r)
-            await d._reply(group_id, user_id, "没踢掉 " + str(tid) + "，原因是：" + str(err))
+            await d._reply(group_id, user_id, "没踢掉 " + label + "，原因是：" + str(err))
 
 async def cmd_ban(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
         return
-    mentions = d._extract_mentions(message)
-    clean_args = re.sub(r"\[CQ:[^]]+\]", "", args)
-    if not mentions:
-        ids = re.findall(r"\b\d{5,12}\b", clean_args)
-        mentions = [int(ids[0])] if ids else []
-    if not mentions:
-        await d._reply(group_id, user_id, "请 @要禁言的人")
-        return
-    duration = 30
-    # Remove the target QQ numbers before looking for a duration, otherwise a
-    # 5-digit QQ like 12345 is mistaken for 12345 minutes.
-    duration_text = clean_args
+    at_mentions = d._extract_mentions(message)
+    mentions, duration_text = parse_target_qqs(args, at_mentions)
+    # Known targets must not leak into the duration search (natural-trigger
+    # glue passes the target as bare text, e.g. "45 12345").
     for tid in mentions:
         duration_text = re.sub(
-            r"(?<!\d)" + re.escape(str(tid)) + r"(?!\d)", "", duration_text, count=1)
+            r"(?<!\d)" + re.escape(str(tid)) + r"(?!\d)", " ", duration_text, count=1)
+    duration = 30
+    # Target QQ numbers are already stripped from duration_text by
+    # parse_target_qqs, so a 5-digit QQ is not mistaken for minutes.
     m = re.search(r"(?<!\d)(\d{1,5})(?!\d)(?:\s*(?:分钟|分|min|m))?", duration_text)
     if m:
         duration = max(1, min(int(m.group(1)), 43200))
+    elif at_mentions and len(mentions) > len(at_mentions):
+        # "@xxx 43200": a trailing bare number after real @-mentions keeps the
+        # historic meaning of a duration, not an extra target.
+        trailing = mentions[-1]
+        if 1 <= trailing <= 43200:
+            duration = trailing
+            mentions = mentions[:-1]
+    if not mentions:
+        await d._reply(group_id, user_id, "请 @要禁言的人，或写 QQ 号（多个都行）")
+        return
     for tid in mentions:
+        label = await format_user_label(d, group_id, tid)
         target_ok, target_error = await can_moderate_target(d, group_id, user_id, tid, role)
         if not target_ok:
             await d._reply(group_id, user_id, target_error)
@@ -138,23 +143,20 @@ async def cmd_ban(d, group_id, user_id, args, role, sender_card, message):
         if r.get("status") == "ok":
             log.warning("ADMIN_ACTION actor=%s group=%s action=ban target=%s duration=%s",
                         user_id, group_id, tid, duration * 60)
-            await d._reply(group_id, user_id, "禁言了：" + str(tid) + "，" + str(duration) + " 分钟")
+            await d._reply(group_id, user_id, "禁言了：" + label + "，" + str(duration) + " 分钟")
         else:
             err = r.get("msg", "") or r.get("wording", "") or str(r)
-            await d._reply(group_id, user_id, "没禁言成功，原因是：" + str(err))
+            await d._reply(group_id, user_id, "没禁言成功 " + label + "，原因是：" + str(err))
 
 async def cmd_unban(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
         return
-    mentions = d._extract_mentions(message)
+    mentions, _ = parse_target_qqs(args, d._extract_mentions(message))
     if not mentions:
-        clean_args = re.sub(r"\[CQ:[^]]+\]", "", args)
-        ids = re.findall(r"\b\d{5,12}\b", clean_args)
-        mentions = [int(ids[0])] if ids else []
-    if not mentions:
-        await d._reply(group_id, user_id, "请 @要解禁的人")
+        await d._reply(group_id, user_id, "请 @要解禁的人，或写 QQ 号（多个都行）")
         return
     for tid in mentions:
+        label = await format_user_label(d, group_id, tid)
         target_ok, target_error = await can_moderate_target(d, group_id, user_id, tid, role)
         if not target_ok:
             await d._reply(group_id, user_id, target_error)
@@ -162,10 +164,10 @@ async def cmd_unban(d, group_id, user_id, args, role, sender_card, message):
         r = await d.client.set_group_ban(group_id, tid, 0)
         if r.get("status") == "ok":
             log.warning("ADMIN_ACTION actor=%s group=%s action=unban target=%s", user_id, group_id, tid)
-            await d._reply(group_id, user_id, "解开了")
+            await d._reply(group_id, user_id, "解开了：" + label)
         else:
             err = r.get("msg", "") or r.get("wording", "") or str(r)
-            await d._reply(group_id, user_id, "没解开，原因是：" + str(err))
+            await d._reply(group_id, user_id, "没解开 " + label + "，原因是：" + str(err))
 
 async def cmd_allban(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:

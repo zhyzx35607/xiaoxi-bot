@@ -48,6 +48,14 @@ _SENSITIVE_KEYS = {
     "credentials", "onebot_token",
 }
 
+# Digit-only values under these keys are QQ ids, not phone numbers; the
+# phone-number pattern in redact_sensitive_text would otherwise mangle an
+# 11-digit QQ like 13800138000 into "[手机号]" and break frozen plan params.
+_QQ_ID_KEYS = {
+    "user_id", "target_id", "group_id", "qq", "uin", "bot_qq", "bot_owner",
+    "operator_id", "sender_id",
+}
+
 
 def contains_sensitive_data(text: str) -> bool:
     """Return whether text is unsafe to persist as a memory or event body."""
@@ -83,6 +91,9 @@ def sanitize_persistent_value(value, *, depth=0):
         for key, item in value.items():
             key_text = redact_sensitive_text(key)
             normalized = re.sub(r"[^a-z0-9_]+", "_", key_text.lower()).strip("_")
+            if normalized in _QQ_ID_KEYS and isinstance(item, str) and item.isdigit():
+                result[key_text] = item
+                continue
             result[key_text] = (
                 "[已隐藏]"
                 if normalized in _SENSITIVE_KEYS

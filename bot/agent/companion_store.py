@@ -199,6 +199,23 @@ class CompanionStore:
             conn.execute("INSERT INTO emotion_snapshots(id,owner_id,data_json,created_at) VALUES(?,?,?,?)",
                          (uuid.uuid4().hex, int(owner_id), json.dumps(state, ensure_ascii=False), _now()))
 
+    def prune_retention(self, owner_id: int, now: float,
+                        max_snapshots: int = 200, max_episodes: int = 500,
+                        outbox_retention_seconds: float = 7 * 86400):
+        """Bound table growth: keep the newest rows, drop terminal outbox items."""
+        with self._lock, self._connection() as conn:
+            conn.execute(
+                "DELETE FROM emotion_snapshots WHERE owner_id=? AND id NOT IN ("
+                "SELECT id FROM emotion_snapshots WHERE owner_id=? ORDER BY created_at DESC LIMIT ?)",
+                (int(owner_id), int(owner_id), int(max_snapshots)))
+            conn.execute(
+                "DELETE FROM episodes WHERE owner_id=? AND id NOT IN ("
+                "SELECT id FROM episodes WHERE owner_id=? ORDER BY created_at DESC LIMIT ?)",
+                (int(owner_id), int(owner_id), int(max_episodes)))
+            conn.execute(
+                "DELETE FROM outbox WHERE owner_id=? AND status!='pending' AND updated_at<?",
+                (int(owner_id), float(now) - float(outbox_retention_seconds)))
+
     def add_followup(self, owner_id: int, topic: str, payload: dict, next_at: float,
                      attempt: int = 0, max_attempts: int = 4):
         with self._lock, self._connection() as conn:

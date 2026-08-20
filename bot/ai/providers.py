@@ -185,7 +185,8 @@ async def _call_deepseek_inner(config, messages, max_tokens=400, temperature=0.7
                                     model_label, resp.status)
                         return None
                     _record_result(False, "HTTP {}".format(resp.status))
-                    log.warning("%s API returned %d: %s", model_label, resp.status, body[:200])
+                    # Status only: upstream error bodies may echo request data.
+                    log.warning("%s API returned %d", model_label, resp.status)
                     cooldown = 3600 if resp.status in (400, 401, 403, 404) else 60
                     _PROVIDER_COOLDOWNS[provider_key] = time.monotonic() + cooldown
                     return None  # Signal caller to try fallback
@@ -312,8 +313,8 @@ async def _call_vision_api_inner(config, image_url, session=None):
                 if resp.status == 200:
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"].strip()
-                body = await resp.text()
-                log.warning("%s vision returned %d: %s", label, resp.status, body[:200])
+                await resp.text()
+                log.warning("%s vision returned %d", label, resp.status)
                 return None
         try:
             if session:
@@ -363,8 +364,8 @@ async def generate_image(dispatcher, prompt, session=None):
                 if data.get("data"):
                     return data["data"][0].get("url"), None
             else:
-                body = await resp.text()
-                log.warning("Image gen API returned %d: %s", resp.status, body[:200])
+                await resp.text()
+                log.warning("Image gen API returned %d", resp.status)
                 return None, f"生图失败 (HTTP {resp.status})"
         return None, "生图失败，请稍后重试"
     try:

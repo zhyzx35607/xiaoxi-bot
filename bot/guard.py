@@ -23,7 +23,7 @@ def load_blacklist():
     try:
         with open(BLACKLIST_FILE, encoding="utf-8") as f:
             _bl_cache = json.load(f)
-    except Exception:
+    except (OSError, ValueError):
         _bl_cache = {}
     _bl_cache_ts = now
     return _bl_cache
@@ -44,7 +44,7 @@ def load_warnings():
     try:
         with open(R18_WARNING_FILE, encoding="utf-8") as f:
             _warn_cache = json.load(f)
-    except Exception:
+    except (OSError, ValueError):
         _warn_cache = {}
     _warn_cache_ts = now
     return _warn_cache
@@ -61,8 +61,13 @@ def is_blacklisted(group_id, user_id):
     bl = load_blacklist()
     key = f"{group_id}_{user_id}"
     entry = bl.get(key)
-    if entry and time.time() < entry.get("expires", 0):
+    if not entry:
+        return False
+    if time.time() < entry.get("expires", 0):
         return True
+    # Lazily purge expired entries so blacklist.json does not grow forever.
+    del bl[key]
+    save_blacklist(bl)
     return False
 
 

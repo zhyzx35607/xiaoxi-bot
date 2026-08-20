@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
+import posixpath
 import time
 from urllib.parse import urljoin, urlparse
 
@@ -128,6 +129,9 @@ def _validated_image(data, base_url, requested_r18):
         raise MukyuError("image service returned restricted content for a safe request")
 
     local_path = str(urls.get("local") or "").strip()
+    # Normalize before validating: "/i/../x" would otherwise escape the /i/
+    # prefix through urljoin.
+    local_path = posixpath.normpath(local_path)
     if not local_path.startswith("/i/") or "//" in local_path:
         raise MukyuError("image service returned an unsafe local path")
     image_url = urljoin(base_url + "/", local_path.lstrip("/"))

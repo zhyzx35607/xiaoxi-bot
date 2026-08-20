@@ -13,13 +13,24 @@ from ..utils import atomic_write_json
 from .providers import _call_vision_api, _get_semaphore, _get_vision_api_key
 
 log = logging.getLogger("qqbot")
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-STICKER_DIR = os.path.join(_ROOT, "data", "stickers")
-os.makedirs(STICKER_DIR, exist_ok=True)
+from ..storage.runtime_paths import runtime_data_dir
+STICKER_DIR = runtime_data_dir("stickers")
 
 _STICKER_LAST_SENT = {}
 
 _STICKER_DAILY_COUNT = {}
+
+# Per-inventory-file locks: collect_sticker_async re-reads and merges under
+# the lock so concurrent collections on the same file cannot lose updates.
+_STICKER_FILE_LOCKS = {}
+
+
+def _sticker_file_lock(path):
+    lock = _STICKER_FILE_LOCKS.get(path)
+    if lock is None:
+        lock = asyncio.Lock()
+        _STICKER_FILE_LOCKS[path] = lock
+    return lock
 
 
 def _load_sticker_file(path):
@@ -159,7 +170,7 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
                 tags = [t.strip() for t in parts[2].split(",") if t.strip()]
             if len(parts) >= 4:
                 usage_scene = parts[3].strip()
-    stickers.append({
+    new_entry = {
         "file": file_id,
         "sub_type": sub_type,
         "desc": desc_text,
@@ -168,12 +179,19 @@ async def collect_sticker_async(dispatcher, group_id, file_id, sub_type, summary
         "usage": usage_scene,
         "group_id": f"private_{group_id}" if is_private else str(group_id),
         "ts": time.time()
-    })
-    # Keep at most sticker_mode.max_stickers entries
+    }
+    # Keep at most sticker_mode.max_stickers entries. Re-read and merge under
+    # the per-file lock: the vision API await above can span other concurrent
+    # collections, so the earlier snapshot may be stale.
     max_stickers = int(sticker_cfg.get("max_stickers", 50))
-    if len(stickers) > max_stickers:
-        stickers = stickers[-max_stickers:]
-    await asyncio.to_thread(atomic_write_json, path, stickers)
+    async with _sticker_file_lock(path):
+        stickers = await asyncio.to_thread(_load_sticker_file, path)
+        if any(s.get("file") == file_id for s in stickers):
+            return  # collected concurrently while analyzing
+        stickers.append(new_entry)
+        if len(stickers) > max_stickers:
+            stickers = stickers[-max_stickers:]
+        await asyncio.to_thread(atomic_write_json, path, stickers)
     log.info("Sticker collected and analyzed: emotion=%s", emotion or "unknown")
 
 async def _analyze_sticker_vision(config, image_url, session=None):

@@ -130,6 +130,8 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 
 群里用 `/` 前缀，也有些话不带前缀也能触发。
 
+凡是带目标用户的命令（/kick、/ban、/unban、/admin、/master、/title、/like、/info、/私聊AI allow/deny、/bl 等），目标都可以混用 @和QQ号、一次写多个（`/ban @甲 @乙 10`），不加空格的粘连写法（`/master add@某人`）也能识别；执行结果的提示会同时显示名字和 QQ 号（如「测试群(123456) 的主人多了一个：小明(7890123)」）。
+
 **所有人都能用：**
 
 `/help` — 看有哪些命令（按你的身份分级显示）
@@ -163,13 +165,13 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 
 **管理用的（要群管 + Bot 也得是管理）：**
 
-`/kick @xxx` — 踢人
-`/ban @xxx [分钟]` — 禁言
-`/unban @xxx` — 解禁
+`/kick @xxx` — 踢人（@或QQ号都行，可多个，如 `/kick @甲 @乙`、`/kick 12345 23456`）
+`/ban @xxx [分钟]` — 禁言（同上支持多目标；时长可写 `30`、`30分钟`，不带单位的大数字请带"分钟"避免和QQ号歧义）
+`/unban @xxx` — 解禁（支持多目标）
 `/allban on/off` — 全员禁言
 `/welcome` — 设置欢迎语
 `/badword` — 违禁词管理
-`/admin add/del @xxx` — 上/下管理
+`/admin add/del @xxx` — 上/下管理（@或QQ号，可多个，粘连写法 `/admin add@某人` 也行）
 `/精华` — 设精华（回复那条消息）
 `/删精华` — 取消精华
 `/公告` — 群公告
@@ -200,13 +202,13 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 
 `/status` — 看运行状态、内存、在线时间
 `/AI状态` — 看 SigmaI / DeepSeek 供应商状态
-`/私聊AI on/off/allow QQ/deny QQ` — 私聊 AI 总开关与开放名单
+`/私聊AI on/off/allow @或QQ/deny @或QQ` — 私聊 AI 总开关与开放名单（allow/deny 支持多个）
 `/AI聊天 on/off` — 开关本群的 AI 聊天（私聊里用 `/AI聊天 群号1 群号2 ... on/off`，多群号可用空格/逗号分隔，`all` 表示全部已配置群）
 `/acg图 群号... on/off` `/热榜推送 群号... on/off` `/b站解析 群号... on/off` `/gal资源 群号... on/off` — 私聊跨群开关对应功能，群号用法同上（支持多群号和 `all`）
 `/打卡状态` `/打卡测试 群号` — 群打卡
 `/list` — 所有群的概览
 `/log [N]` — 看最近 N 条日志
-`/bl list/add/remove` — 黑名单管理
+`/bl list/add/remove` — 黑名单管理（add/remove 支持一次多个 QQ：`/bl add 群号 QQ1 QQ2 小时`）
 `/group enable/disable/list 群号` — 开关群
 `/memory 群号` — 看群的 AI 记忆
 `/memory clear 群号` — 清掉
@@ -347,5 +349,8 @@ bot/
 - OneBot WebSocket 离线时，签到、ACG、热榜和 B站推送会跳过本轮，恢复连接后只执行未来任务。
 - 新 ACG 图片使用 Mukyu `simple_json` 元数据和同源 `/i/...` URL，不消耗 UApiS 积分；定时收集始终请求 `r18=0`。
 - B站官方接口出现 `-352` 或 `-412` 风控后默认暂停 30 分钟，可通过 `bilibili.risk_cooldown_seconds` 调整。
+- B站投递未确认时按指数退避重试，达到 `bilibili.delivery_max_attempts`（默认 8 次）后放弃该条并继续后续动态，失败摘要记录在内存 `last_failure`。
+- ACG 合并转发超时后按 `acg_images.timeout_confirm_checks`（默认 3 次）× `acg_images.timeout_confirm_interval_seconds`（默认 20 秒）轮询群历史确认，避免重复推送。
+- `/opt/qqbot/data/tmp` 以 `0755` 权限存放需交给 NapCat（`napcat` 用户）读取的媒体临时文件，`data/` 为 `0751`（仅可穿越、不可列目录），其余运行数据目录保持 `0700`、文件 `0600`。
 - 配置文件和 `config.json.last-good` 会使用 `0600` 权限保存，环境变量中的密钥不会写回配置文件。
 - 生产环境建议使用 `deploy/qqbot.service`、以专用 `napcat` 用户运行的 `deploy/napcat.service`、常驻 `deploy/napcat-login-watchdog.service` 和受限的 `deploy/napcat-restart.path`，另配备份清理 timer，由 systemd 管理完整进程树。生产服务默认关闭聊天正文文件日志，并通过 NapCat 输出过滤器阻止消息正文和 token 进入 journald。

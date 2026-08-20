@@ -225,6 +225,43 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         state = runtime.store.read("moderation/group_300.json", {})
         self.assertEqual(state["count"], 1)
 
+    async def test_plain_member_actor_cannot_delete_msg(self):
+        # delete_msg 没有 target_id，必须有独立的触发者身份门控：
+        # 普通群成员显式 @bot 进入规划后也不能让 bot 撤回消息。
+        runtime = make_runtime(MODERATION_CONFIG)
+        client = FakeClient(roles={888: "admin", 101: "member"})
+        dispatcher = make_dispatcher(runtime, client)
+        event = group_event(runtime, sender={"role": "member"})
+        result = await self.execute(
+            runtime, dispatcher, event, "delete_msg", message_id=77)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "moderation_actor_not_admin")
+        self.assertEqual(client.calls, [])
+
+    async def test_unverified_actor_identity_rejects(self):
+        class BrokenClient(FakeClient):
+            async def get_group_member_info(self, group_id, user_id):
+                if user_id == 888:
+                    return {"status": "ok", "data": {"role": "admin"}}
+                raise RuntimeError("api down")
+        runtime = make_runtime(MODERATION_CONFIG)
+        dispatcher = make_dispatcher(runtime, BrokenClient())
+        result = await self.execute(
+            runtime, dispatcher, group_event(runtime), "delete_msg", message_id=77)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "moderation_actor_not_admin")
+        self.assertEqual(dispatcher.client.calls, [])
+
+    async def test_group_admin_actor_passes_actor_gate(self):
+        runtime = make_runtime(MODERATION_CONFIG)
+        client = FakeClient(roles={888: "admin", 101: "admin"})
+        dispatcher = make_dispatcher(runtime, client)
+        event = group_event(runtime, sender={"role": "admin"})
+        result = await self.execute(
+            runtime, dispatcher, event, "delete_msg", message_id=77)
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.calls, [("delete_msg", 77)])
+
     async def test_ban_duration_is_clamped_to_configured_max(self):
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin", 101: "owner", 201: "member"})
@@ -321,6 +358,33 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("delete_msg", disabled_gateway.catalog(group_event(disabled_runtime)))
 
 
+class ExecutorToolFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_single_tool_exception_does_not_abort_remaining_calls(self):
+        from bot.agent import executor as executor_module
+
+        class Gateway:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, event, name, **arguments):
+                self.calls.append(name)
+                if name == "broken_tool":
+                    raise ConnectionError("connection closed")
+                return {"ok": True, "data": name}
+
+        gateway = Gateway()
+        executor = AgentExecutor(gateway, {"agent": {"tool_timeout_seconds": 5}})
+        with patch.object(executor_module, "tool_allowed", return_value=True):
+            results = await executor.execute(object(), [
+                {"name": "broken_tool", "step_id": "1", "arguments": {}},
+                {"name": "good_tool", "step_id": "2", "arguments": {}},
+            ], remaining_budget=5)
+        self.assertEqual(gateway.calls, ["broken_tool", "good_tool"])
+        self.assertEqual(results[0]["result"],
+                         {"ok": False, "error": "tool_execution_failed"})
+        self.assertEqual(results[1]["result"], {"ok": True, "data": "good_tool"})
+
+
 class ModerationConfirmationFlowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         permission_module._bot_role_cache.clear()
@@ -382,6 +446,71 @@ class ModerationConfirmationFlowTests(unittest.IsolatedAsyncioTestCase):
             "raw_message": "踢人", "sender": {"role": "owner"}})
         await runtime.run_autonomous(dispatcher, event, initial_plan=plan)
         self.assertEqual(client.calls, [])
+
+    def _replan_runtime(self, config=None):
+        base = {
+            "bot_owner": 999, "bot_qq": 888,
+            "agent": {"group_max_rounds": 3, "group_tool_budget": 5,
+                      "owner_max_rounds": 4, "owner_tool_budget": 5},
+            "groups": {"300": {"agent": {"moderation_enabled": True}}},
+        }
+        base.update(config or {})
+        runtime = AgentRuntime(base, tempfile.mkdtemp())
+        executed = []
+
+        class Planner:
+            def __init__(self):
+                self.calls = 0
+
+            async def plan(self, agent_event, context):
+                self.calls += 1
+                if self.calls == 1:
+                    return {"intent": "read", "reply": "", "needs_confirmation": False,
+                            "tools": [{"name": "get_group_info", "arguments": {}}],
+                            "task": None}
+                if self.calls == 2:
+                    return {"intent": "harm", "reply": "", "needs_confirmation": False,
+                            "tools": [
+                                {"name": "delete_msg", "arguments": {"message_id": 1}},
+                                {"name": "get_group_info", "arguments": {}},
+                            ], "task": None}
+                return {"intent": "done", "reply": "完成", "needs_confirmation": False,
+                        "tools": [], "task": None}
+
+        class Executor:
+            async def execute(self, agent_event, calls, remaining_budget):
+                executed.extend(item["name"] for item in calls)
+                return [{"name": item["name"], "result": {"ok": True}}
+                        for item in calls]
+
+        runtime.planner = Planner()
+        runtime.executor = Executor()
+        runtime.tools = type("Tools", (), {
+            "catalog": lambda self, agent_event=None: {}})()
+        runtime.verifier = object()
+        return runtime, executed
+
+    async def test_replanned_moderation_tool_filtered_for_non_super(self):
+        # 重规划轮次不经过 handle_event 的确认门控：群主/管理触发时，
+        # 重规划补出的 delete_msg 等高风险工具必须被剔除。
+        runtime, executed = self._replan_runtime()
+        dispatcher = make_dispatcher(runtime, FakeClient())
+        event = group_event(runtime)  # 群主（非最高主人）触发
+        plan, _results = await runtime.run_autonomous(dispatcher, event)
+        self.assertEqual(plan["reply"], "完成")
+        self.assertNotIn("delete_msg", executed)
+        self.assertEqual(executed, ["get_group_info", "get_group_info"])
+
+    async def test_super_owner_replan_keeps_moderation_tools(self):
+        # 最高主人私域本来豁免确认流，重规划工具不应被过滤
+        runtime, executed = self._replan_runtime()
+        dispatcher = make_dispatcher(runtime, FakeClient())
+        event = runtime.build_event({
+            "user_id": 999, "message_type": "private", "raw_message": "x"})
+        plan, _results = await runtime.run_autonomous(dispatcher, event)
+        self.assertEqual(plan["reply"], "完成")
+        self.assertEqual(
+            executed, ["get_group_info", "delete_msg", "get_group_info"])
 
 
 class ModerationPlanningContextTests(unittest.IsolatedAsyncioTestCase):

@@ -4,7 +4,12 @@ import inspect
 
 from api_registry import REGISTRY
 from ...memory import sanitize_for_memory
-from ...permission import can_moderate_target, get_bot_role
+from ...permission import (
+    LEVEL_ADMIN,
+    _resolve_user_level,
+    can_moderate_target,
+    get_bot_role,
+)
 from ...utils import now_in_timezone
 
 
@@ -78,21 +83,27 @@ def _moderation_group_id(agent_event, params):
     return int(agent_event.scope.group_id), ""
 
 
-def _moderation_quota_ok(runtime, group_id, limit, today):
-    state = runtime.store.read("moderation/group_{}.json".format(group_id), {})
-    if not isinstance(state, dict) or state.get("date") != today:
-        return True
-    return int(state.get("count", 0) or 0) < limit
-
-
-def _record_moderation_quota(runtime, group_id, today):
+def _reserve_moderation_quota(runtime, group_id, limit, today):
+    """Atomically check and reserve one quota slot; refund on failure paths."""
     def change(state):
         if not isinstance(state, dict) or state.get("date") != today:
             state = {"date": today, "count": 0}
-        state["count"] = int(state.get("count", 0) or 0) + 1
-        return state, state["count"]
+        count = int(state.get("count", 0) or 0)
+        if count >= limit:
+            return state, False
+        state["count"] = count + 1
+        return state, True
 
     return runtime.store.update("moderation/group_{}.json".format(group_id), {}, change)
+
+
+def _refund_moderation_quota(runtime, group_id, today):
+    def change(state):
+        if isinstance(state, dict) and state.get("date") == today:
+            state["count"] = max(0, int(state.get("count", 0) or 0) - 1)
+        return state, None
+
+    runtime.store.update("moderation/group_{}.json".format(group_id), {}, change)
 
 
 async def napcat_moderation(dispatcher, agent_event, tool_name, **params):
@@ -109,6 +120,13 @@ async def napcat_moderation(dispatcher, agent_event, tool_name, **params):
     bot_role, _ = await get_bot_role(dispatcher, group_id)
     if bot_role not in ("owner", "admin"):
         return {"ok": False, "error": "bot_not_group_admin"}
+    # AI 输出不是权限证明：所有群管动作（含没有 target 的 delete_msg）都要求
+    # 触发者在本群是 API 核验过的管理及以上身份，普通成员不能借 Agent 处置消息。
+    actor_level, _, actor_verified = await _resolve_user_level(
+        dispatcher, group_id, agent_event.identity.user_id,
+        agent_event.identity.role)
+    if not actor_verified or actor_level < LEVEL_ADMIN:
+        return {"ok": False, "error": "moderation_actor_not_admin"}
     if tool_name in HIGH_RISK_MODERATION:
         # 巡检是系统事件：主人身份豁免不适用，高风险动作只能走人工确认流。
         if agent_event.metadata.get("auto_patrol"):
@@ -156,13 +174,14 @@ async def napcat_moderation(dispatcher, agent_event, tool_name, **params):
         return {"ok": False, "error": "agent_runtime_unavailable"}
     limit = max(1, int(dispatcher.config.get("agent", {}).get("moderation_daily_limit", 20)))
     today = now_in_timezone(dispatcher.config).strftime("%Y-%m-%d")
-    if not _moderation_quota_ok(runtime, group_id, limit, today):
+    if not _reserve_moderation_quota(runtime, group_id, limit, today):
         return {"ok": False, "error": "moderation_quota_exceeded"}
     method, args, kwargs = call
     result = await method(*args, **kwargs)
     ok = isinstance(result, dict) and result.get("status") in {None, "ok"}
-    if ok:
-        _record_moderation_quota(runtime, group_id, today)
+    if not ok:
+        _refund_moderation_quota(runtime, group_id, today)
+    else:
         runtime.timeline.add(
             "group:{}".format(group_id), "moderation",
             "{} 目标{} {}".format(tool_name, target_id or params.get("message_id") or params.get("flag", ""), reason),

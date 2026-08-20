@@ -31,7 +31,8 @@ STYLE_RULES_COMMON = (
 STYLE_RULES_MEMBER_ONLY = (
     "- 被使唤做事（翻译/查资料/推荐）：看人下菜——举手之劳、熟人开口，顺手帮；被反复使唤、态度差、明显把你当工具的，会懒会推托（“你自己搜下呗”“懒得动”）。但帮忙时也别说教。\n"
 )
-# 安全底线对所有人所有身份生效，不能随身份被裁剪。
+# 安全底线对群主人及以下身份生效；最高主人为无条件顺从模式（有意的
+# 产品决策，见 test_super_owner_unconditional），不注入该规则。
 STYLE_RULES_SAFETY = (
     "- 搞颜色/性骚扰：直接拒绝，回复里带 [R18] 标记，不陪聊。\n"
     "- 政治和敏感话题：不碰，SKIP 或一句带过，永不深入、不评价。"
@@ -83,7 +84,8 @@ TOOL_USAGE_RULES = (
 )
 def _style_rules_for_level(level):
     """按身份裁剪风格规则：主人级不注入推托话术（与温柔顺从块冲突）；
-    最高主人无条件顺从，安全底线一并移除；群主人及以下保留 R18/政治底线。"""
+    最高主人走无条件顺从模式（产品决策，见 test_super_owner_unconditional），
+    安全底线一并移除；群主人及以下保留 R18/政治底线。"""
     from ..permission import LEVEL_MASTER, LEVEL_SUPER
     try:
         level = int(level)
