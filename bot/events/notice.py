@@ -68,7 +68,7 @@ def _describe_notice(event):
     return ""
 
 
-def _observe_notice(dispatcher, event):
+async def _observe_notice(dispatcher, event):
     """Trim a group notice into the Agent event stream (observe only)."""
     agent_settings = dispatcher.config.get("agent", {})
     if not agent_settings.get("observation_enabled", False):
@@ -85,7 +85,7 @@ def _observe_notice(dispatcher, event):
         return
     user_id = event.get("user_id") or event.get("operator_id") or event.get("target_id") or 0
     try:
-        runtime.observe({
+        await runtime.observe(dispatcher, {
             "post_type": "notice",
             "user_id": user_id,
             "group_id": group_id,
@@ -147,7 +147,7 @@ async def handle_notice(dispatcher, event):
                      event.get("target_id"), sorted(event.keys()))
     else:
         log.info("Unhandled notice type=%s keys=%s", notice_type, sorted(event.keys()))
-    _observe_notice(dispatcher, event)
+    await _observe_notice(dispatcher, event)
 
 
 async def _generate_welcome_text(dispatcher, nickname, sex=""):

@@ -17,6 +17,12 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _LOG_PATH = os.path.join(_ROOT, "data", "security_events.json")
 _EVENTS_LOCK = threading.Lock()  # serializes record_security_event RMW across to_thread workers
 _URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+", re.IGNORECASE)
+# Bounded circuit breaker for the NapCat check_url_safely API: a persistent
+# outage degrades URL checks instead of dropping every message with a link.
+_URL_CHECK_FAILURE_THRESHOLD = 3
+_URL_CHECK_COOLDOWN_SECONDS = 300.0
+_URL_CHECK_STATE = {"failures": 0, "open_until": 0.0}
+_URL_CHECK_LOCK = threading.Lock()
 
 
 def _global_security_config(dispatcher):
@@ -224,6 +230,50 @@ async def punish_security_violation(dispatcher, group_id, user_id, message_id, r
     return ",".join(actions) or "logged"
 
 
+def _url_check_available():
+    with _URL_CHECK_LOCK:
+        return time.monotonic() >= _URL_CHECK_STATE["open_until"]
+
+
+def _url_check_reset():
+    with _URL_CHECK_LOCK:
+        _URL_CHECK_STATE["failures"] = 0
+        _URL_CHECK_STATE["open_until"] = 0.0
+
+
+def _url_check_note_failure():
+    """Count one API failure; open the bounded circuit after a streak.
+
+    Returns True when the circuit (re)opens. A failure on the single probe
+    after a cooldown window reopens the circuit for another window.
+    """
+    with _URL_CHECK_LOCK:
+        state = _URL_CHECK_STATE
+        now = time.monotonic()
+        if state["open_until"] > 0.0 and now >= state["open_until"]:
+            state["open_until"] = now + _URL_CHECK_COOLDOWN_SECONDS
+            state["failures"] = 0
+            return True
+        state["failures"] += 1
+        if state["failures"] >= _URL_CHECK_FAILURE_THRESHOLD:
+            state["failures"] = 0
+            state["open_until"] = now + _URL_CHECK_COOLDOWN_SECONDS
+            return True
+        return False
+
+
+async def _url_check_api_failure(dispatcher, group_id, user_id, url, reason):
+    """Degrade on check_url_safely outages instead of blocking messages."""
+    await asyncio.to_thread(
+        record_security_event, dispatcher, "url_check_failed", group_id,
+        user_id, url + " | " + reason, "check_skipped")
+    if _url_check_note_failure():
+        log.warning(
+            "check_url_safely unavailable; URL checks paused for %ds",
+            int(_URL_CHECK_COOLDOWN_SECONDS))
+    return False
+
+
 async def check_message_urls(dispatcher, group_id, user_id, raw, message_id, sender_role="member"):
     cfg = security_config(dispatcher, group_id)
     if not cfg.get("url_check_enabled", True):
@@ -231,22 +281,23 @@ async def check_message_urls(dispatcher, group_id, user_id, raw, message_id, sen
     urls = extract_urls(raw)
     if not urls:
         return False
+    if not _url_check_available():
+        log.warning(
+            "URL safety check skipped: check_url_safely circuit open "
+            "(group=%s user=%s)", group_id, user_id)
+        return False
     for url in urls:
         try:
             result = await dispatcher.client.check_url_safely(url)
         except Exception as e:
             log.warning("URL safety check failed: %s", e)
-            reason = "api_error"
-            await asyncio.to_thread(
-                record_security_event, dispatcher, "url_check_failed", group_id,
-                user_id, url + " | " + reason, "message_ignored")
-            return True
+            return await _url_check_api_failure(
+                dispatcher, group_id, user_id, url, "api_error")
         risky, reason = is_url_check_risky(result)
         if risky is None:
-            await asyncio.to_thread(
-                record_security_event, dispatcher, "url_check_failed", group_id,
-                user_id, url + " | " + reason, "message_ignored")
-            return True
+            return await _url_check_api_failure(
+                dispatcher, group_id, user_id, url, reason)
+        _url_check_reset()
         if not risky:
             continue
         action = await punish_security_violation(

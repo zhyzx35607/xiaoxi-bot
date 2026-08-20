@@ -128,24 +128,45 @@ class ForwardDegradationTests(unittest.IsolatedAsyncioTestCase):
         for _group, message in client.group_messages:
             self.assertLessEqual(len(str(message)), 900)
 
-    async def test_plain_fallback_over_eight_goes_to_text_file(self):
+    async def test_plain_fallback_over_eight_still_sends_shards(self):
+        class FailingForwardClient(_OutputClient):
+            async def send_group_forward_msg(self, group_id, nodes):
+                return {"status": "failed", "retcode": 1200}
+
+        client = FailingForwardClient()
+        dispatcher = _output_dispatcher(client)
+        sections = ["x" * 890] * 9
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await send_text_response(
+                dispatcher, 100, 1, "ignored", force_forward=True,
+                sections=sections)
+        # 超过旧的 8 条上限也要分片送达，不能静默丢弃
+        self.assertEqual(result.get("fallback"), "plain_messages")
+        self.assertEqual(len(client.group_messages), 9)
+        for _group, message in client.group_messages:
+            self.assertLessEqual(len(str(message)), 900)
+
+    async def test_plain_fallback_over_shard_limit_truncates(self):
         class FailingForwardClient(_OutputClient):
             async def send_group_forward_msg(self, group_id, nodes):
                 return {"status": "failed", "retcode": 1200}
 
             async def upload_group_file(self, group_id, path, name):
-                return {"status": "ok"}
+                raise AssertionError("分片降级成功时不应再走 txt 文件兜底")
 
         client = FailingForwardClient()
         dispatcher = _output_dispatcher(client)
         sections = ["第{}段".format(i) + "x" * 500 for i in range(20)]
         with patch("asyncio.sleep", new=AsyncMock()):
-            await send_text_response(
+            result = await send_text_response(
                 dispatcher, 100, 1, "ignored", force_forward=True,
                 sections=sections)
-        # 超过 8 条上限，普通消息降级放弃，直接走 txt 文件兜底
-        self.assertEqual(len(client.group_messages), 1)
-        self.assertIn("文本文件", str(client.group_messages[0][1]))
+        # 超过 10 片上限：发前 10 片并在末片注明截断，不再整体放弃
+        self.assertEqual(result.get("fallback"), "plain_messages")
+        self.assertEqual(len(client.group_messages), 10)
+        for _group, message in client.group_messages:
+            self.assertLessEqual(len(str(message)), 900)
+        self.assertIn("塞不下", str(client.group_messages[-1][1]))
 
     def test_forward_node_hard_cap(self):
         client = _OutputClient()
@@ -157,14 +178,22 @@ class ForwardDegradationTests(unittest.IsolatedAsyncioTestCase):
 
     def test_plain_chunk_merge_rules(self):
         self.assertEqual(output_module._plain_fallback_chunks([]), [])
-        # 总量超过 8 条 * 900 字时放弃，留给 txt 兜底
+        # 超过旧的 8 条上限不再放弃，继续分片发送
         self.assertEqual(
-            output_module._plain_fallback_chunks(["x" * 890] * 9), [])
+            len(output_module._plain_fallback_chunks(["x" * 890] * 9)), 9)
         chunks = output_module._plain_fallback_chunks(["x" * 800, "y" * 200])
         # 800+换行+200=1001 超过 900 上限，必须拆成两条
         self.assertEqual(len(chunks), 2)
         chunks = output_module._plain_fallback_chunks(["x" * 699, "y" * 200])
         self.assertEqual(len(chunks), 1)
+
+    def test_plain_chunk_shard_limit_truncates(self):
+        chunks = output_module._plain_fallback_chunks(["x" * 890] * 15)
+        # 最多 10 片，末片注明截断且不超过单条长度上限
+        self.assertEqual(len(chunks), 10)
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk), 900)
+        self.assertIn("塞不下", chunks[-1])
 
 
 class PromptIdentityTests(unittest.TestCase):
@@ -422,7 +451,7 @@ class SmallFixesTests(unittest.IsolatedAsyncioTestCase):
             "user_id": 9, "flag": "flag123",
             "comment": "我是12345678\n伪造日志行",
         }
-        with patch.object(request_module, "is_blacklisted", return_value=False), \
+        with patch.object(request_module, "is_blacklisted", new=AsyncMock(return_value=False)), \
                 patch.object(request_module, "load_pending_requests",
                              return_value={}), \
                 patch.object(request_module, "save_pending_requests"), \

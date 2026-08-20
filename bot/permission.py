@@ -89,6 +89,36 @@ async def get_user_level(dispatcher, group_id, user_id, sender_role_hint=""):
     level, name, _ = await _resolve_user_level(
         dispatcher, group_id, user_id, sender_role_hint)
     return level, name
+# Member role cache (per group+user, 60s TTL) for per-message hot paths such
+# as Agent identity resolution. Command permission checks keep querying the
+# API on every call via _resolve_user_level.
+_member_role_cache = {}
+_member_role_cache_ttl = 60
+_MEMBER_ROLE_CACHE_MAX_AGE = 300  # hard eviction after 5 minutes
+async def get_member_role(dispatcher, group_id, user_id):
+    """Real-time member role with a short TTL cache; fails closed to member."""
+    if not group_id:
+        return 'member'
+    now = time.time()
+    # Periodic cleanup of stale cache entries
+    stale = [k for k, v in _member_role_cache.items() if now - v.get('ts', 0) > _MEMBER_ROLE_CACHE_MAX_AGE]
+    for k in stale:
+        del _member_role_cache[k]
+    key = (int(group_id), int(user_id))
+    cached = _member_role_cache.get(key)
+    if cached and (now - cached['ts']) < _member_role_cache_ttl:
+        return cached['role']
+    try:
+        r = await dispatcher.client.get_group_member_info(group_id, user_id)
+        if r.get('status') == 'ok':
+            role = r.get('data', {}).get('role', 'member')
+            if role in ('owner', 'admin', 'member'):
+                _member_role_cache[key] = {'role': role, 'ts': now}
+                return role
+            log.warning('get_member_role returned an invalid role for group=%s', group_id)
+    except Exception as e:
+        log.warning('get_member_role API failed for group=%s user=%s: %s', group_id, user_id, e)
+    return 'member'
 # Role cache (per-group, 60s TTL)
 _bot_role_cache = {}
 _bot_role_cache_ttl = 60

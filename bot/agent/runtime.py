@@ -82,8 +82,9 @@ class AgentRuntime:
         self.executor = None
         self.verifier = None
 
-    def build_event(self, event):
-        scope, identity = resolve_scope(self.config, event), resolve_identity(self.config, event)
+    async def build_event(self, dispatcher, event):
+        scope = resolve_scope(self.config, event)
+        identity = await resolve_identity(dispatcher, event)
         seed = f"{scope.key}:{identity.user_id}:{event.get('message_id')}:{event.get('time', 0)}"
         return AgentEvent(
             hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24], scope, identity,
@@ -107,8 +108,8 @@ class AgentRuntime:
         if candidate:
             self.memory.add_candidate(candidate)
 
-    def observe(self, event, *, explicit=False):
-        agent_event = self.build_event(event)
+    async def observe(self, dispatcher, event, *, explicit=False):
+        agent_event = await self.build_event(dispatcher, event)
         decision = decide_event(self.config, agent_event, explicit=explicit)
         self._record_event(agent_event, decision)
         self._apply_proactive_feedback(agent_event)
@@ -163,8 +164,8 @@ class AgentRuntime:
         group = self.config.get("groups", {}).get(str(agent_event.scope.group_id), {})
         return group.get("agent", {}).get("enabled", True)
 
-    def primary_router_enabled(self, event):
-        return primary_router_enabled(self.config, self.build_event(event))
+    async def primary_router_enabled(self, dispatcher, event):
+        return primary_router_enabled(self.config, await self.build_event(dispatcher, event))
 
     def _ensure_execution(self, dispatcher):
         if self.planner is None:
@@ -321,7 +322,7 @@ class AgentRuntime:
         event = dict(event or {})
         event.setdefault("sender", {})
         event["sender"]["role"] = role or event["sender"].get("role") or "owner"
-        agent_event = self.build_event(event)
+        agent_event = await self.build_event(dispatcher, event)
         # 人工确认过的计划获得 confirmed 标记，高风险群管工具只认这个标记
         # （或最高主人身份），模型自己编不出。
         agent_event = replace(
@@ -344,10 +345,12 @@ class AgentRuntime:
     async def execute_background_task(self, dispatcher, task):
         """Execute one owner-private queued task and verify its result."""
         owner_id = int(task.get("owner_id", 0))
+        identity = await resolve_identity(
+            dispatcher, {"message_type": "private", "user_id": owner_id})
         event = AgentEvent(
             event_id="task:" + str(task.get("id", "")),
             scope=resolve_scope(self.config, {"message_type": "private", "user_id": owner_id}),
-            identity=resolve_identity(self.config, {"message_type": "private", "user_id": owner_id}),
+            identity=identity,
             text=str(task.get("goal", "")),
             raw_message=str(task.get("goal", "")),
             message_type="private",
@@ -371,7 +374,7 @@ class AgentRuntime:
             "tool_results": results,
         }
     async def handle_event(self, dispatcher, event, *, explicit=False):
-        agent_event, decision = self.observe(event, explicit=explicit)
+        agent_event, decision = await self.observe(dispatcher, event, explicit=explicit)
         if not primary_router_enabled(self.config, agent_event):
             return False
         if not decision.should_reply or not self._group_agent_enabled(agent_event):

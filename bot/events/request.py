@@ -264,7 +264,7 @@ async def handle_request(dispatcher, event):
     request_log("Request event type=%s subtype=%s group=%s user=%s flag=%s comment=%s",
                 req_type, sub_type, group_id, user_id, _short_flag(flag), safe_comment)
 
-    if req_type == "group" and group_id and is_blacklisted(group_id, user_id):
+    if req_type == "group" and group_id and await is_blacklisted(group_id, user_id):
         reason = "黑名单用户"
         await dispatcher.client.set_group_add_request(flag, sub_type, False, reason)
         log.info("Rejected blacklisted group request: g=%s u=%s", group_id, user_id)
@@ -295,7 +295,7 @@ async def handle_request(dispatcher, event):
         runtime = getattr(dispatcher, "agent_runtime", None)
         if agent_settings.get("observation_enabled", False) and runtime is not None:
             try:
-                runtime.observe({
+                await runtime.observe(dispatcher, {
                     "post_type": "request",
                     "user_id": user_id,
                     "group_id": group_id,

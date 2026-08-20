@@ -187,7 +187,7 @@ async def cmd_allban(d, group_id, user_id, args, role, sender_card, message):
 async def cmd_badword(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
         return
-    cfg = _load()
+    cfg = await asyncio.to_thread(_load)
     parts = args.strip().split(maxsplit=1)
     action = parts[0].lower() if parts else "list"
     word = parts[1] if len(parts) > 1 else ""
@@ -199,27 +199,32 @@ async def cmd_badword(d, group_id, user_id, args, role, sender_card, message):
         "enabled": True, "auto_delete": True,
         "warn_msg": "@{user} 请注意文明发言！", "words": [],
     })
+    # 群条目可能已被 /欢迎语 等命令以 bad_words={} 预建，补齐缺失子键避免 KeyError
+    bw.setdefault("enabled", True)
+    bw.setdefault("auto_delete", True)
+    bw.setdefault("warn_msg", "@{user} 请注意文明发言！")
+    bw.setdefault("words", [])
     if action == "add" and word:
         if word not in bw["words"]:
             bw["words"].append(word)
-            _commit(d, cfg)
+            await asyncio.to_thread(_commit, d, cfg)
             await d._reply(group_id, user_id, "违禁词加好了：" + word)
         else:
             await d._reply(group_id, user_id, "该词已存在")
     elif action == "del" and word:
         if word in bw["words"]:
             bw["words"].remove(word)
-            _commit(d, cfg)
+            await asyncio.to_thread(_commit, d, cfg)
             await d._reply(group_id, user_id, "违禁词删掉了：" + word)
         else:
             await d._reply(group_id, user_id, "该词不存在")
     elif action == "on":
         bw["enabled"] = True
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "违禁词过滤已开启")
     elif action == "off":
         bw["enabled"] = False
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "违禁词过滤已关闭")
     else:
         word_list = ", ".join(bw["words"]) if bw["words"] else "(空)"

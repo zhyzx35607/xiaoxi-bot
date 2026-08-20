@@ -510,13 +510,13 @@ async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
         else:
             key = "auto_punish"
             name = "自动处罚"
-        cfg = _load()
+        cfg = await asyncio.to_thread(_load)
         if group_id:
             g = cfg.setdefault("groups", {}).setdefault(str(group_id), {})
             g.setdefault("security", {})[key] = enabled
         else:
             cfg.setdefault("security", {})[key] = enabled
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "{}已{}".format(name, "开启" if enabled else "关闭"))
         return
     if len(parts) >= 2 and parts[0] in ("ban", "禁言"):
@@ -525,13 +525,13 @@ async def cmd_security(d, group_id, user_id, args, role, sender_card, message):
         except Exception:
             await d._reply(group_id, user_id, "禁言秒数要写数字，比如 /安全 ban 600")
             return
-        cfg = _load()
+        cfg = await asyncio.to_thread(_load)
         if group_id:
             g = cfg.setdefault("groups", {}).setdefault(str(group_id), {})
             g.setdefault("security", {})["ban_seconds"] = seconds
         else:
             cfg.setdefault("security", {})["ban_seconds"] = seconds
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "安全禁言秒数已设为 " + str(seconds))
         return
     await d._reply(group_id, user_id, "用法：/安全 status | /安全 log | /安全 url on/off | /安全 gray on/off | /安全 punish on/off | /安全 ban 秒数")
