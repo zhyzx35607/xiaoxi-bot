@@ -1,12 +1,15 @@
 version: 2
 updates:
+  # 版本更新 PR 已停用：Dependabot 作为作者合并后会出现在贡献者列表里。
+  # 安全更新不受影响（Dependabot security updates 是独立功能）。
+  # 需要恢复时把 open-pull-requests-limit 改回 5 即可。
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
