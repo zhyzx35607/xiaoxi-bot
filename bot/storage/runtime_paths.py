@@ -23,11 +23,16 @@ def _prepare_private_directory(path, mode=0o700):
 
 def _ensure_parent_traversable(path, mode=0o751):
     """Grant traverse-only (o+x) on the parent so the separate napcat user can
-    reach shared media temp files without being able to list the parent."""
+    reach shared media temp files without being able to list the parent.
+
+    Keep the owner bits, set group/other exactly: parents=True mkdir creates
+    the parent with the umask default (0o755), and a pure bit-OR would leave
+    it world-listable.
+    """
     parent = path.parent
     try:
         current = parent.stat().st_mode & 0o777
-        parent.chmod(current | mode)
+        parent.chmod((current & 0o700) | (mode & 0o077))
     except OSError:
         pass
 
