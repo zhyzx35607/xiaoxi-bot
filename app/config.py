@@ -272,6 +272,21 @@ def migrate_config(config):
             sticker_mode[key] = value
             migrated = True
 
+    # LLM-driven engagement engine (see docs/engagement-engine.md). Budget
+    # keys are hard caps enforced in code; the model cannot override them.
+    engagement = config.setdefault("engagement", {})
+    for key, value in {
+        "enabled": True,
+        "judge_max_per_hour": 15,
+        "reply_max_per_day": 30,
+        "judge_every_messages": 8,
+        "judge_min_interval_seconds": 45,
+        "max_tokens": 180,
+    }.items():
+        if key not in engagement:
+            engagement[key] = value
+            migrated = True
+
         # Legacy migration: remove old chat-judge settings and Agnes chat config.
     if "natural_chat" in config:
         del config["natural_chat"]

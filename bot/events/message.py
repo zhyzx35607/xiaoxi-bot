@@ -580,8 +580,15 @@ class GroupMessageMixin:
             self._record_ai_outcome(group_id, bool(result))
             return
 
-        # Interjection candidate: cheap hard filter, then defer to delayed queue
-        if not self._is_trivial_for_interjection(text, message):
+        # Interjection: LLM-driven engagement engine decides whether/how to
+        # join; the legacy fixed-cooldown delayed queue stays as a fallback
+        # when engagement.enabled is false.
+        eng_cfg = self.config.get("engagement", {})
+        if not isinstance(eng_cfg, dict) or eng_cfg.get("enabled", True):
+            from ..services.engagement import on_group_message
+            await on_group_message(self, group_id, user_id, text, raw,
+                                   sender_card, message, message_id)
+        elif not self._is_trivial_for_interjection(text, message):
             runtime = self.config.get("runtime", {})
             last_interject = self._group_interject_ts.get(group_id, 0)
             cooldown = runtime.get("non_explicit_judge_cooldown", 240)
