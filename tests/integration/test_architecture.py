@@ -35,7 +35,8 @@ class ArchitectureRegressionTests(unittest.TestCase):
         budgets = {
             "main.py": 80,
             # ai/runtime and security/core grew slightly for injection
-            # screening of history/memory and punish-failure isolation.
+            # screening of history/memory, punish-failure isolation, and the
+            # bounded check_url_safely outage circuit breaker.
             "bot/ai/runtime.py": 850,
             "bot/commands/runtime.py": 100,
             "bot/dispatcher.py": 800,
@@ -43,7 +44,7 @@ class ArchitectureRegressionTests(unittest.TestCase):
             "bot/scheduler.py": 80,
             "bot/touchgal.py": 80,
             "bot/uapi.py": 80,
-            "bot/security/core.py": 275,
+            "bot/security/core.py": 330,
             "deploy/napcat-login-watchdog.py": 80,
         }
         for relative_path, limit in budgets.items():

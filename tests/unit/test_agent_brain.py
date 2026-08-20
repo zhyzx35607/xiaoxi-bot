@@ -1,5 +1,6 @@
 """Agent 统一大脑：显式呼叫全员可用、人设保持、帮助注入、回复命令前缀中和。"""
 
+import asyncio
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -73,6 +74,7 @@ def wired_runtime(config, planner):
 class ExplicitMemberRouterTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         permission_module._bot_role_cache.clear()
+        permission_module._member_role_cache.clear()
 
     async def test_explicit_member_message_reaches_planner(self):
         config = router_config()
@@ -116,7 +118,8 @@ class ExplicitMemberRouterTests(unittest.IsolatedAsyncioTestCase):
     def test_can_autosend_allows_explicit_member(self):
         config = router_config()
         runtime = AgentRuntime(config, tempfile.mkdtemp())
-        event = runtime.build_event(member_event())
+        dispatcher = type("D", (), {"config": config, "client": FakeClient()})()
+        event = asyncio.run(runtime.build_event(dispatcher, member_event()))
         allowed, reason = can_autosend(
             config, event, {"needs_confirmation": False}, explicit=True)
         self.assertTrue(allowed)
@@ -145,7 +148,8 @@ class PlannerPersonaTests(unittest.IsolatedAsyncioTestCase):
     async def test_planner_prompt_contains_persona(self):
         config = {"bot_owner": 999, "bot_qq": 888}
         runtime = AgentRuntime(config, tempfile.mkdtemp())
-        event = runtime.build_event(member_event())
+        dispatcher = type("D", (), {"config": config, "client": FakeClient()})()
+        event = await runtime.build_event(dispatcher, member_event())
         prompt = await self.plan_with_capture(
             event, '{"intent":"chat","reply":"在","tools":[],'
                    '"needs_confirmation":false}')
@@ -158,7 +162,8 @@ class PlannerPersonaTests(unittest.IsolatedAsyncioTestCase):
     async def test_planner_prompt_scales_persona_for_super_owner(self):
         config = {"bot_owner": 999, "bot_qq": 888}
         runtime = AgentRuntime(config, tempfile.mkdtemp())
-        event = runtime.build_event({
+        dispatcher = type("D", (), {"config": config, "client": FakeClient()})()
+        event = await runtime.build_event(dispatcher, {
             "user_id": 999, "message_type": "private", "raw_message": "在吗"})
         prompt = await self.plan_with_capture(
             event, '{"intent":"chat","reply":"在","tools":[],'
@@ -171,6 +176,7 @@ class PlannerPersonaTests(unittest.IsolatedAsyncioTestCase):
 class PlanningContextHelpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         permission_module._bot_role_cache.clear()
+        permission_module._member_role_cache.clear()
 
     async def test_help_digest_injected_for_capability_question(self):
         config = {"bot_owner": 999, "bot_qq": 888,
@@ -181,7 +187,7 @@ class PlanningContextHelpTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = type("D", (), {
             "config": config, "client": client, "agent_runtime": runtime,
             "commands": {"天气": {"help": "查天气 /天气 城市"}}})()
-        event = runtime.build_event({
+        event = await runtime.build_event(dispatcher, {
             "user_id": 201, "group_id": 300, "message_type": "group",
             "raw_message": "小汐你会什么功能", "sender": {"role": "member"}})
         context = await runtime._planning_context(dispatcher, event)
@@ -197,7 +203,7 @@ class PlanningContextHelpTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = type("D", (), {
             "config": config, "client": client, "agent_runtime": runtime,
             "commands": {"天气": {"help": "查天气 /天气 城市"}}})()
-        event = runtime.build_event(member_event())
+        event = await runtime.build_event(dispatcher, member_event())
         context = await runtime._planning_context(dispatcher, event)
         self.assertNotIn("小汐功能参考", context)
 
@@ -205,6 +211,7 @@ class PlanningContextHelpTests(unittest.IsolatedAsyncioTestCase):
 class WorkerReplyNeutralizeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         permission_module._bot_role_cache.clear()
+        permission_module._member_role_cache.clear()
 
     async def test_group_review_reply_command_prefix_neutralized(self):
         from bot.agent.worker_service import AgentWorker

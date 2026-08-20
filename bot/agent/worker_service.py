@@ -361,7 +361,7 @@ class AgentWorker:
             "worker/owner_goal_review.json",
             {"status": "running", "run_id": run_id, "started_at": now, "goal_id": goal.get("id")},
         )
-        event = self.dispatcher.agent_runtime.build_event({
+        event = await self.dispatcher.agent_runtime.build_event(self.dispatcher, {
             "user_id": owner_id,
             "message_type": "private",
             "raw_message": "\u8bf7\u4e3b\u52a8\u590d\u76d8\u5e76\u63a8\u8fdb\u8fd9\u4e2a\u957f\u671f\u76ee\u6807\uff1a{}".format(
@@ -487,7 +487,7 @@ class AgentWorker:
             else:
                 raw_message = "请根据本群画像、目标、计划和最近事件，主动提出一个具体、有用且不过度打扰的推进。"
                 task_context = "这是群域主动复盘。不得泄露其他群或最高主人私域；没有明确价值就保持安静。"
-            event = runtime.build_event({
+            event = await runtime.build_event(self.dispatcher, {
                 "user_id": owner_id,
                 "group_id": int(group_id),
                 "message_type": "group",

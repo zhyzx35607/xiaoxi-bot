@@ -213,7 +213,7 @@ class OwnerReplyTests(unittest.IsolatedAsyncioTestCase):
             "message": [{"type": "text", "data": {"text": "xiaoxi call me master"}}],
             "sender": {"role": "member", "nickname": "owner"},
         }
-        with patch("bot.events.message.is_blacklisted", return_value=False), \
+        with patch("bot.events.message.is_blacklisted", new=AsyncMock(return_value=False)), \
              patch("bot.notice_handler.check_bad_words", new=AsyncMock(return_value=False)):
             await dispatcher._handle_message(event)
         dispatcher._do_ai_reply.assert_awaited_once()

@@ -298,6 +298,8 @@ class AgentConfirmationTests(unittest.IsolatedAsyncioTestCase):
             client = type("Client", (), {})()
             client.session = None
             client.send_group_msg_with_at = AsyncMock()
+            client.get_group_member_info = AsyncMock(
+                return_value={"status": "ok", "data": {"role": "owner"}})
             dispatcher = type("D", (), {"config": config, "client": client})()
             event = {
                 "post_type": "message", "message_type": "group", "group_id": 300,
@@ -354,9 +356,9 @@ class AgentConfirmationTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as root:
             runtime = AgentRuntime({"bot_owner": OWNER}, root)
-            event = runtime.build_event(
-                {"user_id": OWNER, "message_type": "private", "raw_message": "x"})
-            dispatcher = type("D", (), {"config": {}, "client": object()})()
+            dispatcher = type("D", (), {"config": runtime.config, "client": object()})()
+            event = await runtime.build_event(
+                dispatcher, {"user_id": OWNER, "message_type": "private", "raw_message": "x"})
             result = await AgentToolGateway(dispatcher).execute(
                 event, "set_group_ban", group_id=1, user_id=2, duration=60)
         self.assertFalse(result["ok"])

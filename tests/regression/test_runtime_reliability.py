@@ -1067,7 +1067,7 @@ class RepeatCheckLockTests(unittest.IsolatedAsyncioTestCase):
                 return {"status": "ok"}
 
         dispatcher.client = Client()
-        with patch("bot.dispatcher.is_blacklisted", return_value=False):
+        with patch("bot.dispatcher.is_blacklisted", new=AsyncMock(return_value=False)):
             self.assertFalse(await dispatcher._check_repeat(1, "复读", 100))
             repeat_task = asyncio.create_task(dispatcher._check_repeat(1, "复读", 200))
             await asyncio.wait_for(send_started.wait(), timeout=1)

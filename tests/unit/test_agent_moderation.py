@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -46,6 +47,7 @@ class FakeClient:
 
 
 def make_runtime(config=None):
+    permission_module._member_role_cache.clear()
     base = {"bot_owner": 999, "bot_qq": 888}
     base.update(config or {})
     return AgentRuntime(base, tempfile.mkdtemp())
@@ -59,13 +61,13 @@ def make_dispatcher(runtime, client):
     })()
 
 
-def group_event(runtime, **overrides):
+async def group_event(dispatcher, runtime, **overrides):
     payload = {
         "user_id": 101, "group_id": 300, "message_type": "group",
         "raw_message": "x", "sender": {"role": "owner"},
     }
     payload.update(overrides)
-    return runtime.build_event(payload)
+    return await runtime.build_event(dispatcher, payload)
 
 
 MODERATION_CONFIG = {
@@ -86,7 +88,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin", 101: "owner"})
         dispatcher = make_dispatcher(runtime, client)
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime), "delete_msg", message_id=1)
+            runtime, dispatcher, await group_event(dispatcher, runtime), "delete_msg", message_id=1)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "moderation_disabled")
         self.assertEqual(client.calls, [])
@@ -96,7 +98,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "member", 101: "owner"})
         dispatcher = make_dispatcher(runtime, client)
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime), "delete_msg", message_id=1)
+            runtime, dispatcher, await group_event(dispatcher, runtime), "delete_msg", message_id=1)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "bot_not_group_admin")
 
@@ -107,7 +109,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         dispatcher = make_dispatcher(runtime, BrokenClient())
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime), "delete_msg", message_id=1)
+            runtime, dispatcher, await group_event(dispatcher, runtime), "delete_msg", message_id=1)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "bot_not_group_admin")
 
@@ -116,7 +118,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin", 101: "owner"})
         dispatcher = make_dispatcher(runtime, client)
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime),
+            runtime, dispatcher, await group_event(dispatcher, runtime),
             "set_group_ban", user_id=999, duration=60)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "moderation_target_protected")
@@ -126,7 +128,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin", 101: "owner", 202: "owner"})
         dispatcher = make_dispatcher(runtime, client)
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime),
+            runtime, dispatcher, await group_event(dispatcher, runtime),
             "set_group_ban", user_id=202, duration=60)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "moderation_target_protected")
@@ -139,7 +141,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(config)
         client = FakeClient(roles={888: "admin", 101: "owner", 201: "member"})
         dispatcher = make_dispatcher(runtime, client)
-        event = group_event(runtime)
+        event = await group_event(dispatcher, runtime)
         first = await self.execute(
             runtime, dispatcher, event, "set_group_ban", user_id=201, duration=60)
         second = await self.execute(
@@ -154,7 +156,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin", 101: "owner", 201: "member"})
         dispatcher = make_dispatcher(runtime, client)
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime), "set_group_kick", user_id=201)
+            runtime, dispatcher, await group_event(dispatcher, runtime), "set_group_kick", user_id=201)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "moderation_requires_confirmation")
         self.assertEqual(client.calls, [])
@@ -163,7 +165,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin", 101: "owner", 201: "member"})
         dispatcher = make_dispatcher(runtime, client)
-        event = replace(group_event(runtime), metadata={"confirmed": True})
+        event = replace(await group_event(dispatcher, runtime), metadata={"confirmed": True})
         result = await self.execute(
             runtime, dispatcher, event, "set_group_kick", user_id=201,
             reject_add_request=True, reason="广告")
@@ -178,7 +180,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin", 201: "member"})
         dispatcher = make_dispatcher(runtime, client)
-        event = runtime.build_event({
+        event = await runtime.build_event(dispatcher, {
             "user_id": 999, "message_type": "private", "raw_message": "x"})
         result = await self.execute(
             runtime, dispatcher, event, "set_group_kick", group_id=300, user_id=201)
@@ -191,7 +193,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "owner", 201: "member"})
         dispatcher = make_dispatcher(runtime, client)
         event = replace(
-            group_event(runtime, user_id=999),
+            await group_event(dispatcher, runtime, user_id=999),
             metadata={"auto_patrol": True})
         result = await self.execute(
             runtime, dispatcher, event, "set_group_kick", user_id=201)
@@ -204,7 +206,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "owner", 201: "member"})
         dispatcher = make_dispatcher(runtime, client)
         event = replace(
-            group_event(runtime, user_id=999),
+            await group_event(dispatcher, runtime, user_id=999),
             metadata={"auto_patrol": True})
         result = await self.execute(
             runtime, dispatcher, event, "set_group_ban", user_id=201, duration=120)
@@ -216,7 +218,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin", 101: "owner"})
         dispatcher = make_dispatcher(runtime, client)
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime),
+            runtime, dispatcher, await group_event(dispatcher, runtime),
             "delete_msg", message_id=77, reason="广告")
         self.assertTrue(result["ok"])
         self.assertEqual(client.calls, [("delete_msg", 77)])
@@ -231,7 +233,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin", 101: "member"})
         dispatcher = make_dispatcher(runtime, client)
-        event = group_event(runtime, sender={"role": "member"})
+        event = await group_event(dispatcher, runtime, sender={"role": "member"})
         result = await self.execute(
             runtime, dispatcher, event, "delete_msg", message_id=77)
         self.assertFalse(result["ok"])
@@ -247,7 +249,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         dispatcher = make_dispatcher(runtime, BrokenClient())
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime), "delete_msg", message_id=77)
+            runtime, dispatcher, await group_event(dispatcher, runtime), "delete_msg", message_id=77)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "moderation_actor_not_admin")
         self.assertEqual(dispatcher.client.calls, [])
@@ -256,7 +258,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin", 101: "admin"})
         dispatcher = make_dispatcher(runtime, client)
-        event = group_event(runtime, sender={"role": "admin"})
+        event = await group_event(dispatcher, runtime, sender={"role": "admin"})
         result = await self.execute(
             runtime, dispatcher, event, "delete_msg", message_id=77)
         self.assertTrue(result["ok"])
@@ -267,7 +269,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin", 101: "owner", 201: "member"})
         dispatcher = make_dispatcher(runtime, client)
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime),
+            runtime, dispatcher, await group_event(dispatcher, runtime),
             "set_group_ban", user_id=201, duration=999999)
         self.assertTrue(result["ok"])
         self.assertEqual(client.calls, [("set_group_ban", 300, 201, 600)])
@@ -276,7 +278,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin", 101: "owner"})
         dispatcher = make_dispatcher(runtime, client)
-        event = group_event(runtime)
+        event = await group_event(dispatcher, runtime)
         bad_msg = await self.execute(
             runtime, dispatcher, event, "delete_msg", message_id="abc")
         bad_user = await self.execute(
@@ -295,7 +297,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin", 101: "owner", 201: "member"})
         dispatcher = make_dispatcher(runtime, client)
         result = await self.execute(
-            runtime, dispatcher, group_event(runtime),
+            runtime, dispatcher, await group_event(dispatcher, runtime),
             "set_group_ban", group_id=999, user_id=201, duration=60)
         self.assertTrue(result["ok"])
         self.assertEqual(client.calls, [("set_group_ban", 300, 201, 60)])
@@ -304,7 +306,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin"})
         dispatcher = make_dispatcher(runtime, client)
-        event = runtime.build_event({
+        event = await runtime.build_event(dispatcher, {
             "user_id": 101, "message_type": "private", "raw_message": "x"})
         result = await self.execute(
             runtime, dispatcher, event, "set_group_ban",
@@ -316,7 +318,7 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         runtime = make_runtime(MODERATION_CONFIG)
         client = FakeClient(roles={888: "admin"})
         dispatcher = make_dispatcher(runtime, client)
-        event = runtime.build_event({
+        event = await runtime.build_event(dispatcher, {
             "user_id": 999, "message_type": "private", "raw_message": "x"})
         result = await self.execute(
             runtime, dispatcher, event, "delete_msg", message_id=1)
@@ -329,14 +331,14 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin", 101: "owner"})
         dispatcher = make_dispatcher(runtime, client)
         denied = await self.execute(
-            runtime, dispatcher, group_event(runtime),
+            runtime, dispatcher, await group_event(dispatcher, runtime),
             "set_group_add_request", flag="flag123", approve=False, reason="可疑")
         self.assertFalse(denied["ok"])
         self.assertEqual(denied["error"], "moderation_requires_confirmation")
         self.assertEqual(client.calls, [])
         confirmed = await self.execute(
             runtime, dispatcher,
-            replace(group_event(runtime), metadata={"confirmed": True}),
+            replace(await group_event(dispatcher, runtime), metadata={"confirmed": True}),
             "set_group_add_request", flag="flag123", approve=False, reason="可疑")
         self.assertTrue(confirmed["ok"])
         self.assertEqual(
@@ -344,18 +346,20 @@ class ModerationToolTests(unittest.IsolatedAsyncioTestCase):
 
     def test_catalog_gates_moderation_tools(self):
         runtime = make_runtime(MODERATION_CONFIG)
-        dispatcher = make_dispatcher(runtime, FakeClient())
+        dispatcher = make_dispatcher(runtime, FakeClient(roles={101: "owner"}))
         gateway = AgentToolGateway(dispatcher)
         plain = gateway.catalog()
         self.assertNotIn("set_group_kick", plain)
-        with_event = gateway.catalog(group_event(runtime))
+        with_event = gateway.catalog(asyncio.run(group_event(dispatcher, runtime)))
         self.assertIn("delete_msg", with_event)
         self.assertIn("set_group_kick", with_event)
         self.assertIn("确认", with_event["set_group_kick"])
         self.assertFalse(gateway.is_read_only("set_group_kick"))
         disabled_runtime = make_runtime({"groups": {"300": {"agent": {}}}})
-        disabled_gateway = AgentToolGateway(make_dispatcher(disabled_runtime, FakeClient()))
-        self.assertNotIn("delete_msg", disabled_gateway.catalog(group_event(disabled_runtime)))
+        disabled_dispatcher = make_dispatcher(disabled_runtime, FakeClient(roles={101: "owner"}))
+        disabled_gateway = AgentToolGateway(disabled_dispatcher)
+        self.assertNotIn("delete_msg", disabled_gateway.catalog(
+            asyncio.run(group_event(disabled_dispatcher, disabled_runtime))))
 
 
 class ExecutorToolFailureTests(unittest.IsolatedAsyncioTestCase):
@@ -441,7 +445,7 @@ class ModerationConfirmationFlowTests(unittest.IsolatedAsyncioTestCase):
             "tools": [{"name": "set_group_kick", "arguments": {"user_id": 201}}],
             "task": None,
         }
-        event = runtime.build_event({
+        event = await runtime.build_event(dispatcher, {
             "user_id": 101, "group_id": 300, "message_type": "group",
             "raw_message": "踢人", "sender": {"role": "owner"}})
         await runtime.run_autonomous(dispatcher, event, initial_plan=plan)
@@ -494,8 +498,8 @@ class ModerationConfirmationFlowTests(unittest.IsolatedAsyncioTestCase):
         # 重规划轮次不经过 handle_event 的确认门控：群主/管理触发时，
         # 重规划补出的 delete_msg 等高风险工具必须被剔除。
         runtime, executed = self._replan_runtime()
-        dispatcher = make_dispatcher(runtime, FakeClient())
-        event = group_event(runtime)  # 群主（非最高主人）触发
+        dispatcher = make_dispatcher(runtime, FakeClient(roles={101: "owner"}))
+        event = await group_event(dispatcher, runtime)  # 群主（非最高主人）触发
         plan, _results = await runtime.run_autonomous(dispatcher, event)
         self.assertEqual(plan["reply"], "完成")
         self.assertNotIn("delete_msg", executed)
@@ -505,7 +509,7 @@ class ModerationConfirmationFlowTests(unittest.IsolatedAsyncioTestCase):
         # 最高主人私域本来豁免确认流，重规划工具不应被过滤
         runtime, executed = self._replan_runtime()
         dispatcher = make_dispatcher(runtime, FakeClient())
-        event = runtime.build_event({
+        event = await runtime.build_event(dispatcher, {
             "user_id": 999, "message_type": "private", "raw_message": "x"})
         plan, _results = await runtime.run_autonomous(dispatcher, event)
         self.assertEqual(plan["reply"], "完成")
@@ -522,7 +526,7 @@ class ModerationPlanningContextTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "admin"})
         dispatcher = make_dispatcher(runtime, client)
         runtime.tools = AgentToolGateway(dispatcher)
-        event = group_event(runtime)
+        event = await group_event(dispatcher, runtime)
         context = await runtime._planning_context(dispatcher, event)
         self.assertIn("小汐在本群的身份：管理", context)
         self.assertIn("主动维护秩序", context)
@@ -532,7 +536,7 @@ class ModerationPlanningContextTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient(roles={888: "member"})
         dispatcher = make_dispatcher(runtime, client)
         runtime.tools = AgentToolGateway(dispatcher)
-        context = await runtime._planning_context(dispatcher, group_event(runtime))
+        context = await runtime._planning_context(dispatcher, await group_event(dispatcher, runtime))
         self.assertIn("小汐在本群的身份：成员", context)
         self.assertIn("只观察不处置", context)
 
@@ -651,7 +655,7 @@ class NoticeObservationTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(request_module, "_PENDING_PATH",
                               str(Path(root) / "pending.json")), \
                  patch.object(request_module, "is_blacklisted",
-                              lambda group_id, user_id: False):
+                              new=AsyncMock(return_value=False)):
                 await request_module.handle_request(dispatcher, event)
         events = runtime.store.read("events/group_300.json", [])
         self.assertEqual(len(events), 1)
@@ -774,14 +778,15 @@ class AgentBotHelpTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_execute_filters_by_identity_level(self):
         runtime = make_runtime()
-        gateway = AgentToolGateway(self._dispatcher(runtime))
-        member_event = runtime.build_event({
+        dispatcher = self._dispatcher(runtime)
+        gateway = AgentToolGateway(dispatcher)
+        member_event = await runtime.build_event(dispatcher, {
             "user_id": 201, "group_id": 300, "message_type": "group",
             "raw_message": "x", "sender": {"role": "member"}})
         denied = await gateway.execute(
             member_event, "get_bot_help", command_or_category="master")
         self.assertFalse(denied["ok"])
-        owner_event = runtime.build_event({
+        owner_event = await runtime.build_event(dispatcher, {
             "user_id": 999, "message_type": "private", "raw_message": "x"})
         allowed = await gateway.execute(
             owner_event, "get_bot_help", command_or_category="master")

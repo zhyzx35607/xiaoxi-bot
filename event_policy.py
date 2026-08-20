@@ -6,7 +6,11 @@ _LAST_EVENT = {}
 
 
 def automation_enabled(config, name, default=True):
-    return bool(config.get("automation", {}).get(name, default))
+    automation = config.get("automation", {})
+    # Global master switch: automation.enabled=false disables every named switch.
+    if not automation.get("enabled", True):
+        return False
+    return bool(automation.get(name, default))
 
 
 def allow_event(name, key, cooldown):

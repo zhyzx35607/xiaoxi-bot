@@ -73,9 +73,10 @@ class SecurityCheckFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(allowed)
         self.assertEqual(reason, "user_role_unverified")
 
-    async def test_url_checker_exception_stops_bot_processing_without_punishment(self):
-        from bot.security.core import check_message_urls
+    async def test_url_checker_exception_degrades_without_blocking_or_punishment(self):
+        from bot.security import core
 
+        core._url_check_reset()
         client = type("Client", (), {
             "check_url_safely": AsyncMock(side_effect=RuntimeError("offline")),
             "delete_msg": AsyncMock(),
@@ -86,14 +87,18 @@ class SecurityCheckFailureTests(unittest.IsolatedAsyncioTestCase):
             "groups": {"100": {}}, "group_defaults": {},
         }, client)
 
-        with patch("bot.security.core.record_security_event") as record:
-            blocked = await check_message_urls(
-                dispatcher, 100, 9, "see https://example.invalid", 55)
+        try:
+            with patch("bot.security.core.record_security_event") as record:
+                blocked = await core.check_message_urls(
+                    dispatcher, 100, 9, "see https://example.invalid", 55)
+        finally:
+            core._url_check_reset()
 
-        self.assertTrue(blocked)
+        self.assertFalse(blocked)
         client.delete_msg.assert_not_awaited()
         client.set_group_ban.assert_not_awaited()
         self.assertEqual(record.call_args.args[1], "url_check_failed")
+        self.assertEqual(record.call_args.args[-1], "check_skipped")
 
     def test_unverified_url_results_are_not_treated_as_safe(self):
         from bot.security.core import is_url_check_risky
@@ -107,6 +112,109 @@ class SecurityCheckFailureTests(unittest.IsolatedAsyncioTestCase):
 
         text = " ".join("https://example{}.invalid/x".format(i) for i in range(8))
         self.assertEqual(len(extract_urls(text)), 8)
+
+
+class UrlCheckCircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
+    """check_url_safely 故障按可用性降级；持续故障触发有界断路。"""
+
+    def setUp(self):
+        from bot.security import core
+        self.core = core
+        core._url_check_reset()
+
+    def tearDown(self):
+        self.core._url_check_reset()
+
+    def _dispatcher(self, check_url_safely):
+        client = type("Client", (), {
+            "check_url_safely": check_url_safely,
+            "delete_msg": AsyncMock(),
+            "set_group_ban": AsyncMock(),
+        })()
+        return _Dispatcher({
+            "bot_owner": 1, "bot_qq": 2, "security": {},
+            "groups": {"100": {}}, "group_defaults": {},
+        }, client)
+
+    async def test_api_failure_does_not_block_plain_or_command_messages(self):
+        check = AsyncMock(side_effect=RuntimeError("offline"))
+        dispatcher = self._dispatcher(check)
+        with patch("bot.security.core.record_security_event"):
+            for text in ("看看 https://example.invalid", "/热榜 https://example.invalid"):
+                blocked = await self.core.check_message_urls(
+                    dispatcher, 100, 9, text, 55)
+                self.assertFalse(blocked)
+        self.assertEqual(check.await_count, 2)
+
+    async def test_unparseable_result_degrades_instead_of_blocking(self):
+        check = AsyncMock(return_value={"status": "failed"})
+        dispatcher = self._dispatcher(check)
+        with patch("bot.security.core.record_security_event"):
+            blocked = await self.core.check_message_urls(
+                dispatcher, 100, 9, "see https://example.invalid", 55)
+        self.assertFalse(blocked)
+        self.assertEqual(self.core._URL_CHECK_STATE["failures"], 1)
+
+    async def test_consecutive_failures_open_circuit_and_skip_checks(self):
+        check = AsyncMock(side_effect=RuntimeError("offline"))
+        dispatcher = self._dispatcher(check)
+        with patch("bot.security.core.record_security_event"):
+            for _ in range(self.core._URL_CHECK_FAILURE_THRESHOLD):
+                await self.core.check_message_urls(
+                    dispatcher, 100, 9, "see https://example.invalid", 55)
+            self.assertGreater(self.core._URL_CHECK_STATE["open_until"], 0.0)
+            with self.assertLogs("qqbot", level="WARNING") as captured:
+                blocked = await self.core.check_message_urls(
+                    dispatcher, 100, 9, "/热榜 https://example.invalid", 56)
+        self.assertFalse(blocked)
+        # 断路窗口内不再调用 API
+        self.assertEqual(check.await_count, self.core._URL_CHECK_FAILURE_THRESHOLD)
+        self.assertTrue(any("circuit open" in line for line in captured.output))
+
+    async def test_circuit_retries_once_after_cooldown_window(self):
+        check = AsyncMock(side_effect=RuntimeError("offline"))
+        dispatcher = self._dispatcher(check)
+        with patch("bot.security.core.record_security_event"):
+            for _ in range(self.core._URL_CHECK_FAILURE_THRESHOLD):
+                await self.core.check_message_urls(
+                    dispatcher, 100, 9, "see https://example.invalid", 55)
+            # 模拟冷却窗口已过：下一次调用重试一次，失败后重新断路
+            import time as _time
+            self.core._URL_CHECK_STATE["open_until"] = _time.monotonic() - 1
+            blocked = await self.core.check_message_urls(
+                dispatcher, 100, 9, "see https://example.invalid", 56)
+            self.assertFalse(blocked)
+            self.assertEqual(check.await_count,
+                             self.core._URL_CHECK_FAILURE_THRESHOLD + 1)
+            self.assertGreater(self.core._URL_CHECK_STATE["open_until"],
+                               _time.monotonic())
+
+    async def test_successful_check_recovers_circuit(self):
+        check = AsyncMock(side_effect=[
+            RuntimeError("offline"),
+            {"status": "ok", "data": {"level": 1}},
+        ])
+        dispatcher = self._dispatcher(check)
+        with patch("bot.security.core.record_security_event"):
+            await self.core.check_message_urls(
+                dispatcher, 100, 9, "see https://example.invalid", 55)
+            blocked = await self.core.check_message_urls(
+                dispatcher, 100, 9, "see https://example.invalid", 56)
+        self.assertFalse(blocked)
+        self.assertEqual(self.core._URL_CHECK_STATE["failures"], 0)
+
+    async def test_confirmed_risky_url_still_blocked_even_for_commands(self):
+        check = AsyncMock(return_value={"status": "ok", "data": {"level": 3}})
+        dispatcher = self._dispatcher(check)
+        with patch("bot.security.core.record_security_event"), \
+                patch("bot.security.core.punish_security_violation",
+                      new=AsyncMock(return_value="deleted,banned:600s")) as punish:
+            blocked = await self.core.check_message_urls(
+                dispatcher, 100, 9, "/热榜 https://evil.invalid", 55)
+        self.assertTrue(blocked)
+        punish.assert_awaited_once()
+        # 确认危险不消耗故障计数
+        self.assertEqual(self.core._URL_CHECK_STATE["failures"], 0)
 
 
 class GroupScopeTests(unittest.IsolatedAsyncioTestCase):
@@ -400,7 +508,7 @@ class RepeatCommandEchoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_command_like_text_is_never_repeated(self):
         dispatcher = self._dispatcher()
-        with patch("bot.dispatcher.is_blacklisted", return_value=False):
+        with patch("bot.dispatcher.is_blacklisted", new=AsyncMock(return_value=False)):
             for user in (100, 200, 300):
                 self.assertFalse(
                     await dispatcher._check_repeat(1, "/master add 123", user))
@@ -410,7 +518,7 @@ class RepeatCommandEchoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_leading_whitespace_command_is_skipped(self):
         dispatcher = self._dispatcher()
-        with patch("bot.dispatcher.is_blacklisted", return_value=False):
+        with patch("bot.dispatcher.is_blacklisted", new=AsyncMock(return_value=False)):
             for user in (100, 200, 300):
                 self.assertFalse(
                     await dispatcher._check_repeat(1, "  /ban 10001 43200", user))
@@ -418,7 +526,7 @@ class RepeatCommandEchoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_plain_text_repeat_behavior_unchanged(self):
         dispatcher = self._dispatcher()
-        with patch("bot.dispatcher.is_blacklisted", return_value=False):
+        with patch("bot.dispatcher.is_blacklisted", new=AsyncMock(return_value=False)):
             self.assertFalse(await dispatcher._check_repeat(1, "今天天气不错", 100))
             self.assertTrue(await dispatcher._check_repeat(1, "今天天气不错", 200))
         self.assertEqual(dispatcher.client.sent, [(1, "今天天气不错")])

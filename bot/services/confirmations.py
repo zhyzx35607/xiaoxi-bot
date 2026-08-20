@@ -17,6 +17,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 _PATH = os.path.join(_ROOT, "data", "pending_actions.json")
 _TTL = 60
 _LOCK = threading.RLock()
+# 作用于机器人账号本身而非某个群的动作：确认人必须是发起人本人，
+# 群内其他管理员无权代为确认。
+ACCOUNT_LEVEL_ACTIONS = frozenset({"delete_friend"})
 
 def _load_unlocked():
     try:
@@ -131,9 +134,12 @@ async def execute_confirmation(dispatcher, code, user_id, group_id, role):
         if level < LEVEL_ADMIN:
             _save_unlocked(data)
             return False, "需要管理员及以上身份确认"
-        # 发起人或任意管理员都可确认：管理身份本身就是闸门，只绑定发起人
-        # 会让普通成员发起的计划陷入无人能确认的死锁。
+        # 群级动作维持发起人或任意管理员可确认：管理身份本身就是闸门，
+        # 只绑定发起人会让普通成员发起的计划陷入无人能确认的死锁。
         action = item.get("action")
+        if action in ACCOUNT_LEVEL_ACTIONS and int(item.get("user_id", 0)) != int(user_id):
+            _save_unlocked(data)
+            return False, "这是账号级操作，只能由发起人本人确认"
         params = sanitize_persistent_value(item.get("params") or {})
         description = item.get("description")
         if action == "__clear_group_data__":

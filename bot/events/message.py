@@ -188,9 +188,9 @@ class GroupMessageMixin:
         # Passive observation is opt-in because it persists message text.
         agent_settings = self.config.get("agent", {})
         if (agent_settings.get("observation_enabled", False)
-                and not self.agent_runtime.primary_router_enabled(event)):
+                and not await self.agent_runtime.primary_router_enabled(self, event)):
             try:
-                self.agent_runtime.observe(event)
+                await self.agent_runtime.observe(self, event)
             except Exception:
                 log.exception("Agent observation failed")
         message = event.get("message", [])
@@ -327,7 +327,8 @@ class GroupMessageMixin:
                     return
 
             # Route to handler (skip for self-messages)
-            if not is_self_msg:                await self._handle_group_message(
+            if not is_self_msg:
+                await self._handle_group_message(
                     group_id, user_id, message, raw, sender, sender_role, sender_card, message_id
                 )
             else:
@@ -428,7 +429,7 @@ class GroupMessageMixin:
         )
 
         # === BLACKLIST GUARD: check before all interactive features ===
-        if not force_owner_reply and is_blacklisted(group_id, user_id):
+        if not force_owner_reply and await is_blacklisted(group_id, user_id):
             log.info("Blocked blacklisted user %s in group %s", user_id, group_id)
             return
 
@@ -526,7 +527,7 @@ class GroupMessageMixin:
         is_explicit_trigger = is_at_bot or is_name_mentioned or is_reply_to_bot
         text = re.sub(r"\[CQ:[^\]]+\]", "", raw or "").strip()
         # Hard filters applied to every message
-        if not force_owner_reply and is_blacklisted(group_id, user_id):
+        if not force_owner_reply and await is_blacklisted(group_id, user_id):
             return
         if not force_owner_reply and not self._check_global_rate_limit():
             if is_explicit_trigger:
@@ -715,7 +716,7 @@ class PrivateMessageMixin:
         """Handle private messages from bot owner: commands first, then AI chat."""
         # The highest owner must never be silently dropped by a stale blacklist entry.
         from ..guard import is_blacklisted
-        if user_id != self.config.get("bot_owner") and is_blacklisted(0, user_id):
+        if user_id != self.config.get("bot_owner") and await is_blacklisted(0, user_id):
             return
 
         prefix = self.config.get("command_prefix", "/")
@@ -921,7 +922,7 @@ class PrivateMessageMixin:
                     await self._reply(None, user_id, "这样用：/bl remove 群号 QQ [QQ2 ...]")
                     return
                 for uid in uids:
-                    remove_blacklist(gid, uid)
+                    await asyncio.to_thread(remove_blacklist, gid, uid)
                 glabel = await format_group_label(self, gid)
                 labels = []
                 for uid in uids:
@@ -1104,7 +1105,7 @@ class PrivateMessageMixin:
 
         # === Safety: blacklist ===
         from ..guard import is_blacklisted
-        if is_blacklisted(0, user_id):
+        if await is_blacklisted(0, user_id):
             log.debug("Private chat blocked by blacklist: user=%s", user_id)
             return
 

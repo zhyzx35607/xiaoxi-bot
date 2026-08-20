@@ -203,7 +203,7 @@ async def _deliver_reply(dispatcher, group_id, user_id, raw, sender_card,
     # Final deterministic gates right before the side effect.
     if not is_group_enabled(dispatcher, group_id):
         return
-    if is_blacklisted(group_id, user_id):
+    if await is_blacklisted(group_id, user_id):
         return
     from ..ai import handle_ai_chat, _schedule_state
     schedule_state, _ = _schedule_state()

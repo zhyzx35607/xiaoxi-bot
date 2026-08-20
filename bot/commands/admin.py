@@ -52,7 +52,7 @@ async def _toggle_group_feature(d, group_id, user_id, args, feature, label, cmd_
         await _toggle_groups_feature(d, user_id, args, feature, label, cmd_name)
         return
     arg = args.strip().lower()
-    cfg = _load()
+    cfg = await asyncio.to_thread(_load)
     groups = cfg.setdefault("groups", {})
     group_cfg = groups.setdefault(str(group_id), {"enabled": True, "masters": [],
                                                   "welcome_msg": {}, "bad_words": {},
@@ -65,7 +65,7 @@ async def _toggle_group_feature(d, group_id, user_id, args, feature, label, cmd_
                            label, "开启" if current else "关闭", cmd_name, cmd_name))
         return
     feats[feature] = (arg == "on")
-    _commit(d, cfg)
+    await asyncio.to_thread(_commit, d, cfg)
     await d._reply(group_id, user_id,
                    "本群{}已{}".format(label, "开启" if feats[feature] else "关闭"))
 
@@ -78,7 +78,7 @@ async def _toggle_groups_feature(d, user_id, args, feature, label, cmd_name):
     if action not in ("on", "off"):
         if len(tokens) == 1 and tokens[0].isdigit():
             # Single-group status query stays compatible: /cmd 群号
-            cfg = _load()
+            cfg = await asyncio.to_thread(_load)
             groups = cfg.get("groups", {})
             current = groups.get(tokens[0], {}).get("features", {}).get(feature, True)
             await d._reply(None, user_id,
@@ -91,7 +91,7 @@ async def _toggle_groups_feature(d, user_id, args, feature, label, cmd_name):
     if not group_tokens:
         await d._reply(None, user_id, usage)
         return
-    cfg = _load()
+    cfg = await asyncio.to_thread(_load)
     groups = cfg.setdefault("groups", {})
     if any(t.lower() == "all" for t in group_tokens):
         targets = list(groups.keys())
@@ -110,7 +110,7 @@ async def _toggle_groups_feature(d, user_id, args, feature, label, cmd_name):
         group_cfg.setdefault("features", {})[feature] = enabled
         applied.append(gid)
     if applied:
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
     lines = []
     if applied:
         lines.append("已对 {} 个群{}{}：{}".format(
@@ -204,7 +204,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
     if not target_group:
         await d._reply(group_id, user_id, "要带上群号，不然我不知道改哪个群")
         return
-    cfg = _load()
+    cfg = await asyncio.to_thread(_load)
     groups = cfg.setdefault("groups", {})
     group_cfg = groups.setdefault(str(target_group), {"enabled": True, "masters": [],
                                                       "welcome_msg": {}, "bad_words": {},
@@ -220,7 +220,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
             await d._reply(group_id, user_id, "这个UP主已经在盯了")
             return
         mids.append(mid)
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         # Prime seen-list + watermark so historical uploads never flood
         from ..bilibili import prime_push_state
         nickname = ""
@@ -241,7 +241,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
             return
         if mid in mids:
             mids.remove(mid)
-            _commit(d, cfg)
+            await asyncio.to_thread(_commit, d, cfg)
             await d._reply(group_id, user_id, "不盯 mid={} 了".format(mid))
         else:
             await d._reply(group_id, user_id, "这个UP主本来就没在盯")
@@ -252,7 +252,7 @@ async def cmd_bili_push(d, group_id, user_id, args, role, sender_card, message):
                            "用法：/b站推送 atall on/off — 推送时是否 @全体成员")
             return
         push_cfg["at_all"] = (val == "on")
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id,
                        "好，本群B站推送{} @全体成员".format("会" if val == "on" else "不再"))
     elif action == "list":
@@ -548,17 +548,17 @@ async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, m
     action, rest = split_action_args(args, ("allow", "deny", "on", "off"), default="status")
     if not parts:
         action = "status"
-    cfg = _load()
+    cfg = await asyncio.to_thread(_load)
     pc = cfg.setdefault("private_chat", {"enabled": False, "allowed_users": []})
     pc.setdefault("enabled", False)
     allowed = pc.setdefault("allowed_users", [])
     if action == "on":
         pc["enabled"] = True
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "私聊AI已开启，所有好友都能聊了")
     elif action == "off":
         pc["enabled"] = False
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "私聊AI已关闭，只有开放名单里的人能聊")
     elif action in ("allow", "deny"):
         targets, _ = parse_target_qqs(rest, d._extract_mentions(message))
@@ -580,7 +580,7 @@ async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, m
             pc["allowed_users"] = allowed[-50:]
         else:
             pc["allowed_users"] = allowed
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         if changed:
             names = await format_user_labels(d, group_id, changed)
             await d._reply(group_id, user_id,
@@ -648,7 +648,7 @@ async def cmd_master(d, group_id, user_id, args, role, sender_card, message):
 async def cmd_welcome(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
         return
-    cfg = _load()
+    cfg = await asyncio.to_thread(_load)
     arg = args.strip()
     gid = str(group_id)
     groups = cfg.setdefault("groups", {})
@@ -657,15 +657,15 @@ async def cmd_welcome(d, group_id, user_id, args, role, sender_card, message):
     w = gcfg.setdefault("welcome_msg", {"enabled": True, "template": "欢迎 {nickname} 加入本群！"})
     if arg == "on":
         w["enabled"] = True
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "入群欢迎已开启")
     elif arg == "off":
         w["enabled"] = False
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "入群欢迎已关闭")
     elif arg:
         w["template"] = arg
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         await d._reply(group_id, user_id, "欢迎语改好了：" + arg)
     else:
         status_text = "开启" if w["enabled"] else "关闭"
@@ -678,7 +678,7 @@ async def cmd_enable(d, group_id, user_id, args, role, sender_card, message):
     if error:
         await d._reply(group_id, user_id, error)
         return
-    cfg = _load()
+    cfg = await asyncio.to_thread(_load)
     groups = cfg.setdefault("groups", {})
     enabled_list = []
     for gid in target_groups:
@@ -691,7 +691,7 @@ async def cmd_enable(d, group_id, user_id, args, role, sender_card, message):
             }
         groups[gid]["enabled"] = True
         enabled_list.append(gid)
-    _commit(d, cfg)
+    await asyncio.to_thread(_commit, d, cfg)
     msg = f"已启用 {len(enabled_list)} 个群"
     if len(enabled_list) <= 5:
         msg += f": {', '.join(enabled_list)}"
@@ -703,7 +703,7 @@ async def cmd_disable(d, group_id, user_id, args, role, sender_card, message):
     if error:
         await d._reply(group_id, user_id, error)
         return
-    cfg = _load()
+    cfg = await asyncio.to_thread(_load)
     groups = cfg.setdefault("groups", {})
     disabled_list = []
     for gid in target_groups:
@@ -711,7 +711,7 @@ async def cmd_disable(d, group_id, user_id, args, role, sender_card, message):
             groups[gid]["enabled"] = False
             disabled_list.append(gid)
     if disabled_list:
-        _commit(d, cfg)
+        await asyncio.to_thread(_commit, d, cfg)
         cleanup = getattr(d, "_cleanup_stale_state", None)
         if cleanup:
             cleanup()

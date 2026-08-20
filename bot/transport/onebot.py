@@ -32,8 +32,8 @@ class OneBotClient:
         runtime = config.get("runtime", {})
         self._pid_fd = None
         self._queue_size = int(runtime.get("ws_queue_size", 50))
-        self._max_event_tasks = int(runtime.get("max_event_tasks", 8))
-        self._api_timeout = int(runtime.get("api_timeout_seconds", 8))
+        self._max_event_tasks = int(runtime.get("max_event_tasks", 3))
+        self._api_timeout = int(runtime.get("api_timeout_seconds", 6))
         self._forward_timeout = int(runtime.get("forward_timeout_seconds", 120))
         self._connect_timeout = float(runtime.get("connect_timeout_seconds", 5))
         self._reconnect_max_delay = float(runtime.get("reconnect_max_delay_seconds", 60))

@@ -482,7 +482,7 @@ class Dispatcher(
         if raw.lstrip().startswith(prefix):
             return False
         # Skip blacklisted users in repeat tracking
-        if is_blacklisted(group_id, sender_user_id):
+        if await is_blacklisted(group_id, sender_user_id):
             return False
         should_repeat = False
         async with self._lock:

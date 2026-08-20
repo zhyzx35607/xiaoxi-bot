@@ -85,7 +85,7 @@ class JoinReviewBase(unittest.IsolatedAsyncioTestCase):
         self.pending_path = str(Path(self._tmp.name) / "pending.json")
         self._patches = [
             patch.object(request_module, "_PENDING_PATH", self.pending_path),
-            patch.object(request_module, "is_blacklisted", lambda g, u: False),
+            patch.object(request_module, "is_blacklisted", AsyncMock(return_value=False)),
         ]
         for patcher in self._patches:
             patcher.start()

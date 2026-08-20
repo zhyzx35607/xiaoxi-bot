@@ -23,10 +23,10 @@ log = logging.getLogger("qqbot")
 # sections (e.g. help categories) bypass _split_sections, so re-split here.
 _FORWARD_NODE_HARD_CHARS = 1000
 
-# Degradation chain after merged-forward failure: a few plain messages first,
-# text-file upload only when those also fail. QQ single messages safely carry
-# ~900 chars; 8 messages cover the full owner /help (~4-5k chars).
-_PLAIN_FALLBACK_MAX_MESSAGES = 8
+# Degradation chain after merged-forward failure: sharded plain messages
+# first, text-file upload only when those also fail. QQ single messages
+# safely carry ~900 chars; shards are capped so one failure cannot spam.
+_PLAIN_FALLBACK_SHARD_LIMIT = 10
 _PLAIN_FALLBACK_MAX_CHARS = 900
 _PLAIN_FALLBACK_INTERVAL = 0.5
 
@@ -163,7 +163,8 @@ async def _summarize(dispatcher, text, level, kind):
 
 
 def _plain_fallback_chunks(sections):
-    """Merge sections into a few plain messages; empty list means give up."""
+    """Merge sections into plain messages; past the shard limit the tail is
+    truncated with a notice instead of being dropped silently."""
     chunks = []
     current = ""
     for section in sections:
@@ -184,8 +185,12 @@ def _plain_fallback_chunks(sections):
             current = section
     if current:
         chunks.append(current)
-    if not chunks or len(chunks) > _PLAIN_FALLBACK_MAX_MESSAGES:
-        return []
+    if len(chunks) > _PLAIN_FALLBACK_SHARD_LIMIT:
+        dropped = len(chunks) - _PLAIN_FALLBACK_SHARD_LIMIT
+        notice = f"\n（太长了，剩下{dropped}条塞不下了）"
+        chunks = chunks[:_PLAIN_FALLBACK_SHARD_LIMIT]
+        chunks[-1] = chunks[-1][:_PLAIN_FALLBACK_MAX_CHARS - len(notice)] + notice
+        log.warning("plain fallback truncated: dropped=%d shards", dropped)
     return chunks
 
 
@@ -195,9 +200,8 @@ async def _send_plain_fallback(dispatcher, group_id, user_id, text, sections):
     target = max(300, int(config.get("forward_node_target_chars", 800) or 800))
     chunks = _plain_fallback_chunks(sections or _split_sections(text, target))
     if not chunks:
-        log.warning(
-            "plain fallback skipped: group=%s user=%s text_chars=%d exceeds %d messages",
-            group_id, user_id, len(str(text or "")), _PLAIN_FALLBACK_MAX_MESSAGES)
+        log.warning("plain fallback skipped: group=%s user=%s empty content",
+                    group_id, user_id)
         return False
     for index, chunk in enumerate(chunks):
         if index:

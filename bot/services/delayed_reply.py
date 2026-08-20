@@ -98,7 +98,7 @@ class DelayedReplyServiceMixin:
 
         log.debug("Delayed reply firing group=%s user=%s", group_id, user_id)
 
-        if is_blacklisted(group_id, user_id):
+        if await is_blacklisted(group_id, user_id):
             return
 
         import re as _re_clean

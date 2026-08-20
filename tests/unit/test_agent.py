@@ -8,23 +8,86 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import bot.permission as permission_module
 from bot.agent.identity import resolve_identity, resolve_scope
 from bot.agent.models import IdentityLevel
 from bot.agent.policy import decide_event, is_quiet_hours, tool_allowed
 from bot.agent.runtime import AgentRuntime
 
 
-class AgentIdentityTests(unittest.TestCase):
-    def test_super_owner_overrides_group_role(self):
+def _make_dispatcher(config, roles=None):
+    """Dispatcher stub whose member-info API serves the given group roles."""
+    permission_module._member_role_cache.clear()
+    served = {int(uid): role for uid, role in (roles or {}).items()}
+
+    class Client:
+        async def get_group_member_info(self, group_id, user_id):
+            return {"status": "ok", "data": {"role": served.get(int(user_id), "member")}}
+
+    return type("Dispatcher", (), {"config": config, "client": Client()})()
+
+
+def _build_event(runtime, event, roles=None):
+    return asyncio.run(runtime.build_event(_make_dispatcher(runtime.config, roles), event))
+
+
+def _observe(runtime, event, roles=None, *, explicit=False):
+    return asyncio.run(runtime.observe(_make_dispatcher(runtime.config, roles), event, explicit=explicit))
+
+
+class AgentIdentityTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        permission_module._member_role_cache.clear()
+
+    async def test_super_owner_overrides_group_role(self):
         config = {"bot_owner": 100, "bot_qq": 200}
         event = {"user_id": 100, "group_id": 300, "message_type": "group", "sender": {"role": "member"}}
-        self.assertEqual(resolve_identity(config, event).level, IdentityLevel.SUPER_OWNER)
+        identity = await resolve_identity(_make_dispatcher(config), event)
+        self.assertEqual(identity.level, IdentityLevel.SUPER_OWNER)
         self.assertEqual(resolve_scope(config, event).key, "group:300")
 
-    def test_group_owner_is_not_super_owner(self):
-        identity = resolve_identity({"bot_owner": 100, "bot_qq": 200}, {"user_id": 101, "message_type": "group", "sender": {"role": "owner"}})
+    async def test_group_owner_is_not_super_owner(self):
+        config = {"bot_owner": 100, "bot_qq": 200}
+        event = {"user_id": 101, "group_id": 300, "message_type": "group", "sender": {"role": "owner"}}
+        identity = await resolve_identity(_make_dispatcher(config, {101: "owner"}), event)
         self.assertEqual(identity.level, IdentityLevel.GROUP_OWNER)
         self.assertFalse(identity.is_super_owner)
+
+    async def test_forged_sender_role_does_not_grant_group_owner(self):
+        # 事件里的 sender.role 伪造为 owner，API 返回 member：以 API 为准
+        config = {"bot_owner": 100, "bot_qq": 200}
+        event = {"user_id": 101, "group_id": 300, "message_type": "group", "sender": {"role": "owner"}}
+        identity = await resolve_identity(_make_dispatcher(config, {101: "member"}), event)
+        self.assertEqual(identity.level, IdentityLevel.MEMBER)
+
+    async def test_stale_sender_role_does_not_hide_group_owner(self):
+        # 事件里的 sender.role 过期为 member，API 返回 owner：以 API 为准
+        config = {"bot_owner": 100, "bot_qq": 200}
+        event = {"user_id": 101, "group_id": 300, "message_type": "group", "sender": {"role": "member"}}
+        identity = await resolve_identity(_make_dispatcher(config, {101: "owner"}), event)
+        self.assertEqual(identity.level, IdentityLevel.GROUP_OWNER)
+
+    async def test_role_api_failure_fails_closed_to_member(self):
+        class Client:
+            async def get_group_member_info(self, group_id, user_id):
+                raise RuntimeError("onebot unavailable")
+
+        dispatcher = type("Dispatcher", (), {"config": {"bot_owner": 100, "bot_qq": 200}, "client": Client()})()
+        event = {"user_id": 101, "group_id": 300, "message_type": "group", "sender": {"role": "owner"}}
+        identity = await resolve_identity(dispatcher, event)
+        self.assertEqual(identity.level, IdentityLevel.MEMBER)
+
+    async def test_member_role_api_result_is_cached(self):
+        client = type("Client", (), {})()
+        client.get_group_member_info = AsyncMock(
+            return_value={"status": "ok", "data": {"role": "admin"}})
+        dispatcher = type("Dispatcher", (), {"config": {"bot_owner": 100, "bot_qq": 200}, "client": client})()
+        event = {"user_id": 101, "group_id": 300, "message_type": "group"}
+        first = await resolve_identity(dispatcher, event)
+        second = await resolve_identity(dispatcher, dict(event))
+        self.assertEqual(first.level, IdentityLevel.GROUP_ADMIN)
+        self.assertEqual(second.level, IdentityLevel.GROUP_ADMIN)
+        client.get_group_member_info.assert_awaited_once()
 
 
 class AgentEventDeduplicationTests(unittest.TestCase):
@@ -35,8 +98,8 @@ class AgentEventDeduplicationTests(unittest.TestCase):
                 "user_id": 100, "message_type": "private", "message_id": 55,
                 "time": 1234, "raw_message": "同一条消息",
             }
-            runtime.observe(event, explicit=True)
-            runtime.observe(event, explicit=True)
+            _observe(runtime, event, explicit=True)
+            _observe(runtime, event, explicit=True)
             records = runtime.store.read("events/owner_100.json", [])
             self.assertEqual(len(records), 1)
 
@@ -58,14 +121,14 @@ class AgentPolicyTests(unittest.TestCase):
 
     def test_member_is_passive_but_owner_can_be_candidate(self):
         base = {"bot_owner": 100, "agent": {"member_passive_only": True, "quiet_start": 0, "quiet_end": 0}}
-        member = AgentRuntime(base, tempfile.mkdtemp()).build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "hi", "sender": {"role": "member"}})
-        owner = AgentRuntime(base, tempfile.mkdtemp()).build_event({"user_id": 102, "group_id": 300, "message_type": "group", "raw_message": "hi", "sender": {"role": "owner"}})
+        member = _build_event(AgentRuntime(base, tempfile.mkdtemp()), {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "hi", "sender": {"role": "member"}})
+        owner = _build_event(AgentRuntime(base, tempfile.mkdtemp()), {"user_id": 102, "group_id": 300, "message_type": "group", "raw_message": "hi", "sender": {"role": "owner"}}, roles={102: "owner"})
         self.assertEqual(decide_event(base, member).reason, "member_passive_only")
         self.assertEqual(decide_event(base, owner).reason, "privileged_proactive_candidate")
 
     def test_sensitive_napcat_actions_are_never_allowed(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
+        event = _build_event(runtime, {"user_id": 100, "message_type": "private", "raw_message": "x"})
         self.assertFalse(tool_allowed({}, event, "get_cookies"))
         self.assertTrue(tool_allowed({}, event, "get_group_info"))
 
@@ -79,7 +142,7 @@ class AgentPlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = type("Dispatcher", (), {
             "config": runtime.config, "client": Client(),
         })()
-        event = runtime.build_event({
+        event = await runtime.build_event(dispatcher, {
             "user_id": 100, "message_type": "private",
             "raw_message": "过来，让我摸摸头",
         })
@@ -107,7 +170,7 @@ class AgentPlannerFallbackTests(unittest.IsolatedAsyncioTestCase):
         dispatcher = type("Dispatcher", (), {
             "config": runtime.config, "client": Client(),
         })()
-        event = runtime.build_event({
+        event = await runtime.build_event(dispatcher, {
             "user_id": 100, "message_type": "private",
             "raw_message": "你好",
         })
@@ -207,8 +270,8 @@ class AgentPersistenceTests(unittest.TestCase):
 
     def test_private_and_group_memory_are_isolated(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        private = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "我喜欢咖啡"})
-        group = runtime.build_event({"user_id": 100, "group_id": 300, "message_type": "group", "raw_message": "我喜欢茶", "sender": {"role": "owner"}})
+        private = _build_event(runtime, {"user_id": 100, "message_type": "private", "raw_message": "我喜欢咖啡"})
+        group = _build_event(runtime, {"user_id": 100, "group_id": 300, "message_type": "group", "raw_message": "我喜欢茶", "sender": {"role": "owner"}})
         runtime.memory.add_candidate(runtime.extract_memory_candidate(private))
         runtime.memory.add_candidate(runtime.extract_memory_candidate(group))
         self.assertEqual(len(runtime.memory.list_records(private.scope.key, confirmed=True)), 1)
@@ -217,9 +280,9 @@ class AgentPersistenceTests(unittest.TestCase):
 
     def test_memory_rejects_secrets_and_deduplicates(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        secret = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "记住我的 API key 是 sk-secret"})
+        secret = _build_event(runtime, {"user_id": 100, "message_type": "private", "raw_message": "记住我的 API key 是 sk-secret"})
         self.assertIsNone(runtime.extract_memory_candidate(secret))
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "我偏好简短回答"})
+        event = _build_event(runtime, {"user_id": 100, "message_type": "private", "raw_message": "我偏好简短回答"})
         candidate = runtime.extract_memory_candidate(event)
         runtime.memory.add_candidate(candidate)
         runtime.memory.add_candidate(candidate)
@@ -227,7 +290,7 @@ class AgentPersistenceTests(unittest.TestCase):
 
     def test_event_history_redacts_sensitive_message_body(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        runtime.observe({
+        _observe(runtime, {
             "user_id": 100, "message_type": "private",
             "raw_message": "请记住 token=super-secret-value",
         })
@@ -238,8 +301,8 @@ class AgentPersistenceTests(unittest.TestCase):
 
     def test_group_rule_is_confirmed_but_member_preference_is_pending(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        rule = runtime.build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "本群以后默认用简短播报", "sender": {"role": "owner"}})
-        preference = runtime.build_event({"user_id": 102, "group_id": 300, "message_type": "group", "raw_message": "我喜欢长文", "sender": {"role": "member"}})
+        rule = _build_event(runtime, {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "本群以后默认用简短播报", "sender": {"role": "owner"}}, roles={101: "owner"})
+        preference = _build_event(runtime, {"user_id": 102, "group_id": 300, "message_type": "group", "raw_message": "我喜欢长文", "sender": {"role": "member"}})
         self.assertFalse(runtime.extract_memory_candidate(rule).requires_confirmation)
         self.assertTrue(runtime.extract_memory_candidate(preference).requires_confirmation)
 
@@ -255,14 +318,14 @@ class AgentPersistenceTests(unittest.TestCase):
 
     def test_owner_rejection_mutes_scope_and_resume_clears_it(self):
         runtime = AgentRuntime({"bot_owner": 100, "agent": {"rejection_mute_seconds": 43200}}, tempfile.mkdtemp())
-        runtime.observe({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "别主动了，安静点", "time": 1000, "sender": {"role": "owner"}})
+        _observe(runtime, {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "别主动了，安静点", "time": 1000, "sender": {"role": "owner"}}, roles={101: "owner"})
         self.assertGreater(runtime.proactive.muted_until("group:300"), 1000)
-        runtime.observe({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "恢复主动", "time": 1100, "sender": {"role": "owner"}})
+        _observe(runtime, {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "恢复主动", "time": 1100, "sender": {"role": "owner"}}, roles={101: "owner"})
         self.assertEqual(runtime.proactive.muted_until("group:300"), 0)
 
     def test_member_rejection_does_not_mute_group_agent(self):
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        runtime.observe({"user_id": 102, "group_id": 300, "message_type": "group", "raw_message": "别主动了", "time": 1000, "sender": {"role": "member"}})
+        _observe(runtime, {"user_id": 102, "group_id": 300, "message_type": "group", "raw_message": "别主动了", "time": 1000, "sender": {"role": "member"}})
         self.assertEqual(runtime.proactive.muted_until("group:300"), 0)
 
 
@@ -373,7 +436,7 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
         from bot.agent.tools.gateway import AgentToolGateway
 
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 100, "message_type": "private", "raw_message": "x"})
 
         def broken(_dispatcher):
             raise RuntimeError("Authorization: Bearer private-tool-secret")
@@ -390,7 +453,7 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_denies_sensitive_tool_before_registry_lookup(self):
         from bot.agent.tools.gateway import AgentToolGateway
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 100, "message_type": "private", "raw_message": "x"})
         gateway = AgentToolGateway(type("Dispatcher", (), {"config": {}})())
         result = await gateway.execute(event, "get_cookies")
         self.assertFalse(result["ok"])
@@ -403,7 +466,7 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 return {"status": "ok", "data": {"action": action, "params": params}}
         dispatcher = type("Dispatcher", (), {"config": {}, "client": Client()})()
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 100, "message_type": "private", "raw_message": "x"})
         result = await AgentToolGateway(dispatcher).execute(event, "nc_get_user_status", user_id="123")
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"]["params"]["user_id"], 123)
@@ -417,7 +480,7 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.append(group_id); return {"status": "ok", "data": {"group_id": group_id}}
         client = Client()
         dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime, "client": client})()
-        event = runtime.build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
+        event = await runtime.build_event(_make_dispatcher(runtime.config, {101: "owner"}), {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
         result = await AgentToolGateway(dispatcher).execute(event, "get_group_info", group_id=999)
         self.assertTrue(result["ok"])
         self.assertEqual(client.calls, [300])
@@ -432,7 +495,7 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
                 return {"status": "ok", "data": {"messages": []}}
         client = Client()
         dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime, "client": client})()
-        event = runtime.build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
+        event = await runtime.build_event(_make_dispatcher(runtime.config, {101: "owner"}), {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
         result = await AgentToolGateway(dispatcher).execute(
             event, "get_recent_messages", group_id=999, count=5)
         self.assertTrue(result["ok"])
@@ -461,7 +524,7 @@ class AgentToolGatewayTests(unittest.IsolatedAsyncioTestCase):
             async def get_group_info(self, group_id):
                 return {"status": "ok", "data": {"group_id": group_id}}
         dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime, "client": Client()})()
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 100, "message_type": "private", "raw_message": "x"})
         denied = await AgentToolGateway(dispatcher).execute(event, "get_group_info")
         allowed = await AgentToolGateway(dispatcher).execute(event, "get_group_info", group_id=300)
         self.assertFalse(denied["ok"])
@@ -538,7 +601,7 @@ class AgentResponsePolicyTests(unittest.TestCase):
     def test_observation_mode_never_autosends(self):
         from bot.agent.response import can_autosend
         runtime = AgentRuntime({"bot_owner": 100, "agent": {"observation_only": True}}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "安排一下"})
+        event = _build_event(runtime, {"user_id": 100, "message_type": "private", "raw_message": "安排一下"})
         allowed, reason = can_autosend(runtime.config, event, {"needs_confirmation": False})
         self.assertFalse(allowed)
         self.assertEqual(reason, "observation_only")
@@ -546,7 +609,7 @@ class AgentResponsePolicyTests(unittest.TestCase):
     def test_group_owner_requires_confirmation_for_sensitive_plan(self):
         from bot.agent.response import can_autosend
         runtime = AgentRuntime({"agent": {"observation_only": False}}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "安排一下", "sender": {"role": "owner"}})
+        event = _build_event(runtime, {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "安排一下", "sender": {"role": "owner"}}, roles={101: "owner"})
         allowed, reason = can_autosend(runtime.config, event, {"needs_confirmation": True})
         self.assertFalse(allowed)
         self.assertEqual(reason, "confirmation_required")
@@ -579,7 +642,7 @@ class AgentGoalReminderTests(unittest.IsolatedAsyncioTestCase):
 class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
     async def test_owner_autonomy_replans_after_tool_result(self):
         runtime = AgentRuntime({"bot_owner": 100, "agent": {"owner_max_rounds": 4, "owner_tool_budget": 4}}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "查一下再回答"})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 100, "message_type": "private", "raw_message": "查一下再回答"})
 
         class Planner:
             def __init__(self):
@@ -611,7 +674,7 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
         async def fail_if_called(*args, **kwargs):
             raise AssertionError("planner must not run")
         runtime.run_autonomous = fail_if_called
-        handled = await runtime.handle_event(type("D", (), {})(), {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "hi", "sender": {"role": "owner"}}, explicit=True)
+        handled = await runtime.handle_event(_make_dispatcher(config, {101: "owner"}), {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "hi", "sender": {"role": "owner"}}, explicit=True)
         self.assertFalse(handled)
 
     async def test_group_router_can_run_while_owner_router_is_in_observation_mode(self):
@@ -635,11 +698,13 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
         runtime.run_autonomous = run
         class Client:
             def __init__(self): self.sent = []
+            async def get_group_member_info(self, group_id, user_id):
+                return {"status": "ok", "data": {"role": "owner"}}
             async def send_group_msg_with_at(self, group_id, text, users):
                 self.sent.append((group_id, text, users)); return {"status": "ok"}
         dispatcher = type("D", (), {"config": config, "client": Client()})()
         event = {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "推进群目标", "sender": {"role": "owner"}}
-        self.assertTrue(runtime.primary_router_enabled(event))
+        self.assertTrue(await runtime.primary_router_enabled(dispatcher, event))
         self.assertTrue(await runtime.handle_event(dispatcher, event, explicit=True))
         self.assertEqual(len(calls), 1)
         self.assertEqual(dispatcher.client.sent[0][0], 300)
@@ -653,7 +718,7 @@ class AgentAutonomyTests(unittest.IsolatedAsyncioTestCase):
             "groups": {"300": {"agent": {"primary_router": True}}},
         }
         runtime = AgentRuntime(config, tempfile.mkdtemp())
-        self.assertFalse(runtime.primary_router_enabled({"user_id": 100, "message_type": "private", "raw_message": "x"}))
+        self.assertFalse(asyncio.run(runtime.primary_router_enabled(_make_dispatcher(runtime.config), {"user_id": 100, "message_type": "private", "raw_message": "x"})))
 
     async def test_background_worker_marks_verified_task_done(self):
         from bot.agent.worker_service import AgentWorker
@@ -774,7 +839,7 @@ class AgentNativeToolTests(unittest.IsolatedAsyncioTestCase):
             config = {}
             agent_runtime = runtime
         gateway = AgentToolGateway(Dispatcher())
-        group_event = runtime.build_event({"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
+        group_event = await runtime.build_event(_make_dispatcher(runtime.config, {101: "owner"}), {"user_id": 101, "group_id": 300, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
         result = await gateway.execute(group_event, "agent_create_goal", title="群目标")
         self.assertTrue(result["ok"])
         self.assertEqual(len(runtime.goals.list("group:300")), 1)
@@ -787,7 +852,7 @@ class AgentNativeToolTests(unittest.IsolatedAsyncioTestCase):
             config = {}
             agent_runtime = runtime
         gateway = AgentToolGateway(Dispatcher())
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "x"})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 100, "message_type": "private", "raw_message": "x"})
         result = await gateway.execute(event, "agent_create_reminder", text="测试", delay_seconds=60, scope_key="group:999")
         self.assertTrue(result["ok"])
         self.assertEqual(len(runtime.reminders.list("owner:100")), 1)
@@ -820,7 +885,7 @@ class AgentPlanStateTests(unittest.TestCase):
         runtime.skills.create("group:1", 101, "新番播报", "先查证再总结", triggers=["新番"])
         runtime.insights.add("group:1", "群友偏好简短播报", evidence="三次反馈")
         runtime.timeline.add("group:1", "test", "完成一次播报")
-        event = runtime.build_event({"user_id": 101, "group_id": 1, "message_type": "group", "raw_message": "聊聊新番", "sender": {"role": "owner"}})
+        event = _build_event(runtime, {"user_id": 101, "group_id": 1, "message_type": "group", "raw_message": "聊聊新番", "sender": {"role": "owner"}}, roles={101: "owner"})
         context = runtime.context.build(event)
         self.assertIn("活泼的群助手", context)
         self.assertIn("先查证再总结", context)
@@ -834,7 +899,7 @@ class AgentAdvancedNativeToolTests(unittest.IsolatedAsyncioTestCase):
         from bot.agent.tools.gateway import AgentToolGateway
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
         dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime})()
-        event = runtime.build_event({"user_id": 200, "group_id": 1, "message_type": "group", "raw_message": "x", "sender": {"role": "member"}})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 200, "group_id": 1, "message_type": "group", "raw_message": "x", "sender": {"role": "member"}})
         result = await AgentToolGateway(dispatcher).execute(event, "agent_create_plan", title="越权", steps=["一步"])
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "agent_write_requires_owner")
@@ -844,7 +909,7 @@ class AgentAdvancedNativeToolTests(unittest.IsolatedAsyncioTestCase):
         from bot.agent.tools.gateway import AgentToolGateway
         runtime = AgentRuntime({"bot_owner": 100}, tempfile.mkdtemp())
         dispatcher = type("D", (), {"config": {}, "agent_runtime": runtime})()
-        event = runtime.build_event({"user_id": 101, "group_id": 1, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
+        event = await runtime.build_event(_make_dispatcher(runtime.config, {101: "owner"}), {"user_id": 101, "group_id": 1, "message_type": "group", "raw_message": "x", "sender": {"role": "owner"}})
         gateway = AgentToolGateway(dispatcher)
         created = await gateway.execute(event, "agent_create_plan", title="群计划", steps=["检查", "汇报"])
         plan_id = created["data"]["id"]
@@ -856,7 +921,7 @@ class AgentAdvancedNativeToolTests(unittest.IsolatedAsyncioTestCase):
 class AgentExecutionEvidenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_autonomous_plan_persists_tool_evidence_and_reflection(self):
         runtime = AgentRuntime({"bot_owner": 100, "agent": {"owner_max_rounds": 1, "owner_tool_budget": 2}}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 100, "message_type": "private", "raw_message": "检查状态"})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 100, "message_type": "private", "raw_message": "检查状态"})
         class Planner:
             async def plan(self, agent_event, context):
                 return {
@@ -904,6 +969,8 @@ class AgentExecutionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         runtime.executor = Executor()
         class Client:
             def __init__(self): self.sent = []
+            async def get_group_member_info(self, group_id, user_id):
+                return {"status": "ok", "data": {"role": "owner"}}
             async def send_group_msg_with_at(self, group_id, text, users):
                 self.sent.append((group_id, text, users)); return {"status": "ok"}
         dispatcher = type("D", (), {"client": Client(), "config": {"bot_qq": 888}})()
@@ -929,6 +996,8 @@ class AgentExecutionEvidenceTests(unittest.IsolatedAsyncioTestCase):
         runtime.executor = Executor()
         class Client:
             def __init__(self): self.sent = []
+            async def get_group_member_info(self, group_id, user_id):
+                return {"status": "ok", "data": {"role": "owner"}}
             async def send_group_msg_with_at(self, group_id, text, users):
                 self.sent.append((group_id, text, users)); return {"status": "ok"}
         dispatcher = type("D", (), {"client": Client(), "config": {"bot_qq": 888}})()
@@ -941,7 +1010,7 @@ class AgentExecutionEvidenceTests(unittest.IsolatedAsyncioTestCase):
 class AgentGroupProactiveTests(unittest.IsolatedAsyncioTestCase):
     async def test_read_only_autonomy_filters_native_write_tools(self):
         runtime = AgentRuntime({"bot_owner": 100, "agent": {"group_max_rounds": 1, "group_tool_budget": 5}}, tempfile.mkdtemp())
-        event = runtime.build_event({"user_id": 100, "group_id": 300, "message_type": "group", "raw_message": "主动复盘", "sender": {"role": "owner"}})
+        event = await runtime.build_event(_make_dispatcher(runtime.config), {"user_id": 100, "group_id": 300, "message_type": "group", "raw_message": "主动复盘", "sender": {"role": "owner"}})
         class Planner:
             async def plan(self, agent_event, context):
                 return {"reply": "只读完成", "needs_confirmation": False, "intent": "review", "task": None, "tools": [

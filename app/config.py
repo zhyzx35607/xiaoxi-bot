@@ -473,7 +473,6 @@ def migrate_config(config):
         "forward_threshold_chars": 200,
         "forward_node_target_chars": 800,
         "forward_max_nodes": 50,
-        "help_always_forward": True,
         "ai_summary_enabled": True,
         "ai_summary_max_chars": 80,
         "ai_summary_timeout_seconds": 4,
@@ -483,19 +482,6 @@ def migrate_config(config):
     for key, value in message_output_defaults.items():
         if key not in message_output:
             message_output[key] = value
-            migrated = True
-
-    persona_defaults = {
-        "role_awareness_enabled": True,
-        "super_owner_name": "主人",
-        "master_name": "主人",
-        "gowner_name": "群主",
-        "admin_name": "管理",
-    }
-    persona = config.setdefault("persona", {})
-    for key, value in persona_defaults.items():
-        if key not in persona:
-            persona[key] = value
             migrated = True
 
     category_defaults = {
@@ -520,10 +506,7 @@ def migrate_config(config):
             migrated = True
 
     automation_defaults = {
-        "enabled": False,
-        "allow_light_management": False,
-        "max_rules": 20,
-        "max_daily_actions": 30,
+        "enabled": True,
     }
     automation = config.setdefault("automation", {})
     for key, value in automation_defaults.items():

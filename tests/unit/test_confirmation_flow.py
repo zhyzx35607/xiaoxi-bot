@@ -74,6 +74,42 @@ class ConfirmationAuthorizationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ok, message)
             self.assertEqual([("set_group_name", {"group_id": GROUP})], d.client.calls)
 
+    async def test_account_level_action_rejects_other_admin(self):
+        # 账号级动作（delete_friend）：非发起人的管理员确认被拒，动作不执行。
+        from bot.services import confirmations
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "pending.json"
+            with patch.object(confirmations, "_PATH", str(path)):
+                d = _Dispatcher()
+                code = confirmations.create_confirmation(
+                    GROUP, OWNER, "delete_friend",
+                    {"user_id": "123", "temp_block": False, "temp_both_del": True},
+                    "双向删除好友 123")
+                ok, message = await self._confirm(d, code, MASTER)
+            self.assertFalse(ok)
+            self.assertIn("本人", message)
+            self.assertEqual([], d.client.calls)
+
+    async def test_account_level_action_initiator_can_confirm(self):
+        # 账号级动作：发起人本人确认成功并执行。
+        from bot.services import confirmations
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "pending.json"
+            with patch.object(confirmations, "_PATH", str(path)):
+                d = _Dispatcher()
+                code = confirmations.create_confirmation(
+                    GROUP, OWNER, "delete_friend",
+                    {"user_id": "123", "temp_block": False, "temp_both_del": True},
+                    "双向删除好友 123")
+                ok, message = await self._confirm(d, code, OWNER)
+            self.assertTrue(ok, message)
+            self.assertEqual(
+                [("delete_friend",
+                  {"user_id": "123", "temp_block": False, "temp_both_del": True})],
+                d.client.calls)
+
 
 if __name__ == "__main__":
     unittest.main()
