@@ -122,7 +122,7 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 
 ### Agent 工作区
 
-群主或最高主人可用 `/agent` 管理当前作用域的目标、持久化多步计划、提醒、后台任务、记忆、技能/SOP、群画像、洞察和行动时间线。最高主人私聊可用 `/agent 自治 on` 开启完整自治；群主在当前群使用 `/agent 主动 on` 可独立开启本群 Agent，不会继承或读取其他群及最高主人私域。
+QQ 群主、群主人（master）或最高主人可用 `/agent` 管理当前作用域的目标、持久化多步计划、提醒、后台任务、记忆、技能/SOP、群画像、洞察和行动时间线。最高主人私聊可用 `/agent 自治 on` 开启完整自治；群主在当前群使用 `/agent 主动 on` 可独立开启本群 Agent，不会继承或读取其他群及最高主人私域。
 
 群域 Agent 的写入和高风险方案受身份与确认机制保护：需要确认的方案在 `/确认 CODE` 前不会执行工具，确认后也只能执行已冻结的工具集合。明确说“别主动了”或使用 `/agent 静默 12小时` 会暂停当前作用域主动消息。
 
@@ -244,7 +244,7 @@ ACG 图片从 `i.mukyu.ru` 以 `r18=0` 选取并进入持久化图片池。定�
 | `bot_owner_required` | 机器人本人必须是 QQ 群主（头衔类操作，权限再高也绕不过 QQ 限制） |
 | `bot_owner` | bot 主人、机器人账号本身，或群内主人（master）可用 |
 | `bot_owner_only` | 仅 bot 主人 / 机器人账号本身可用 |
-| `owner_only` | QQ 群主或最高主人可用（当前只有 `/agent` 使用） |
+| `owner_only` | QQ 群主、群主人（master）或最高主人可用（当前只有 `/agent` 使用） |
 
 补充规则：bot 主人（`bot_owner` 配置的 QQ）和机器人账号（`bot_qq`）是 5 级 super，跳过一切校验；群内主人（master，4 级）跳过 `admin_only` 及之后的校验。
 
@@ -296,6 +296,9 @@ data/
 - `group_defaults.features.voice_reply`（默认关）：群语音回复开关，已实际生效（见 `bot/services/voice_reply.py`）。
 - `memory_expire_hours`（顶层，可选，默认 72）：群聊工作记忆条目的过期小时数，已实际生效。
 - `sticker_mode.max_stickers`（默认 50）：每个聊天上下文收集的表情包上限，已实际生效。
+- `automation.enabled`（默认 true）：所有按名自动化开关（welcome、ai_welcome、auto_poke、like_back、file_notice、ai_admin_intent 等）的全局总开关，`false` 时一律关闭。
+
+以下死配置键已移除（旧 config.json 中残留这些键不影响启动，会被直接忽略）：`automation.allow_light_management`、`automation.max_rules`、`automation.max_daily_actions`、`message_output.help_always_forward`（帮助菜单始终合并转发），以及 `persona` 段的 `role_awareness_enabled`、`super_owner_name`、`master_name`、`gowner_name`、`admin_name`。
 
 ## 项目结构
 
