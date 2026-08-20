@@ -42,6 +42,8 @@ from .memory import (
     _save_user_memory,
     clear_group_memory,
     clear_user_memory,
+    persist_memory_entries,
+    schedule_pending_memory_compression,
 )
 from .reply_policy import observe_owner_reply, should_suppress_reply
 from .providers import (
@@ -289,10 +291,10 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         try:
             companion = getattr(getattr(dispatcher, "agent_runtime", None), "companion", None)
             if companion is not None:
-                bot_role += "\n\n【最高主人长期陪伴状态】\n" + companion.context()
+                bot_role += "\n\n【最高主人长期陪伴状态】\n" + await asyncio.to_thread(companion.context)
         except Exception as error:
             log.debug("Companion context unavailable: %s", error)
-    memory = _load_memory(group_id, config) if group_id else []
+    memory = await asyncio.to_thread(_load_memory, group_id, config) if group_id else []
     
     # Build memory context string
     mem_ctx = ""
@@ -310,7 +312,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     user_mem_ctx = ""
     if user_id:
         mem_gid = group_id if group_id else 0
-        user_memory = _load_user_memory(mem_gid, user_id)
+        user_memory = await asyncio.to_thread(_load_user_memory, mem_gid, user_id)
         if user_memory:
             recent_user = user_memory[-6:]
             ulines = []
@@ -327,14 +329,14 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     
     # Load long-term memory (group or private)
     if group_id:
-        long_mem = _load_long_memory(group_id)
+        long_mem = await asyncio.to_thread(_load_long_memory, group_id)
         long_mem_ctx = ""
         if long_mem:
             long_lines = ["- " + str(e.get("content") or "")[:120]
                           for e in long_mem[-5:] if e.get("content")]
             if long_lines:
                 long_mem_ctx = "【本群历史话题摘要】\n" + "\n".join(long_lines)
-        u_long = _load_user_long_memory(group_id, user_id) if user_id else []
+        u_long = await asyncio.to_thread(_load_user_long_memory, group_id, user_id) if user_id else []
         if u_long:
             u_long_lines = ["- " + str(e.get("content") or "")[:120]
                             for e in u_long[-5:] if e.get("content")]
@@ -342,7 +344,7 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                 long_mem_ctx += "\n\n【你和 {} 之前聊过的长期话题】\n".format(
                     sender_name if sender_name else "此人") + "\n".join(u_long_lines)
     else:
-        long_mem = _load_user_long_memory(0, user_id) if user_id else []
+        long_mem = await asyncio.to_thread(_load_user_long_memory, 0, user_id) if user_id else []
         long_mem_ctx = ""
         if long_mem:
             long_lines = ["- " + str(e.get("content") or "")[:120]
@@ -366,6 +368,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     # Build chat hint for AI to decide if it should respond
     chat_hint = ""
     if group_id and chat_context:
+        # Group history is attacker-controlled text: screen it like a message.
+        chat_context = _sanitize_message(chat_context)
         chat_hint = (
             "【聊天决策指引】\n"
             "上面是最近的群聊记录，只用来判断语境。\n"
@@ -479,7 +483,8 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     if group_id:
         if memory:
             messages.extend(
-                m for m in memory[-30:]
+                {"role": m["role"], "content": _sanitize_message(m["content"])}
+                for m in memory[-30:]
                 if m.get("role") in ("user", "assistant", "system")
                 and m.get("content"))
     else:
@@ -487,11 +492,11 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             messages.extend(roleplay_history[-20:])
         else:
             # Private chat: load user memory as structured conversation history
-            priv_mem = _load_user_memory(0, user_id) if user_id else []
+            priv_mem = await asyncio.to_thread(_load_user_memory, 0, user_id) if user_id else []
             if priv_mem:
                 priv_history = [m for m in priv_mem[-20:] if m.get("role") in ("user", "assistant")]
                 for m in priv_history:
-                    messages.append({"role": m["role"], "content": m["content"]})
+                    messages.append({"role": m["role"], "content": _sanitize_message(m["content"])})
     # Clean the message
     clean_msg = _sanitize_message(raw_message)
     bot_qq = str(config["bot_qq"])
@@ -564,10 +569,11 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         else:
             from ..guard import add_warning, get_warning_count, add_blacklist
             gid = group_id if group_id else 0
-            add_warning(gid, user_id)
-            warn_count = get_warning_count(gid, user_id)
+            await asyncio.to_thread(add_warning, gid, user_id)
+            warn_count = await asyncio.to_thread(get_warning_count, gid, user_id)
             if warn_count >= 3:
-                add_blacklist(gid, user_id, 48, bot_owner=owner, bot_qq=bot_qq)
+                await asyncio.to_thread(add_blacklist, gid, user_id, 48,
+                                        bot_owner=owner, bot_qq=bot_qq)
                 if group_id:
                     await dispatcher.client.send_group_msg_with_at(group_id,
                         "多次违规，已拉黑48小时。", [user_id])
@@ -654,10 +660,16 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         return None
     if group_id:
         try:
+            clean_reply = reply  # safe fallback for the except path below
             # Build member map for @ parsing
             member_map = {}
             if hasattr(dispatcher, "_group_member_cache"):
-                cache = dispatcher._group_member_cache.get(group_id, {})
+                try:
+                    cache_key = int(group_id)
+                except (TypeError, ValueError):
+                    log.warning("Member cache lookup skipped: non-numeric group id %r", group_id)
+                    cache_key = None
+                cache = dispatcher._group_member_cache.get(cache_key, {}) if cache_key is not None else {}
                 for nick, qq in cache.items():
                     if nick and qq:
                         member_map[nick] = qq
@@ -693,7 +705,9 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
                     await dispatcher.client.group_poke(group_id, target)
         except Exception as e:
             log.exception("Reply send error: %s", e)
-            await dispatcher.client.send_group_msg(group_id, reply)
+            # Fall back to the cleaned text: the raw reply may still carry
+            # [AT:]/[POKE:] markers that must not leak into the chat.
+            await dispatcher.client.send_group_msg(group_id, clean_reply)
     else:
         if roleplay_active:
             clean_reply = reply
@@ -740,13 +754,13 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
         except Exception as error:
             log.warning("Roleplay exchange persistence degraded: %s", error)
     if is_super_owner and not group_id:
-        observe_owner_reply(
-            dispatcher, clean_reply if clean_reply else reply, reply_intent)
+        await asyncio.to_thread(observe_owner_reply, dispatcher,
+                                clean_reply if clean_reply else reply, reply_intent)
     # Track last reply timestamp for multi-layer delay
     _last_reply_ts[context_key] = time.time()
     # Track reply content for anti-echo
     if user_id:
-        _record_reply(user_id, clean_reply if clean_reply else reply)
+        _record_reply(user_id, clean_reply if clean_reply else reply, scope=context_key)
     # Learn from conversation & save memory
     from ..memory import extract_user_info
     user_msg_text = original_clean_msg or clean_msg or raw_message
@@ -754,15 +768,17 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
     now = time.time()
     if group_id:
         # === Group chat memory ===
-        user_mem = _load_user_memory(group_id, user_id)
-        for info in learned:
-            user_mem.append({"role": "system", "content": info, "ts": now})
-        user_mem.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text), "ts": now})
-        user_mem.append({"role": "assistant", "content": reply, "ts": now})
-        _save_user_memory(group_id, user_id, user_mem, config, dispatcher.client.session)
-        memory.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text)})
-        memory.append({"role": "assistant", "content": reply})
-        _save_memory(group_id, memory, config, dispatcher.client.session)
+        entries = [{"role": "system", "content": info, "ts": now} for info in learned]
+        entries.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text), "ts": now})
+        entries.append({"role": "assistant", "content": reply, "ts": now})
+        schedule_pending_memory_compression(await asyncio.to_thread(
+            persist_memory_entries, group_id, user_id, entries, config,
+            dispatcher.client.session))
+        schedule_pending_memory_compression(await asyncio.to_thread(
+            persist_memory_entries, group_id, None, [
+                {"role": "user", "content": "{}: {}".format(sender_name, user_msg_text)},
+                {"role": "assistant", "content": reply},
+            ], config, dispatcher.client.session))
         # Append bot reply to group buffer so _build_chat_context includes our own messages
         try:
             bot_qq = config.get("bot_qq", 0)
@@ -773,13 +789,12 @@ async def handle_ai_chat(dispatcher, group_id, user_id, raw_message, sender_name
             log.debug("Failed to append bot reply to buffer: %s", e)
     elif not roleplay_active:
         # === Private chat memory (deeper: 30 entries + LLM long-term compression) ===
-        user_mem = _load_user_memory(0, user_id)
-        for info in learned:
-            user_mem.append({"role": "system", "content": info, "ts": now})
-        user_mem.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text), "ts": now})
-        user_mem.append({"role": "assistant", "content": reply, "ts": now})
-        _save_user_memory(0, user_id, user_mem, config,
-                          dispatcher.client.session, max_entries=30)
+        entries = [{"role": "system", "content": info, "ts": now} for info in learned]
+        entries.append({"role": "user", "content": "{}: {}".format(sender_name, user_msg_text), "ts": now})
+        entries.append({"role": "assistant", "content": reply, "ts": now})
+        schedule_pending_memory_compression(await asyncio.to_thread(
+            persist_memory_entries, 0, user_id, entries, config,
+            dispatcher.client.session, max_entries=30))
     return True
 
 

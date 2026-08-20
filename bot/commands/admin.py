@@ -16,7 +16,11 @@ from ..permission import (
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
 )
 from ..utils import atomic_write_json
-from .common import CONFIG_PATH, _commit, _load, _save, resolve_scoped_group_targets
+from .common import (
+    CONFIG_PATH, _commit, _load, _save, resolve_scoped_group_targets,
+    split_action_args, parse_target_qqs, format_user_label, format_user_labels,
+    format_group_label,
+)
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -427,36 +431,38 @@ async def cmd_delete_group_notice(d, group_id, user_id, args, role, sender_card,
 async def cmd_admin_mgr(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
         return
-    parts = args.strip().split()
-    action = parts[0].lower() if parts else ""
-    mentions = d._extract_mentions(message)
-    if not mentions:
-        await d._reply(group_id, user_id, "请 @要操作的人")
+    action, rest = split_action_args(args, ("add", "del"))
+    targets, _ = parse_target_qqs(rest, d._extract_mentions(message))
+    if not targets:
+        await d._reply(group_id, user_id, "请 @要操作的人，或写 QQ 号（多个都行）")
         return
-    target = mentions[0]
-    # Same hierarchy rules as kick/ban: an admin must not demote a peer,
-    # and owner/bot accounts stay protected. Operating on the QQ group
-    # owner is rejected here too (QQ would refuse it anyway).
-    target_ok, target_error = await can_moderate_target(d, group_id, user_id, target, role)
-    if not target_ok:
-        await d._reply(group_id, user_id, target_error)
+    if action not in ("add", "del"):
+        await d._reply(group_id, user_id, "这样用：/admin add @某人或QQ，或者 /admin del @某人或QQ")
         return
-    if action == "add":
-        r = await d.client.set_group_admin(group_id, target, True)
+    done, failed = [], []
+    for target in targets:
+        # Same hierarchy rules as kick/ban: an admin must not demote a peer,
+        # and owner/bot accounts stay protected. Operating on the QQ group
+        # owner is rejected here too (QQ would refuse it anyway).
+        target_ok, target_error = await can_moderate_target(d, group_id, user_id, target, role)
+        if not target_ok:
+            label = await format_user_label(d, group_id, target)
+            failed.append(label + "（" + target_error + "）")
+            continue
+        r = await d.client.set_group_admin(group_id, target, action == "add")
+        label = await format_user_label(d, group_id, target)
         if r.get("status") == "ok":
-            await d._reply(group_id, user_id, "设好了：" + str(target))
+            done.append(label)
         else:
             err = r.get("msg", "") or r.get("wording", "") or str(r)
-            await d._reply(group_id, user_id, "没设上，原因是：" + str(err))
-    elif action == "del":
-        r = await d.client.set_group_admin(group_id, target, False)
-        if r.get("status") == "ok":
-            await d._reply(group_id, user_id, "撤掉了：" + str(target))
-        else:
-            err = r.get("msg", "") or r.get("wording", "") or str(r)
-            await d._reply(group_id, user_id, "没撤掉，原因是：" + str(err))
-    else:
-        await d._reply(group_id, user_id, "这样用：/admin add @某人，或者 /admin del @某人")
+            failed.append(label + "（" + str(err)[:80] + "）")
+    lines = []
+    if done:
+        verb = "设好了管理员：" if action == "add" else "撤掉了管理员："
+        lines.append(verb + "、".join(done))
+    if failed:
+        lines.append("没处理成：" + "、".join(failed))
+    await d._reply(group_id, user_id, "\n".join(lines))
 
 async def cmd_special_title(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
@@ -465,21 +471,16 @@ async def cmd_special_title(d, group_id, user_id, args, role, sender_card, messa
     if user_id != d.config.get("bot_owner") and caller_level < LEVEL_MASTER:
         await d._reply(group_id, user_id, "这个只给最高主人或群主人用")
         return
-    mentions = d._extract_mentions(message)
-    clean_args = re.sub(r"\[CQ:[^]]+\]", "", args).strip()
-    if not mentions:
-        ids = re.findall(r"\b\d{5,12}\b", clean_args)
-        mentions = [int(ids[0])] if ids else []
-        if ids:
-            clean_args = clean_args.replace(ids[0], "", 1).strip()
-    if not mentions:
-        await d._reply(group_id, user_id, "请 @要设置头衔的人")
+    targets, clean_args = parse_target_qqs(args, d._extract_mentions(message))
+    if not targets:
+        await d._reply(group_id, user_id, "请 @要设置头衔的人，或写 QQ 号")
         return
     title = clean_args.strip()
     if len(title) > 18:
         await d._reply(group_id, user_id, "头衔太长了，最多18个字左右")
         return
-    target = mentions[0]
+    target = targets[0]
+    label = await format_user_label(d, group_id, target)
     result = await d.client.set_group_special_title(group_id, target, title)
     log.info("set_group_special_title completed: status=%s", result.get("status"))
     if result.get("status") != "ok" and title:
@@ -493,7 +494,9 @@ async def cmd_special_title(d, group_id, user_id, args, role, sender_card, messa
     if result.get("status") == "ok":
         from ..notice_handler import mark_title_set_by_bot
         mark_title_set_by_bot(group_id, target, title)
-        await d._reply(group_id, user_id, "头衔设好了" if title else "头衔清掉了")
+        await d._reply(group_id, user_id,
+                       ("头衔设好了：" + label + " → " + title) if title
+                       else "头衔清掉了：" + label)
     else:
         await d._reply(group_id, user_id, "没设成：" + str(result.get("msg") or result.get("wording") or result)[:200])
 
@@ -542,7 +545,9 @@ async def cmd_group_ai_switch(d, group_id, user_id, args, role, sender_card, mes
 async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, message):
     """/私聊AI on|off|allow QQ|deny QQ — global private-chat AI switch + allowlist."""
     parts = args.strip().split()
-    action = parts[0].lower() if parts else "status"
+    action, rest = split_action_args(args, ("allow", "deny", "on", "off"), default="status")
+    if not parts:
+        action = "status"
     cfg = _load()
     pc = cfg.setdefault("private_chat", {"enabled": False, "allowed_users": []})
     pc.setdefault("enabled", False)
@@ -555,19 +560,34 @@ async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, m
         pc["enabled"] = False
         _commit(d, cfg)
         await d._reply(group_id, user_id, "私聊AI已关闭，只有开放名单里的人能聊")
-    elif action == "allow" and len(parts) >= 2 and parts[1].isdigit():
-        qq = int(parts[1])
+    elif action in ("allow", "deny"):
+        targets, _ = parse_target_qqs(rest, d._extract_mentions(message))
+        if not targets:
+            await d._reply(group_id, user_id, "这样用：/私聊AI allow @某人或QQ（多个都行）/deny @某人或QQ")
+            return
         allowed = [int(u) for u in allowed if str(u).isdigit()]
-        if qq not in allowed:
-            allowed.append(qq)
-        pc["allowed_users"] = allowed[-50:]
+        changed = []
+        for qq in targets:
+            if action == "allow":
+                if qq not in allowed:
+                    allowed.append(qq)
+                    changed.append(qq)
+            else:
+                if qq in allowed:
+                    allowed.remove(qq)
+                    changed.append(qq)
+        if action == "allow":
+            pc["allowed_users"] = allowed[-50:]
+        else:
+            pc["allowed_users"] = allowed
         _commit(d, cfg)
-        await d._reply(group_id, user_id, "已开放私聊AI：" + str(qq))
-    elif action == "deny" and len(parts) >= 2 and parts[1].isdigit():
-        qq = int(parts[1])
-        pc["allowed_users"] = [int(u) for u in allowed if str(u).isdigit() and int(u) != qq]
-        _commit(d, cfg)
-        await d._reply(group_id, user_id, "已移出开放名单：" + str(qq))
+        if changed:
+            names = await format_user_labels(d, group_id, changed)
+            await d._reply(group_id, user_id,
+                           ("已开放私聊AI：" if action == "allow" else "已移出开放名单：") + names)
+        else:
+            await d._reply(group_id, user_id,
+                           "这些人本来就在名单里" if action == "allow" else "这些人本来就不在名单里")
     else:
         status_text = "开启" if pc.get("enabled") else "关闭"
         users = ", ".join(str(u) for u in pc.get("allowed_users", [])) or "无"
@@ -576,42 +596,54 @@ async def cmd_private_ai_switch(d, group_id, user_id, args, role, sender_card, m
                        "\n用法：/私聊AI on|off|allow QQ|deny QQ")
 
 async def cmd_master(d, group_id, user_id, args, role, sender_card, message):
-    parts = args.strip().split()
-    action = parts[0].lower() if parts else "list"
+    action, rest = split_action_args(args, ("add", "del", "list"), default="list")
+    mentions = d._extract_mentions(message)
     target_group = group_id
-    target_index = 1
-    if not group_id:
-        if len(parts) >= 2 and parts[1].isdigit():
-            target_group = int(parts[1])
-            target_index = 2
-        elif len(parts) >= 1 and parts[0] == "list":
-            target_group = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
-            target_index = 2
-        else:
-            await d._reply(None, user_id, "私聊这样用：/master add 群号 QQ，或者 /master list 群号")
-            return
     if not target_group:
-        await d._reply(None, user_id, "要带上群号，不然我不知道改哪个群")
-        return
-    target_qq = int(parts[target_index]) if len(parts) > target_index and parts[target_index].isdigit() else 0
-    if action == "add" and target_qq:
-        if add_master(d, target_group, target_qq):
-            await d._reply(group_id, user_id, "加好了，群 " + str(target_group) + " 的主人多了一个：" + str(target_qq))
+        # Private chat: the first bare number is the group id, the rest are
+        # target QQ numbers (or @mentions).
+        stripped = re.sub(r"\[CQ:at,qq=\d+\]", " ", rest)
+        m = re.search(r"\b\d{5,12}\b", stripped)
+        if m:
+            target_group = int(m.group(0))
+            rest = stripped[:m.start()] + " " + stripped[m.end():]
         else:
-            await d._reply(group_id, user_id, "这个人已经是主人了")
-    elif action == "del" and target_qq:
-        if remove_master(d, target_group, target_qq):
-            await d._reply(group_id, user_id, "删掉了，群 " + str(target_group) + " 的主人移除了：" + str(target_qq))
-        else:
-            await d._reply(group_id, user_id, "这个人本来就不是主人")
+            await d._reply(None, user_id, "私聊这样用：/master add 群号 QQ（也能 @人），或者 /master list 群号")
+            return
+    targets, _ = parse_target_qqs(rest, mentions)
+    glabel = await format_group_label(d, target_group)
+    if action in ("add", "del"):
+        if not targets:
+            await d._reply(group_id, user_id, "要 @人 或写上 QQ 号，多个目标用空格分开也行")
+            return
+        added, already, removed, absent = [], [], [], []
+        for target_qq in targets:
+            if action == "add":
+                (added if add_master(d, target_group, target_qq) else already).append(target_qq)
+            else:
+                (removed if remove_master(d, target_group, target_qq) else absent).append(target_qq)
+        lines = []
+        if added:
+            names = await format_user_labels(d, target_group, added)
+            lines.append(glabel + " 的主人多了一个：" + names if len(added) == 1
+                         else glabel + " 的主人多了 " + str(len(added)) + " 个：" + names)
+        if removed:
+            names = await format_user_labels(d, target_group, removed)
+            lines.append(glabel + " 的主人移除了：" + names)
+        if already:
+            lines.append("已经是主人了：" + await format_user_labels(d, target_group, already))
+        if absent:
+            lines.append("本来就不是主人：" + await format_user_labels(d, target_group, absent))
+        await d._reply(group_id, user_id, "\n".join(lines))
     elif action == "list":
         masters = list_masters(d, target_group)
         if masters:
-            await d._reply(group_id, user_id, "群 " + str(target_group) + " 当前主人：" + ", ".join(str(m) for m in masters))
+            names = await format_user_labels(d, target_group, masters, sep="，")
+            await d._reply(group_id, user_id, glabel + " 当前主人：" + names)
         else:
-            await d._reply(group_id, user_id, "这个群还没设置主人")
+            await d._reply(group_id, user_id, glabel + " 还没设置主人")
     else:
-        await d._reply(group_id, user_id, "用法：/master add QQ，/master del QQ，/master list")
+        await d._reply(group_id, user_id, "用法：/master add @某人或QQ，/master del @某人或QQ，/master list")
 
 async def cmd_welcome(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
@@ -701,10 +733,18 @@ async def cmd_group(d, group_id, user_id, args, role, sender_card, message):
         await cmd_disable(d, group_id, user_id, rest, role, sender_card, message)
     elif sub == "list":
         groups = d.config.get("groups", {})
+        if group_id:
+            # In-group callers only see their own group, not the full roster.
+            gcfg = groups.get(str(group_id), {})
+            status = "开启" if gcfg.get("enabled", True) else "关闭"
+            glabel = await format_group_label(d, group_id)
+            await d._reply(group_id, user_id, "本群状态：" + glabel + " [{}]".format(status))
+            return
         lines = []
         for gid, gcfg in groups.items():
             status = "开启" if gcfg.get("enabled", True) else "关闭"
-            lines.append("  {} [{}]".format(gid, status))
+            glabel = await format_group_label(d, gid)
+            lines.append("  {} [{}]".format(glabel, status))
         await d._reply(group_id, user_id,
                        "群组:\n" + "\n".join(lines) if lines else "还没有配置群")
     else:

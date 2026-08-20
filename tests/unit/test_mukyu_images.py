@@ -101,6 +101,14 @@ class MukyuClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(MukyuError):
             await mukyu.fetch_random_image(dispatcher)
 
+    async def test_local_path_cannot_escape_prefix_via_dotdot(self):
+        session = _Session(_Response(_payload(local="/i/../secret/x.jpg")))
+        dispatcher = type("Dispatcher", (), {
+            "config": {}, "client": type("Client", (), {"session": session})(),
+        })()
+        with self.assertRaises(MukyuError):
+            await mukyu.fetch_random_image(dispatcher)
+
 
 class RandomImageCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_direct_help_lists_every_supported_filter(self):

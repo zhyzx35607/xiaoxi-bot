@@ -153,22 +153,24 @@ class Dispatcher(
                     except (TypeError, ValueError):
                         continue
 
-    def save_runtime_state(self, force=False):
+    def _prepare_runtime_state(self, force=False):
+        """Build the state snapshot; returns None when no save is due."""
         now = time.time()
         if not force and (not self._state_dirty or now - self._last_state_save < 30):
-            return
+            return None
         today = now_in_timezone(self.config).strftime("%Y%m%d")
         group_counts = {}
         for gid, users in self._group_msg_counts.items():
             group_counts[str(gid)] = {str(uid): int(cnt) for uid, cnt in users.items()}
-        state = {
+        return {
             "date": today,
             "daily_likes": {k: v for k, v in self._daily_likes.items() if k.startswith(today + ":")},
             "daily_fortunes": {k: v for k, v in self._daily_fortunes.items() if k.startswith(today + ":")},
             "group_msg_counts": group_counts,
             "saved_at": now,
         }
-        atomic_write_json(self._state_path, state, indent=2)
+
+    def _after_runtime_state_save(self, now):
         self._state_dirty = False
         self._last_state_save = now
         # Log per-group reply/skip ratio for observability
@@ -181,6 +183,21 @@ class Dispatcher(
 
         # Periodic cleanup of stale state (runs with save cycle, no extra timer needed)
         self._cleanup_stale_state()
+
+    def save_runtime_state(self, force=False):
+        state = self._prepare_runtime_state(force)
+        if state is None:
+            return
+        atomic_write_json(self._state_path, state, indent=2)
+        self._after_runtime_state_save(state["saved_at"])
+
+    async def save_runtime_state_async(self, force=False):
+        """save_runtime_state variant that offloads the blocking write+fsync."""
+        state = self._prepare_runtime_state(force)
+        if state is None:
+            return
+        await asyncio.to_thread(atomic_write_json, self._state_path, state, indent=2)
+        self._after_runtime_state_save(state["saved_at"])
 
     def _cleanup_stale_state(self):
         """Purge data for disabled groups and expired entries to prevent unbounded growth.
@@ -309,43 +326,12 @@ class Dispatcher(
                     self._image_desc_cache.pop(k, None)
 
 
-
-
-
-
-
-
     @staticmethod
-
-    @staticmethod
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def _load_guard_file(path):
         try:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except (OSError, ValueError):
             return {}
 
 
@@ -489,6 +475,12 @@ class Dispatcher(
         cfg = self.config.get("repeat_mode", {})
         if not cfg.get("enabled", True) or len(raw) < 2 or "[CQ:" in raw:
             return False
+        # 命令样文本绝不原文复述：bot 发出的消息会经 message_sent 回环重新
+        # 进入命令解析且 bot 账号是最高主人（见 events/message.py 的自命令处理），
+        # 复读 "/master add ..." 之类文本等于把 super 权限交给复读触发者。
+        prefix = str(self.config.get("command_prefix", "/") or "/")
+        if raw.lstrip().startswith(prefix):
+            return False
         # Skip blacklisted users in repeat tracking
         if is_blacklisted(group_id, sender_user_id):
             return False
@@ -619,7 +611,10 @@ class Dispatcher(
             if seg.get("type") == "at":
                 qq = seg.get("data", {}).get("qq")
                 if qq and qq != "all":
-                    targets.append(int(qq))
+                    try:
+                        targets.append(int(qq))
+                    except (TypeError, ValueError):
+                        continue
         return targets
 
     async def _reply(self, group_id, user_id, text, *, force_forward=False,

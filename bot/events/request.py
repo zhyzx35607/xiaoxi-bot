@@ -147,7 +147,11 @@ def _pending_review_candidates(pending, group_id, now=None):
         if entry.get("handled"):
             continue
         expires = entry.get("announce_expires_at")
-        if expires is not None and now > float(expires):
+        if expires is None:
+            # Never announced (bot lacked admin): fall back to the request age
+            # so stale entries cannot match an "同意" forever.
+            expires = float(entry.get("ts", 0) or 0) + JOIN_REVIEW_TTL_SECONDS
+        if now > float(expires):
             continue
         candidates.append(entry)
     return candidates

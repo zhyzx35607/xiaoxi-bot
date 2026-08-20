@@ -416,6 +416,16 @@ def _acg_images_per_forward(dispatcher):
     return max(1, min(50, int(cfg.get("images_per_forward", 10) or 10)))
 
 
+def _acg_timeout_confirm_checks(dispatcher):
+    cfg = dispatcher.config.get("acg_images", {})
+    return max(1, min(10, int(cfg.get("timeout_confirm_checks", 3) or 3)))
+
+
+def _acg_timeout_confirm_interval(dispatcher):
+    cfg = dispatcher.config.get("acg_images", {})
+    return max(5, min(120, int(cfg.get("timeout_confirm_interval_seconds", 20) or 20)))
+
+
 def _acg_dedupe_seconds(dispatcher):
     cfg = dispatcher.config.get("acg_images", {})
     days = max(1, min(90, int(cfg.get("dedupe_days", 7) or 7)))
@@ -709,10 +719,16 @@ async def _try_send_acg_delivery(dispatcher):
                     status = (result or {}).get("status") if isinstance(result, dict) else result
                     confirmed = status == "ok"
                     if not confirmed and status == "timeout":
-                        # QQ persists accepted forwards with a delay; wait before
-                        # checking history or the same batch is sent again.
-                        await asyncio.sleep(15)
-                        confirmed = await _batch_seen_in_history(dispatcher, gid, sub_batch_id)
+                        # QQ persists accepted forwards with a delay; poll
+                        # history several times (~60s budget) before judging
+                        # failure, or the same batch is sent again.
+                        checks = _acg_timeout_confirm_checks(dispatcher)
+                        interval = _acg_timeout_confirm_interval(dispatcher)
+                        for _ in range(checks):
+                            await asyncio.sleep(interval)
+                            confirmed = await _batch_seen_in_history(dispatcher, gid, sub_batch_id)
+                            if confirmed:
+                                break
                     if not confirmed:
                         break
                     if chunk_index + 1 < len(chunks):
@@ -810,6 +826,22 @@ async def _acg_collector_loop(dispatcher):
         pass
 
 
+def _hotboard_delivery_checkpoint(dispatcher):
+    """In-memory per-group delivery checkpoint for the current day.
+
+    A 900s scheduler retry reruns the whole job; already-delivered groups must
+    be skipped or they receive the same board again.
+    """
+    today = datetime.now(_timezone(_scheduler_timezone(dispatcher))).strftime("%Y-%m-%d")
+    delivered = getattr(dispatcher, "_hotboard_delivered", None)
+    if delivered is None:
+        delivered = set()
+        dispatcher._hotboard_delivered = delivered
+    stale = {key for key in delivered if not key.startswith(today + ":")}
+    delivered.difference_update(stale)
+    return today, delivered
+
+
 async def _daily_hotboard_push(dispatcher):
     """Fetch configured hot boards and confirm every group delivery."""
     if not _client_connected(dispatcher):
@@ -824,41 +856,47 @@ async def _daily_hotboard_push(dispatcher):
     if not groups:
         return True
     from ..integrations import uapi as _uapi
-    all_delivered = True
+    today, delivered = _hotboard_delivery_checkpoint(dispatcher)
+    delivery_failed = False
     for board in boards:
         board = str(board)[:20]
         if not _uapi.credits_available(
                 dispatcher.config, "auto", path="/misc/hotboard"):
             log.info("hotboard push deferred: auto credit budget exhausted")
-            return False
+            return not delivery_failed
         data = await _uapi.uapi_get(dispatcher, "/misc/hotboard",
                                     params={"type": board}, kind="auto")
         items = (data or {}).get("list") if isinstance(data, dict) else None
         if not items:
+            # A failed/empty fetch is not retried within the day: rerunning
+            # the job would burn uapi credits without new content.
             _log_hotboard_empty(dispatcher, board)
-            all_delivered = False
             continue
         digest = await build_detailed_hotboard(dispatcher, board, items)
         nodes = build_hotboard_forward_nodes(
             board, digest["items"], dispatcher.config.get("bot_qq", 0),
             limit=len(digest["items"]), summary=digest["summary"], details=digest["details"])
         for gid in groups:
+            checkpoint = "{}:{}:{}".format(today, board, gid)
+            if checkpoint in delivered:
+                continue
             try:
                 result = await dispatcher.client.send_group_forward_msg(int(gid), nodes)
                 status = ((result or {}).get("status")
                           if isinstance(result, dict) else result)
                 if status != "ok":
-                    all_delivered = False
+                    delivery_failed = True
                     log.warning("hotboard push failed group=%s board=%s status=%s",
                                 gid, board, status)
                 else:
+                    delivered.add(checkpoint)
                     log.info("hotboard push: group=%s board=%s items=%d status=ok",
                              gid, board, len(nodes) - 1)
             except Exception as error:
-                all_delivered = False
+                delivery_failed = True
                 log.warning("hotboard push failed group=%s board=%s: %s", gid, board, error)
             await asyncio.sleep(2)
-    return all_delivered
+    return not delivery_failed
 
 def _scheduled_jobs(dispatcher):
     """Return randomized content jobs plus the fixed daily check-in."""

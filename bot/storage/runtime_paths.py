@@ -10,10 +10,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 log = logging.getLogger("qqbot")
 
 
-def _prepare_private_directory(path):
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+def _prepare_private_directory(path, mode=0o700):
+    path.mkdir(mode=mode, parents=True, exist_ok=True)
     try:
-        path.chmod(0o700)
+        path.chmod(mode)
     except OSError:
         pass
     if not os.access(path, os.W_OK | os.X_OK):
@@ -21,7 +21,18 @@ def _prepare_private_directory(path):
     return path
 
 
-def _runtime_directory(environment_name, fallback):
+def _ensure_parent_traversable(path, mode=0o751):
+    """Grant traverse-only (o+x) on the parent so the separate napcat user can
+    reach shared media temp files without being able to list the parent."""
+    parent = path.parent
+    try:
+        current = parent.stat().st_mode & 0o777
+        parent.chmod(current | mode)
+    except OSError:
+        pass
+
+
+def _runtime_directory(environment_name, fallback, mode=0o700):
     configured = os.getenv(environment_name)
     candidates = []
     if configured:
@@ -31,7 +42,7 @@ def _runtime_directory(environment_name, fallback):
     errors = []
     for index, path in enumerate(candidates):
         try:
-            return str(_prepare_private_directory(path))
+            return str(_prepare_private_directory(path, mode))
         except OSError as error:
             errors.append("{}: {}".format(path, error))
             if index + 1 < len(candidates):
@@ -46,12 +57,27 @@ def _runtime_directory(environment_name, fallback):
 
 
 def runtime_temp_dir():
-    return _runtime_directory("QQBOT_TMP_DIR", _PROJECT_ROOT / "data" / "tmp")
+    # data/tmp only holds shareable media temp files handed to the separate
+    # NapCat process (napcat user) via file://, so it must be world-traversable;
+    # everything sensitive stays in the other 0700 runtime directories.
+    resolved = Path(_runtime_directory(
+        "QQBOT_TMP_DIR", _PROJECT_ROOT / "data" / "tmp", mode=0o755))
+    if resolved.parent == _PROJECT_ROOT / "data":
+        _ensure_parent_traversable(resolved)
+    return str(resolved)
 
 
 def runtime_diagnostics_dir():
     return _runtime_directory(
         "QQBOT_DIAGNOSTICS_DIR", _PROJECT_ROOT / "data" / "diagnostics")
+
+
+def runtime_data_dir(name):
+    """Unified entry for persistent data subdirectories (memories, stickers...)."""
+    safe = Path(str(name)).name
+    if not safe:
+        raise ValueError("data directory name is required")
+    return str(_prepare_private_directory(_PROJECT_ROOT / "data" / safe))
 
 
 def runtime_diagnostic_path(filename):

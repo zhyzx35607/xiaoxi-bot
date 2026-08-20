@@ -40,6 +40,10 @@ RESTART_COOLDOWN_SECONDS = 300
 CHECK_INTERVAL_SECONDS = max(30, int(os.getenv("NAPCAT_WATCHDOG_INTERVAL", "30")))
 
 
+class NapCatConfigError(RuntimeError):
+    """NapCat OneBot config cannot be read or parsed; restarting cannot fix it."""
+
+
 def load_state():
     try:
         return json.loads(STATE_PATH.read_text(encoding="utf-8"))
@@ -62,17 +66,24 @@ def request_restart():
 
 
 def get_websocket_url():
-    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    try:
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise NapCatConfigError(
+            "cannot read OneBot config {}: {}".format(CONFIG_PATH, error)) from error
     servers = config.get("network", {}).get("websocketServers", [])
     enabled_servers = [server for server in servers if server.get("enable")]
     if not enabled_servers:
-        raise RuntimeError("no enabled OneBot WebSocket server")
+        raise NapCatConfigError("no enabled OneBot WebSocket server")
     server = next(
         (item for item in enabled_servers if int(item.get("port", 0)) == PREFERRED_PORT),
         enabled_servers[0],
     )
     host = server.get("host") or "127.0.0.1"
-    port = int(server["port"])
+    try:
+        port = int(server["port"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise NapCatConfigError("OneBot WebSocket server has no valid port") from error
     token = server.get("token") or ""
     url = f"ws://{host}:{port}"
     if token:
@@ -117,6 +128,11 @@ async def run_check():
     try:
         online = await check_online()
         reason = "OneBot reports offline" if not online else ""
+    except NapCatConfigError as error:
+        # A broken NapCat config cannot be fixed by restarting NapCat;
+        # alert without feeding the restart counter.
+        print(f"NapCat config error (not counted towards restart): {_safe_error_text(error)}")
+        return False
     except Exception as error:
         online = False
         reason = f"health check failed: {type(error).__name__}: {_safe_error_text(error)}"

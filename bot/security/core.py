@@ -1,8 +1,10 @@
 """Security helpers for URL checks and gray-tip audit logs."""
+import asyncio
 import json
 import logging
 import os
 import re
+import threading
 import time
 from urllib.parse import urlsplit, urlunsplit
 
@@ -13,6 +15,7 @@ from ..utils import atomic_write_json
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _LOG_PATH = os.path.join(_ROOT, "data", "security_events.json")
+_EVENTS_LOCK = threading.Lock()  # serializes record_security_event RMW across to_thread workers
 _URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+", re.IGNORECASE)
 
 
@@ -53,7 +56,10 @@ def load_security_events():
         with open(_LOG_PATH, encoding="utf-8") as f:
             data = json.load(f)
         return data if isinstance(data, list) else []
-    except Exception:
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []  # missing/corrupt log reads as empty
+    except OSError as error:  # permission/I-O errors are real; log, don't swallow
+        log.warning("Security event log read failed: %s", error)
         return []
 
 
@@ -88,19 +94,20 @@ def _gray_tip_metadata(event):
 
 def record_security_event(dispatcher, event_type, group_id, user_id, detail, action="logged"):
     cfg = _global_security_config(dispatcher)
-    events = load_security_events()
-    events.append({
-        "ts": time.time(),
-        "type": event_type,
-        "group_id": int(group_id or 0),
-        "user_id": int(user_id or 0),
-        "detail": _sanitize_security_detail(detail),
-        "action": action,
-    })
-    max_entries = int(cfg.get("max_log_entries", 200))
-    if len(events) > max_entries:
-        events = events[-max_entries:]
-    save_security_events(events)
+    with _EVENTS_LOCK:
+        events = load_security_events()
+        events.append({
+            "ts": time.time(),
+            "type": event_type,
+            "group_id": int(group_id or 0),
+            "user_id": int(user_id or 0),
+            "detail": _sanitize_security_detail(detail),
+            "action": action,
+        })
+        max_entries = int(cfg.get("max_log_entries", 200))
+        if len(events) > max_entries:
+            events = events[-max_entries:]
+        save_security_events(events)
 
 
 def format_security_events(group_id=None, limit=10):
@@ -197,12 +204,22 @@ async def punish_security_violation(dispatcher, group_id, user_id, message_id, r
         return "ignored:" + why
     actions = []
     if message_id:
-        deleted = await dispatcher.client.delete_msg(message_id)
-        actions.append("deleted" if deleted.get("status") == "ok" else "delete_failed")
+        # client.call may raise (e.g. WS drop); a failed punish must not
+        # abort the rest of the message pipeline.
+        try:
+            deleted = await dispatcher.client.delete_msg(message_id)
+            actions.append("deleted" if deleted.get("status") == "ok" else "delete_failed")
+        except Exception as error:
+            log.warning("Security delete_msg failed: %s", error)
+            actions.append("delete_failed")
     duration = int(cfg.get("ban_seconds", 600))
     if duration > 0:
-        banned = await dispatcher.client.set_group_ban(group_id, user_id, duration)
-        actions.append("banned:{}s".format(duration) if banned.get("status") == "ok" else "ban_failed")
+        try:
+            banned = await dispatcher.client.set_group_ban(group_id, user_id, duration)
+            actions.append("banned:{}s".format(duration) if banned.get("status") == "ok" else "ban_failed")
+        except Exception as error:
+            log.warning("Security set_group_ban failed: %s", error)
+            actions.append("ban_failed")
     log.warning("Security action applied: user=%s group=%s", user_id, group_id)
     return ",".join(actions) or "logged"
 
@@ -220,17 +237,15 @@ async def check_message_urls(dispatcher, group_id, user_id, raw, message_id, sen
         except Exception as e:
             log.warning("URL safety check failed: %s", e)
             reason = "api_error"
-            record_security_event(
-                dispatcher, "url_check_failed", group_id, user_id,
-                url + " | " + reason, "message_ignored",
-            )
+            await asyncio.to_thread(
+                record_security_event, dispatcher, "url_check_failed", group_id,
+                user_id, url + " | " + reason, "message_ignored")
             return True
         risky, reason = is_url_check_risky(result)
         if risky is None:
-            record_security_event(
-                dispatcher, "url_check_failed", group_id, user_id,
-                url + " | " + reason, "message_ignored",
-            )
+            await asyncio.to_thread(
+                record_security_event, dispatcher, "url_check_failed", group_id,
+                user_id, url + " | " + reason, "message_ignored")
             return True
         if not risky:
             continue
@@ -239,7 +254,8 @@ async def check_message_urls(dispatcher, group_id, user_id, raw, message_id, sen
             "malicious_url " + url + " " + reason,
             sender_role=sender_role,
         )
-        record_security_event(dispatcher, "url", group_id, user_id, url + " | " + reason, action)
+        await asyncio.to_thread(record_security_event, dispatcher, "url", group_id,
+                                user_id, url + " | " + reason, action)
         return "deleted" in action
     return False
 
@@ -250,4 +266,5 @@ async def handle_gray_tip(dispatcher, event):
     message_id = event.get("message_id", 0)
     metadata = _gray_tip_metadata(event)
     log.warning("Gray tip event logged: group=%s user=%s msg_id=%s", group_id, user_id, message_id)
-    record_security_event(dispatcher, "gray_tip", group_id, user_id, metadata, "logged")
+    await asyncio.to_thread(record_security_event, dispatcher, "gray_tip",
+                            group_id, user_id, metadata, "logged")

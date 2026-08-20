@@ -1,5 +1,6 @@
 """Small, safe AI-facing tool layer for NapCat capabilities."""
 
+import asyncio
 import json
 import logging
 import os
@@ -466,8 +467,9 @@ async def _tool_send_music_card(dispatcher, args, ctx):
         return {"ok": False, "error": "missing_keyword"}
     try:
         session = dispatcher.client.session
-        url = "https://music.163.com/api/search/get?s=" + keyword + "&type=1&limit=1"
-        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"},
+        async with session.get("https://music.163.com/api/search/get",
+                               params={"s": keyword, "type": 1, "limit": 1},
+                               headers={"User-Agent": "Mozilla/5.0"},
                                timeout=aiohttp.ClientTimeout(total=10)) as resp:
             data = await resp.json(content_type=None) if resp.status == 200 else None
     except Exception as e:
@@ -523,7 +525,12 @@ def _audit_playful_ban(record):
 
 async def execute_playful_ban(dispatcher, args, ctx):
     """AI-autonomous playful ban. All constraints below are code-enforced."""
-    from bot.permission import get_user_level, get_bot_role, LEVEL_ADMIN
+    from bot.permission import (
+        LEVEL_ADMIN,
+        can_moderate_target,
+        get_bot_role,
+        get_user_level,
+    )
     group_id = int(ctx.get("group_id") or 0)
     if not group_id:
         return {"ok": False, "error": "group_only", "tool": "playful_ban"}
@@ -542,6 +549,17 @@ async def execute_playful_ban(dispatcher, args, ctx):
     # Target protection: admin level and above (master/gowner/admin/super) is off-limits
     level, _ = await get_user_level(dispatcher, group_id, target_id, "member")
     if level >= LEVEL_ADMIN:
+        return {"ok": False, "error": "target_protected", "tool": "playful_ban"}
+    # 与命令层管理动作对齐复用 can_moderate_target（actor 是 bot 自己，super）：
+    # bot_qq/bot_owner 账号本身永远受保护，即使上游身份解析发生变化。
+    bot_id = dispatcher.config.get("bot_qq") or 0
+    try:
+        bot_id = int(bot_id)
+    except (TypeError, ValueError):
+        bot_id = 0
+    allowed, _deny_reason = await can_moderate_target(
+        dispatcher, group_id, bot_id, target_id, "super")
+    if not allowed:
         return {"ok": False, "error": "target_protected", "tool": "playful_ban"}
     bot_role, _ = await get_bot_role(dispatcher, group_id)
     if bot_role not in ("admin", "owner"):
@@ -565,7 +583,7 @@ async def execute_playful_ban(dispatcher, args, ctx):
         _prune_playful_ban_state(today)
     log.warning("PLAYFUL_BAN group=%s actor=AI target=%s duration=%ss reason=%s status=%s",
                 group_id, target_id, duration, reason, result.get("status"))
-    _audit_playful_ban({
+    await asyncio.to_thread(_audit_playful_ban, {
         "ts": now, "group_id": group_id, "actor": "AI",
         "target_id": target_id, "duration": duration, "reason": reason,
         "ok": ok,

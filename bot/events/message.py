@@ -285,7 +285,7 @@ class GroupMessageMixin:
                 self._state_dirty = True
                 if self._message_stat_updates >= 30:
                     self._message_stat_updates = 0
-                    self.save_runtime_state()
+                    await self.save_runtime_state_async()
 
             # Collect stickers from image messages
             sticker_cfg = self.config.get("sticker_mode", {})
@@ -667,7 +667,8 @@ class PrivateMessageMixin:
         event["raw_message"] = merged_raw
         event["message"] = merged_message or latest["message"]
         try:
-            self.agent_runtime.companion.observe_owner_message(
+            await asyncio.to_thread(
+                self.agent_runtime.companion.observe_owner_message,
                 merged_raw, source="private_message")
         except Exception:
             log.exception("Owner companion observation failed")
@@ -880,20 +881,46 @@ class PrivateMessageMixin:
                     remaining = max(0, int(entry.get("expires", 0) - now) // 3600)
                     lines.append(f"  g{entry.get('group_id')} u{entry.get('user_id')} 剩余{remaining}h")
                 await self._reply(None, user_id, "黑名单：\n" + "\n".join(lines[:30]))
-            elif parts2[0] == "add" and len(parts2) >= 4:
+            elif parts2[0] == "add" and len(parts2) >= 3:
+                from ..commands.common import format_user_label, format_group_label
                 gid = parts2[1]
-                uid = parts2[2]
+                if not gid.isdigit():
+                    await self._reply(None, user_id, "这样用：/bl add 群号 QQ [QQ2 ...] [小时]")
+                    return
+                tail = parts2[2:]
                 hours = 48
-                try:
-                    hours = int(parts2[3]) if len(parts2) > 3 else 48
-                except ValueError:
-                    hours = 48
-                add_blacklist(gid, uid, hours, bot_owner=self.config.get("bot_owner"), bot_qq=self.config.get("bot_qq"))
-                await self._reply(None, user_id, f"加进黑名单了：群 {gid}，QQ {uid}，{hours} 小时")
+                if len(tail) >= 2 and tail[-1].isdigit() and int(tail[-1]) <= 8760:
+                    hours = int(tail[-1])
+                    tail = tail[:-1]
+                uids = [u for u in tail if u.isdigit()]
+                if not uids:
+                    await self._reply(None, user_id, "这样用：/bl add 群号 QQ [QQ2 ...] [小时]")
+                    return
+                glabel = await format_group_label(self, gid)
+                labels = []
+                for uid in uids:
+                    await asyncio.to_thread(
+                        add_blacklist, gid, uid, hours,
+                        bot_owner=self.config.get("bot_owner"), bot_qq=self.config.get("bot_qq"))
+                    labels.append(await format_user_label(self, gid, uid))
+                await self._reply(None, user_id,
+                                  f"加进黑名单了：{glabel}，" + "、".join(labels) + f"，{hours} 小时")
             elif parts2[0] == "remove" and len(parts2) >= 3:
+                from ..commands.common import format_user_label, format_group_label
                 from ..guard import remove_blacklist
-                remove_blacklist(parts2[1], parts2[2])
-                await self._reply(None, user_id, f"移出黑名单了：群 {parts2[1]}，QQ {parts2[2]}")
+                gid = parts2[1]
+                uids = [u for u in parts2[2:] if u.isdigit()]
+                if not uids:
+                    await self._reply(None, user_id, "这样用：/bl remove 群号 QQ [QQ2 ...]")
+                    return
+                for uid in uids:
+                    remove_blacklist(gid, uid)
+                glabel = await format_group_label(self, gid)
+                labels = []
+                for uid in uids:
+                    labels.append(await format_user_label(self, gid, uid))
+                await self._reply(None, user_id,
+                                  f"移出黑名单了：{glabel}，" + "、".join(labels))
 
         elif cmd == "status" or cmd == "state":
             try:
@@ -941,7 +968,7 @@ class PrivateMessageMixin:
                 await self._reply(None, user_id, "确认清理记忆请在一分钟内发送 /确认 {}".format(code))
             else:
                 from ..ai import _load_memory
-                mem = _load_memory(parts2[0], self.config)
+                mem = await asyncio.to_thread(_load_memory, parts2[0], self.config)
                 if not mem:
                     await self._reply(None, user_id, f"群 {parts2[0]} 无记忆")
                 else:
@@ -998,42 +1025,6 @@ class PrivateMessageMixin:
         elif cmd == "安全":
             from ..commands import cmd_security
             await cmd_security(self, None, user_id, args, "member", sender_name, message)
-
-        elif cmd == "clearai" and args.strip():
-            gid = args.strip()
-            import glob as _glob, os as _os2
-            from ..ai import clear_group_memory
-            from ..guard import load_blacklist, save_blacklist
-            clear_group_memory(self, gid)
-            sticker_path = _os2.path.join(_os2.path.dirname(_os2.path.dirname(_os2.path.abspath(__file__))),
-                                        "data", "stickers", f"group_{gid}.json")
-            if _os2.path.exists(sticker_path):
-                _os2.remove(sticker_path)
-            bl = load_blacklist()
-            prefix_bl = f"{gid}_"
-            removed = [k for k in bl if k.startswith(prefix_bl)]
-            for k in removed:
-                del bl[k]
-            if removed:
-                save_blacklist(bl)
-            try:
-                from ..guard import load_warnings, save_warnings
-                w = load_warnings()
-                removed_w = [k for k in w if k.startswith(prefix_bl)]
-                for k in removed_w:
-                    del w[k]
-                if removed_w:
-                    save_warnings(w)
-            except Exception as error:
-                log.warning("Private clear-data warning cleanup failed: group=%s error=%s", gid, error)
-            user_mem_dir = _os2.path.join(_os2.path.dirname(_os2.path.dirname(_os2.path.abspath(__file__))),
-                                        "data", "memories")
-            pattern = _os2.path.join(user_mem_dir, f"group_{gid}_u*.json")
-            removed_user_files = 0
-            for f in _glob.glob(pattern):
-                _os2.remove(f)
-                removed_user_files += 1
-            await self._reply(None, user_id, f"群 {gid} 的数据清掉了，包括记忆、表情包、黑名单和用户记忆")
 
         elif cmd in self.commands:
             await self._run_command(

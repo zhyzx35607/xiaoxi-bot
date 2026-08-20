@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..memory import contains_sensitive_data, sanitize_persistent_value
+from ..utils import atomic_write_json
 from .character_cards import CharacterCardError, load_character_card
 from .lightrag import LightRAGClient
 from .storage import RoleplayStore
@@ -139,7 +140,7 @@ class RoleplayService:
         export_dir.mkdir(parents=True, exist_ok=True)
         target = export_dir / f"character-{character['slug']}.json"
         payload = {"spec": "chara_card_v2", "spec_version": "2.0", "data": character["data"]}
-        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(str(target), payload, indent=2)
         self.store.audit(user_id, "character_export", {"character_id": character["id"], "path_hash": self._hash(str(target))})
         return f"已导出：{target}"
 
@@ -252,7 +253,7 @@ class RoleplayService:
         export_dir = self.root / "data" / "roleplay_exports"
         export_dir.mkdir(parents=True, exist_ok=True)
         target = export_dir / f"chat-{active['id']}.json"
-        target.write_text(json.dumps(self.store.export_chat(active["id"]), ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(str(target), self.store.export_chat(active["id"]), indent=2)
         self.store.audit(user_id, "chat_export", {"chat_id": active["id"], "path_hash": self._hash(str(target))}, active["id"])
         return f"已导出：{target}"
 

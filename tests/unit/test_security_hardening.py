@@ -144,6 +144,37 @@ class GroupScopeTests(unittest.IsolatedAsyncioTestCase):
         create.assert_not_called()
         self.assertIn("明确", dispatcher.replies[-1][0][2])
 
+    async def test_private_clearai_routes_to_registered_confirmation_command(self):
+        from bot.commands import system
+        from bot.events.message import PrivateMessageMixin
+        from bot.events.router import RouterMixin
+
+        class Stub(RouterMixin, PrivateMessageMixin):
+            pass
+
+        dispatcher = Stub()
+        dispatcher.config = {
+            "bot_owner": 1, "bot_qq": 2,
+            "groups": {"100": {"enabled": True}}, "group_defaults": {},
+        }
+        dispatcher.commands = {
+            "clearai": {"handler": system.cmd_clear_ai, "bot_owner": True},
+        }
+        replies = []
+
+        async def fake_reply(group_id, user_id, text):
+            replies.append(str(text))
+
+        dispatcher._reply = fake_reply
+        with patch.object(system, "create_confirmation", return_value="abcd1234") as create:
+            await dispatcher._handle_owner_command(
+                "clearai", "100", 1, {"nickname": "owner"}, [], "/clearai 100")
+        # The private route must reuse the registered command: confirmation
+        # first, no immediate deletion, group target validated.
+        create.assert_called_once()
+        self.assertTrue(any("/确认 abcd1234" in text for text in replies))
+        self.assertFalse(any("清掉了" in text for text in replies))
+
 
 class ClearDataConfirmationTests(unittest.IsolatedAsyncioTestCase):
     async def test_clear_waits_for_confirmation_and_creates_backup(self):
@@ -335,6 +366,185 @@ class CapabilityWriteTests(unittest.IsolatedAsyncioTestCase):
 
         dispatcher.client.delete_friend.assert_not_awaited()
         self.assertIn("/确认", dispatcher.replies[-1][0][2])
+
+
+class RepeatCommandEchoTests(unittest.IsolatedAsyncioTestCase):
+    """复读机不得复述命令样文本：bot 消息经 message_sent 回环会以 super 执行。"""
+
+    def _dispatcher(self):
+        import asyncio
+
+        from bot.dispatcher import Dispatcher
+
+        dispatcher = Dispatcher.__new__(Dispatcher)
+        dispatcher.config = {
+            "command_prefix": "/",
+            "repeat_mode": {
+                "enabled": True, "min_users": 2, "probability": 1.0,
+                "cooldown_seconds": 0,
+            },
+        }
+        dispatcher._group_repeat_tracker = {}
+        dispatcher._lock = asyncio.Lock()
+
+        class Client:
+            def __init__(self):
+                self.sent = []
+
+            async def send_group_msg(self, group_id, message):
+                self.sent.append((group_id, message))
+                return {"status": "ok"}
+
+        dispatcher.client = Client()
+        return dispatcher
+
+    async def test_command_like_text_is_never_repeated(self):
+        dispatcher = self._dispatcher()
+        with patch("bot.dispatcher.is_blacklisted", return_value=False):
+            for user in (100, 200, 300):
+                self.assertFalse(
+                    await dispatcher._check_repeat(1, "/master add 123", user))
+        self.assertEqual(dispatcher.client.sent, [])
+        # 命令样文本不进入复读追踪，避免后续变体触发
+        self.assertNotIn(1, dispatcher._group_repeat_tracker)
+
+    async def test_leading_whitespace_command_is_skipped(self):
+        dispatcher = self._dispatcher()
+        with patch("bot.dispatcher.is_blacklisted", return_value=False):
+            for user in (100, 200, 300):
+                self.assertFalse(
+                    await dispatcher._check_repeat(1, "  /ban 10001 43200", user))
+        self.assertEqual(dispatcher.client.sent, [])
+
+    async def test_plain_text_repeat_behavior_unchanged(self):
+        dispatcher = self._dispatcher()
+        with patch("bot.dispatcher.is_blacklisted", return_value=False):
+            self.assertFalse(await dispatcher._check_repeat(1, "今天天气不错", 100))
+            self.assertTrue(await dispatcher._check_repeat(1, "今天天气不错", 200))
+        self.assertEqual(dispatcher.client.sent, [(1, "今天天气不错")])
+
+
+class AiTextCommandEchoTests(unittest.IsolatedAsyncioTestCase):
+    """AI 生成文本外发前必须中和行首命令前缀（message_sent 回环）。"""
+
+    async def test_ai_welcome_neutralizes_command_prefix(self):
+        from bot.events import notice
+
+        client = type("Client", (), {"session": None})()
+        dispatcher = _Dispatcher({"bot_owner": 1, "bot_qq": 2}, client)
+        with patch("bot.ai._call_deepseek",
+                   new=AsyncMock(return_value="/ban 10001 43200 搞事")):
+            text = await notice._generate_welcome_text(dispatcher, "新成员")
+        self.assertFalse(text.startswith("/"))
+        self.assertTrue(text.startswith("／"))
+
+    async def test_welcome_fallback_text_unchanged(self):
+        from bot.events import notice
+
+        client = type("Client", (), {"session": None})()
+        dispatcher = _Dispatcher({"bot_owner": 1, "bot_qq": 2}, client)
+        with patch("bot.ai._call_deepseek", new=AsyncMock(return_value=None)):
+            text = await notice._generate_welcome_text(dispatcher, "新成员")
+        self.assertEqual(text, "欢迎 新成员 哦～")
+
+    async def test_music_fallback_neutralizes_command_prefix(self):
+        from bot.commands import media
+
+        class Client:
+            session = None  # 触发搜索失败，走 AI 兜底
+
+            def __init__(self):
+                self.sent = []
+
+            async def send_group_msg(self, group_id, message):
+                self.sent.append(message)
+                return {"status": "ok"}
+
+        dispatcher = _Dispatcher({"bot_owner": 1, "bot_qq": 2}, Client())
+        with patch("bot.ai.deepseek_chat",
+                   new=AsyncMock(return_value="/ban 10001 43200")):
+            handled = await media.handle_music_search(
+                dispatcher, 100, 9, "点歌 测试", "")
+        self.assertTrue(handled)
+        self.assertEqual(dispatcher.client.sent, ["／ban 10001 43200"])
+
+
+class ConfigIdentityNormalizationTests(unittest.IsolatedAsyncioTestCase):
+    """bot_owner/bot_qq/masters 必须归一为 int，否则最高权限静默失效。"""
+
+    def test_normalize_converts_string_identity_fields(self):
+        from app.config import _normalize_identity_fields
+
+        config = {
+            "bot_owner": "111", "bot_qq": "222",
+            "groups": {"100": {"masters": ["333", 444]}},
+        }
+        self.assertTrue(_normalize_identity_fields(config))
+        self.assertEqual(config["bot_owner"], 111)
+        self.assertEqual(config["bot_qq"], 222)
+        self.assertEqual(config["groups"]["100"]["masters"], [333, 444])
+
+    def test_normalize_keeps_already_int_config_unchanged(self):
+        from app.config import _normalize_identity_fields
+
+        config = {
+            "bot_owner": 111, "bot_qq": 222,
+            "groups": {"100": {"masters": [333]}},
+        }
+        self.assertFalse(_normalize_identity_fields(config))
+        self.assertEqual(config["groups"]["100"]["masters"], [333])
+
+    def test_unconvertible_values_kept_with_sanitized_warning(self):
+        from app.config import _normalize_identity_fields
+
+        config = {
+            "bot_owner": "123abc", "bot_qq": "222",
+            "groups": {"100": {"masters": ["987x321", "555"]}},
+        }
+        with self.assertLogs("qqbot", level="WARNING") as captured:
+            changed = _normalize_identity_fields(config)
+        self.assertTrue(changed)
+        # 无法转换的值保持原样（fail-closed：严格比较下不会误授权限）
+        self.assertEqual(config["bot_owner"], "123abc")
+        self.assertEqual(config["bot_qq"], 222)
+        self.assertEqual(config["groups"]["100"]["masters"], ["987x321", 555])
+        # 迁移日志不得泄露 QQ 号原文
+        for line in captured.output:
+            self.assertNotIn("123abc", line)
+            self.assertNotIn("987x321", line)
+
+    def test_migrate_config_normalizes_identity_fields(self):
+        from app.config import migrate_config
+
+        config, migrated = migrate_config({
+            "bot_owner": "111", "bot_qq": "222",
+            "groups": {"100": {"masters": ["333"]}},
+        })
+        self.assertTrue(migrated)
+        self.assertEqual(config["bot_owner"], 111)
+        self.assertEqual(config["bot_qq"], 222)
+        self.assertEqual(config["groups"]["100"]["masters"], [333])
+
+    def test_env_override_path_normalizes_identity_fields(self):
+        from app.config import apply_env_overrides
+
+        config = apply_env_overrides({
+            "bot_owner": "111",
+            "groups": {"100": {"masters": ["333"]}},
+        })
+        self.assertEqual(config["bot_owner"], 111)
+        self.assertEqual(config["groups"]["100"]["masters"], [333])
+
+    async def test_normalized_string_owner_regains_super_level(self):
+        from app.config import migrate_config
+        from bot.permission import LEVEL_SUPER, get_user_level
+
+        config, _ = migrate_config({
+            "bot_owner": "111", "bot_qq": "222", "groups": {}})
+        dispatcher = _Dispatcher(config)
+        level, name = await get_user_level(dispatcher, 100, 111, "member")
+        self.assertEqual(level, LEVEL_SUPER)
+        self.assertEqual(name, "super")
 
 
 if __name__ == "__main__":

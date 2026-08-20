@@ -15,7 +15,7 @@ from ..permission import (
     save_group_config, can_moderate_target, LEVEL_MASTER, LEVEL_ADMIN,
 )
 from ..utils import atomic_write_json, now_in_timezone
-from .common import CONFIG_PATH, _load, _save
+from .common import CONFIG_PATH, _load, _save, parse_target_qqs, format_user_label
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -51,35 +51,31 @@ async def cmd_answerbook(d, group_id, user_id, args, role, sender_card, message)
                    "问：{}\n答：{}".format(question, data.get("answer", "?")))
 
 async def cmd_poke_user(d, group_id, user_id, args, role, sender_card, message):
-    mentions = d._extract_mentions(message) if group_id else []
-    target = mentions[0] if mentions else (int(args.strip()) if args.strip().isdigit() else user_id)
+    mentions = parse_target_qqs(args, d._extract_mentions(message))[0] if group_id else []
+    target = mentions[0] if mentions else user_id
     result = await (d.client.group_poke(group_id, target) if group_id else d.client.friend_poke(target))
     if result.get("status") != "ok":
         await d._reply(group_id, user_id, "戳一戳失败：" + str(result.get("msg") or result.get("wording") or result)[:180])
 
 async def cmd_like(d, group_id, user_id, args, role, sender_card, message):
-    target = user_id
-    if args.strip():
-        try:
-            target = int(args.strip())
-        except ValueError:
-            pass
-    mentions = d._extract_mentions(message)
-    if mentions:
-        target = mentions[0]
+    targets, _ = parse_target_qqs(args, d._extract_mentions(message))
+    if not targets:
+        targets = [user_id]
     today = now_in_timezone(d.config).strftime("%Y%m%d")
-    key = today + ":" + str(target)
-    if key in d._daily_likes:
-        return
     times = 10
-    r = await d.client.send_like(target, times)
-    if r.get("status") == "ok":
-        d._daily_likes[key] = True
-        d.save_runtime_state(force=True)
-        await d._reply(group_id, user_id, "点好了，给 " + str(target) + " 赞了 " + str(times) + " 下")
-    else:
-        err = r.get("msg", "") or r.get("wording", "") or str(r)
-        await d._reply(group_id, user_id, "没点上，原因是：" + str(err))
+    for target in targets:
+        key = today + ":" + str(target)
+        if key in d._daily_likes:
+            continue
+        r = await d.client.send_like(target, times)
+        label = await format_user_label(d, group_id, target)
+        if r.get("status") == "ok":
+            d._daily_likes[key] = True
+            await d.save_runtime_state_async(force=True)
+            await d._reply(group_id, user_id, "点好了，给 " + label + " 赞了 " + str(times) + " 下")
+        else:
+            err = r.get("msg", "") or r.get("wording", "") or str(r)
+            await d._reply(group_id, user_id, "没给 " + label + " 点上，原因是：" + str(err))
 
 async def cmd_rank(d, group_id, user_id, args, role, sender_card, message):
     if not group_id:
@@ -116,7 +112,7 @@ async def cmd_fortune(d, group_id, user_id, args, role, sender_card, message):
         # Only charge the daily attempt after a reply was actually generated,
         # so an AI failure does not burn the user's one try for the day.
         d._daily_fortunes[key] = True
-        d.save_runtime_state(force=True)
+        await d.save_runtime_state_async(force=True)
         await d._reply(group_id, user_id, sender_card + " 的今日运势\n\n" + reply)
     else:
         await d._reply(group_id, user_id, "脑子卡了一下，等会再试")

@@ -98,7 +98,10 @@ def check_natural_triggers(raw_message, message_segments):
             if isinstance(seg, dict) and seg.get("type") == "at":
                 qq = seg.get("data", {}).get("qq", "")
                 if qq and qq != "all":
-                    at_targets.append(int(qq))
+                    try:
+                        at_targets.append(int(qq))
+                    except (TypeError, ValueError):
+                        continue
     
     # ---- Pattern triggers (require @, word-boundary matching) ----
     if at_targets:

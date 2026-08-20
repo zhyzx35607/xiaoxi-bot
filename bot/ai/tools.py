@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import time
 
 from .providers import _call_deepseek, _call_deepseek_inner, _get_semaphore, _providers_support_tools
 
@@ -123,8 +124,18 @@ async def _chat_with_tools(dispatcher, messages, tools, group_id, user_id,
         return None
     runtime = config.get("runtime", {})
     async with _get_semaphore("ai", runtime.get("ai_concurrency", 1)):
+        # Total time budget: with ai_concurrency=1 this loop holds the global
+        # AI channel; cap it so one chat cannot starve every other chat.
+        try:
+            budget = float(runtime.get("ai_tool_loop_budget_seconds", 60))
+        except (TypeError, ValueError):
+            budget = 60.0
+        deadline = time.monotonic() + max(15.0, budget)
         conversation = list(messages)
         for _round in range(4):
+            if time.monotonic() >= deadline:
+                log.info("AI tool loop budget exhausted after %d round(s)", _round)
+                break
             message = await _call_deepseek_inner(
                 config, conversation, max_tokens, temperature,
                 dispatcher.client.session, tools=tools)

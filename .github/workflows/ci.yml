@@ -29,10 +29,15 @@ jobs:
           ruff check . --no-cache --select E9,F524,F63,F7,F82,F811,F841,B023,ASYNC221,ASYNC230,S110,S112,PLW0602,PLW0211,G201
           bandit -q -r app bot deploy -x tests --severity-level high --confidence-level high
       - name: Check API contract snapshots
-        run: python scripts/sync_api_contracts.py --check
+        # The check fetches remote OpenAPI documents; retry transient network
+        # failures so a flaky connection does not fail the required check.
+        run: |
+          python scripts/sync_api_contracts.py --check \
+            || { sleep 15; python scripts/sync_api_contracts.py --check; } \
+            || { sleep 15; python scripts/sync_api_contracts.py --check; }
       - name: Compile Python sources
         run: python -m compileall -q -f .
       - name: Run test suite
         env:
           QQBOT_DISABLE_FILE_LOG: "1"
-        run: python -m unittest discover -v
+        run: python -m unittest discover -s tests -t . -v

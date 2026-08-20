@@ -1,5 +1,6 @@
 """Agent Core orchestration and staged autonomous execution."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -36,6 +37,11 @@ from .workers import AgentTaskStore
 from .verifier import AgentVerifier
 
 
+def _tool_requires_confirmation(name):
+    """Single-tool view of the confirmation rule (native writes + moderation)."""
+    return name in WRITE_TOOLS or name in MODERATION_ACTIONS
+
+
 def _plan_requires_confirmation(plan):
     """Deterministic confirmation rule for Agent plans.
 
@@ -49,7 +55,7 @@ def _plan_requires_confirmation(plan):
         return True
     for tool in plan.get("tools") or []:
         name = tool.get("name") if isinstance(tool, dict) else tool
-        if name in WRITE_TOOLS or name in MODERATION_ACTIONS:
+        if _tool_requires_confirmation(name):
             return True
     return False
 
@@ -252,6 +258,17 @@ class AgentRuntime:
             if read_only_tools:
                 is_read_only = getattr(self.tools, "is_read_only", lambda name: False)
                 tool_calls = [item for item in tool_calls if is_read_only(str(item.get("name") or ""))]
+            if (tool_calls and round_index > 0
+                    and not agent_event.identity.is_super_owner
+                    and not agent_event.metadata.get("confirmed")):
+                # 重规划轮次未经 handle_event 的确认门控：非最高主人触发且未走
+                # 确认流时，剔除需要人工确认的高风险工具，防止借重规划绕过
+                # _plan_requires_confirmation（例如补一个 delete_msg 无确认执行）。
+                tool_calls = [
+                    item for item in tool_calls
+                    if not _tool_requires_confirmation(
+                        item.get("name") if isinstance(item, dict) else item)
+                ]
             if tool_calls and tool_budget > 0:
                 results = await self.executor.execute(agent_event, tool_calls, remaining_budget=tool_budget)
                 transcript.extend(results)
@@ -421,7 +438,9 @@ class AgentRuntime:
                 record_reply(reply)
             companion = getattr(self, "companion", None)
             if companion is not None:
-                companion.observe_outgoing(reply, topic=plan.get("intent", "conversation"))
+                await asyncio.to_thread(
+                    companion.observe_outgoing, reply,
+                    topic=plan.get("intent", "conversation"))
         else:
             await dispatcher.client.send_group_msg_with_at(agent_event.scope.group_id, reply, [agent_event.identity.user_id])
         if decision.reason != "explicit_request":

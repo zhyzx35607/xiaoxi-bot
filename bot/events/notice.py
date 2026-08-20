@@ -1,12 +1,15 @@
 # bot/notice_handler.py - Group notices, poke, badwords, admin changes
 import asyncio
 import json, logging, time, re, os
+import threading
 from ..permission import get_group_config, is_group_enabled, save_group_config
 from ..utils import atomic_write_json
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _GROUP_FILES_PATH = os.path.join(_ROOT, "data", "group_files.json")
+# Serializes the read-modify-write in _record_group_upload across worker threads.
+_GROUP_FILES_LOCK = threading.Lock()
 
 
 def _read_json_file(path, default):
@@ -17,6 +20,18 @@ def _read_json_file(path, default):
     except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
         log.debug("Optional JSON state read failed: %s", error)
         return default
+
+
+def _record_group_upload(group_id, entry):
+    """Append a group-file upload record as one locked read-modify-write."""
+    with _GROUP_FILES_LOCK:
+        data = _read_json_file(_GROUP_FILES_PATH, {})
+        if not isinstance(data, dict):
+            data = {}
+        files = data.setdefault(str(group_id), [])
+        files.append(entry)
+        data[str(group_id)] = files[-200:]
+        atomic_write_json(_GROUP_FILES_PATH, data, indent=2)
 
 
 # 只把与群秩序相关的通知喂给 Agent 事件流，戳一戳/表情等高频噪声不喂
@@ -141,11 +156,14 @@ async def _generate_welcome_text(dispatcher, nickname, sex=""):
     prompt = f"新生「{nickname}」{sex_part}加入了群聊，请用一句简短（15字以内）有趣友好的话欢迎ta。自然口语化，不用emoji。直接回复内容，不用任何前缀。"
     try:
         from ..ai import _call_deepseek
+        from ..ai.reply import strip_command_prefix
         msg = [{"role": "user", "content": prompt}]
         reply = await _call_deepseek(dispatcher.config, msg, max_tokens=30, temperature=0.8,
                                       session=dispatcher.client.session)
         if reply and len(reply.strip()) > 3:
-            return reply.strip()[:30]
+            # 昵称由新成员控制，AI 可能复述出 "/命令" 样式文本；欢迎语会经
+            # message_sent 回环被当最高主人命令执行，外发前中和行首命令前缀。
+            return strip_command_prefix(reply.strip()[:30])
     except Exception as error:
         log.debug("Welcome text generation failed: %s", error)
     return f"欢迎 {nickname} 哦～"
@@ -269,11 +287,7 @@ async def handle_group_upload(dispatcher, event):
     size = file_info.get("size") or file_info.get("file_size") or 0
     log.info("Group file uploaded: group=%s user=%s size=%s", group_id, user_id, size)
     try:
-        data = await asyncio.to_thread(_read_json_file, _GROUP_FILES_PATH, {})
-        if not isinstance(data, dict):
-            data = {}
-        files = data.setdefault(str(group_id), [])
-        files.append({
+        await asyncio.to_thread(_record_group_upload, group_id, {
             "ts": time.time(),
             "user_id": user_id,
             "name": name,
@@ -281,8 +295,6 @@ async def handle_group_upload(dispatcher, event):
             "busid": busid,
             "size": size,
         })
-        data[str(group_id)] = files[-200:]
-        await asyncio.to_thread(atomic_write_json, _GROUP_FILES_PATH, data, indent=2)
     except Exception as e:
         log.error("Save group upload notice failed: %s", e)
 

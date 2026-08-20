@@ -25,7 +25,7 @@ class ConfigRecoveryTests(unittest.TestCase):
             backup = path + ".last-good"
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write('{"broken": true} trailing')
-            expected = {"ws_url": "ws://127.0.0.1:3001", "token": ""}
+            expected = {"ws_url": "ws://127.0.0.1:3001", "token": "", "bot_qq": 12345}
             with open(backup, "w", encoding="utf-8") as handle:
                 json.dump(expected, handle)
 
@@ -307,6 +307,34 @@ class NapCatWatchdogTests(unittest.TestCase):
             self.assertEqual(state["failures"], 0)
             self.assertGreater(state["last_restart"], 0)
 
+    def test_config_error_alerts_without_counting_failure(self):
+        script_path = Path(__file__).parents[2] / "deploy" / "napcat-login-watchdog.py"
+        spec = importlib.util.spec_from_file_location(
+            "napcat_login_watchdog_config_error", script_path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            request_path = Path(directory) / "restart.request"
+            config_path = Path(directory) / "onebot11_1.json"
+            config_path.write_text("{not json", encoding="utf-8")
+            state_path.write_text(json.dumps({
+                "failures": 1, "last_restart": 0,
+            }), encoding="utf-8")
+            with patch.object(module, "STATE_PATH", state_path), patch.object(
+                module, "RESTART_REQUEST_PATH", request_path
+            ), patch.object(module, "CONFIG_PATH", config_path):
+                result = asyncio.run(module.run_check())
+
+            # Restarting NapCat cannot repair a broken config: alert only,
+            # never feed the restart counter.
+            self.assertFalse(result)
+            self.assertFalse(request_path.exists())
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["failures"], 1)
+
 
 
 class RuntimeTemporaryFileTests(unittest.TestCase):
@@ -322,7 +350,9 @@ class RuntimeTemporaryFileTests(unittest.TestCase):
                 self.assertTrue(path.startswith(directory))
                 self.assertEqual(Path(path).read_bytes(), b"safe")
                 if os.name != "nt":
-                    self.assertEqual(os.stat(directory).st_mode & 0o777, 0o700)
+                    # data/tmp is world-traversable: the separate napcat user
+                    # reads shared media temp files through it.
+                    self.assertEqual(os.stat(directory).st_mode & 0o777, 0o755)
                     self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
                 os.remove(path)
 
@@ -355,6 +385,21 @@ class RuntimeTemporaryFileTests(unittest.TestCase):
                 resolved = runtime_paths.runtime_temp_dir()
 
         self.assertEqual(resolved, str(root / "data" / "tmp"))
+
+    def test_fallback_temp_directory_is_shareable_but_diagnostics_stay_private(self):
+        from bot.storage import runtime_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "project"
+            with patch.object(runtime_paths, "_PROJECT_ROOT", root):
+                resolved = Path(runtime_paths.runtime_temp_dir())
+                diagnostics = Path(runtime_paths.runtime_diagnostics_dir())
+            if os.name != "nt":
+                self.assertEqual(resolved, root / "data" / "tmp")
+                self.assertEqual(os.stat(resolved).st_mode & 0o777, 0o755)
+                # data/ gets traverse-only (o+x), not listable by others.
+                self.assertEqual(os.stat(root / "data").st_mode & 0o777, 0o751)
+                self.assertEqual(os.stat(diagnostics).st_mode & 0o777, 0o700)
 
     def test_runtime_diagnostics_use_persistent_configured_directory(self):
         from bot.storage.runtime_paths import runtime_diagnostic_path
@@ -742,11 +787,110 @@ class SchedulerReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 # A second pass must not resend the recovered batch.
                 self.assertFalse(await scheduler._try_send_acg_delivery(Stub()))
 
-        sleep_mock.assert_any_await(15)
+        sleep_mock.assert_any_await(20)
         self.assertEqual(len(sent), 1)
         self.assertEqual(history_counts, [50])
         self.assertIsNone(state["delivery"])
         self.assertFalse(state["pending_due"])
+
+    async def test_acg_delivery_timeout_polls_history_until_confirmed(self):
+        sent = []
+        history_counts = []
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append((group_id, nodes))
+                return {"status": "timeout", "retcode": -1}
+
+            async def get_group_msg_history(self, group_id, count=20):
+                history_counts.append(count)
+                # QQ lands the accepted forward only after a delay.
+                if len(history_counts) < 3:
+                    return {"messages": []}
+                return {"messages": [{"raw_message": "批次 #slow-batch-1"}]}
+
+        class Stub:
+            config = {
+                "bot_qq": 1,
+                "acg_images": {"enabled": True},
+                "groups": {"100": {"enabled": True, "features": {"acg_images": True}}},
+            }
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            sleep_mock = AsyncMock()
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch.object(scheduler.asyncio, "sleep", new=sleep_mock):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "slow-batch",
+                    "urls": ["https://example.com/a.jpg"],
+                    "remaining_groups": ["100"],
+                    "attempts": {},
+                    "created_at": time.time(),
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                self.assertTrue(await scheduler._try_send_acg_delivery(Stub()))
+                state = scheduler._load_acg_state()
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(history_counts, [50, 50, 50])
+        self.assertEqual(
+            [call.args[0] for call in sleep_mock.await_args_list
+             if call.args and call.args[0] == 20],
+            [20, 20, 20])
+        self.assertIsNone(state["delivery"])
+        self.assertFalse(state["pending_due"])
+
+    async def test_acg_delivery_timeout_unconfirmed_after_all_polls_stays_pending(self):
+        sent = []
+
+        class Client:
+            is_connected = True
+
+            async def send_group_forward_msg(self, group_id, nodes):
+                sent.append((group_id, nodes))
+                return {"status": "timeout", "retcode": -1}
+
+            async def get_group_msg_history(self, group_id, count=20):
+                return {"messages": []}
+
+        class Stub:
+            config = {
+                "bot_qq": 1,
+                "acg_images": {"enabled": True,
+                               "timeout_confirm_checks": 2,
+                               "timeout_confirm_interval_seconds": 5},
+                "groups": {"100": {"enabled": True, "features": {"acg_images": True}}},
+            }
+            client = Client()
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "acg.json")
+            with patch.object(scheduler, "_ACG_HISTORY_PATH", path), \
+                    patch.object(scheduler.asyncio, "sleep", new=AsyncMock()):
+                state = scheduler._new_acg_state()
+                state["pending_due"] = True
+                state["delivery"] = {
+                    "batch_id": "lost-batch",
+                    "urls": ["https://example.com/a.jpg"],
+                    "remaining_groups": ["100"],
+                    "attempts": {},
+                    "created_at": time.time(),
+                    "next_retry_at": 0,
+                }
+                scheduler._save_acg_state(state)
+                self.assertFalse(await scheduler._try_send_acg_delivery(Stub()))
+                state = scheduler._load_acg_state()
+
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(state["delivery"]["remaining_groups"], ["100"])
+        self.assertEqual(state["delivery"]["attempts"], {"100": 1})
 
     async def test_acg_delivery_expires_without_sending(self):
         sent = []

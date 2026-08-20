@@ -17,7 +17,7 @@ from ..permission import (
 )
 from ..storage.runtime_paths import create_runtime_temp_file
 from ..utils import atomic_write_json
-from .common import CONFIG_PATH, _load, _save
+from .common import CONFIG_PATH, _load, _save, parse_target_qqs
 
 log = logging.getLogger("qqbot")
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -232,9 +232,8 @@ def _safe_calc(expr):
     return result
 
 async def cmd_info(d, group_id, user_id, args, role, sender_card, message):
-    mentions = d._extract_mentions(message)
-    clean_args = re.sub(r"\[CQ:[^]]+\]", "", args).strip()
-    # 群内：@用户 或 无参数看自己
+    mentions, clean_args = parse_target_qqs(args, d._extract_mentions(message))
+    # 群内：@用户 / QQ号，或无参数看自己
     if group_id and not clean_args and not mentions:
         mentions = [user_id]
     if mentions:

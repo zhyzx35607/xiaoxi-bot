@@ -1,10 +1,15 @@
 """bot/permission.py - Unified permission system for QQ Bot"""
 import copy
 import json
+import threading
 import time
 import logging
 from .utils import atomic_write_json
 log = logging.getLogger("qqbot")
+# Serializes config.json writes between the command path (commands/common._commit)
+# and the in-memory path (save_group_config). A threading lock is required because
+# save_group_config also runs inside a worker thread via asyncio.to_thread.
+_CONFIG_WRITE_LOCK = threading.Lock()
 LEVEL_SUPER = 5
 LEVEL_MASTER = 4
 LEVEL_GOWNER = 3
@@ -213,16 +218,17 @@ def list_masters(dispatcher, group_id):
     gcfg = get_group_config(dispatcher, group_id)
     return gcfg.get("masters", [])
 def save_group_config(dispatcher):
-    cfg = copy.deepcopy(dispatcher.config)
-    # Never persist secrets to disk
-    for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "mukyu_api_key", "bili_sessdata", "touchgal_api_token"):
-        cfg.pop(secret_key, None)
-    if isinstance(cfg.get("vision_api"), dict):
-        cfg["vision_api"].pop("api_key", None)
-    for gcfg in cfg.get("groups", {}).values():
-        if isinstance(gcfg, dict):
-            for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "mukyu_api_key", "bili_sessdata", "touchgal_api_token"):
-                gcfg.pop(secret_key, None)
-            if isinstance(gcfg.get("vision_api"), dict):
-                gcfg["vision_api"].pop("api_key", None)
-    atomic_write_json(dispatcher._config_path, cfg, indent=2)
+    with _CONFIG_WRITE_LOCK:
+        cfg = copy.deepcopy(dispatcher.config)
+        # Never persist secrets to disk
+        for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "mukyu_api_key", "bili_sessdata", "touchgal_api_token"):
+            cfg.pop(secret_key, None)
+        if isinstance(cfg.get("vision_api"), dict):
+            cfg["vision_api"].pop("api_key", None)
+        for gcfg in cfg.get("groups", {}).values():
+            if isinstance(gcfg, dict):
+                for secret_key in ("token", "deepseek_api_key", "sigmai_api_key", "agnes_api_key", "uapi_api_key", "mukyu_api_key", "bili_sessdata", "touchgal_api_token"):
+                    gcfg.pop(secret_key, None)
+                if isinstance(gcfg.get("vision_api"), dict):
+                    gcfg["vision_api"].pop("api_key", None)
+        atomic_write_json(dispatcher._config_path, cfg, indent=2)

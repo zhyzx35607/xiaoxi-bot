@@ -225,12 +225,21 @@ class BiliDeliveryDeferred(RuntimeError):
     """The same item is still inside its bounded retry backoff."""
 
 
+class BiliDeliveryExhausted(RuntimeError):
+    """The item hit the delivery attempt cap; skip it instead of retrying forever."""
+
+
 def _delivery_retry_state(dispatcher):
     state = getattr(dispatcher, "_bili_delivery_retries", None)
     if state is None:
         state = {}
         dispatcher._bili_delivery_retries = state
     return state
+
+
+def _delivery_max_attempts(dispatcher):
+    cfg = dispatcher.config.get("bilibili", {})
+    return max(1, min(int(cfg.get("delivery_max_attempts", 8) or 8), 50))
 
 
 async def _recent_bot_message_contains(dispatcher, group_id, marker):
@@ -286,6 +295,24 @@ async def _send_group_confirmed(dispatcher, group_id, segments, marker, kind):
                          kind, group_id, marker)
                 return {"status": "ok", "confirmed_by": "history_after_timeout"}
     attempts = int(retry.get("attempts", 0) or 0) + 1
+    max_attempts = _delivery_max_attempts(dispatcher)
+    if attempts >= max_attempts:
+        # Bounded retries: give up on this marker so one undeliverable item
+        # cannot stall every later dynamic for the same UP主.
+        retry_state.pop(retry_key, None)
+        retry_state["last_failure"] = {
+            "kind": kind,
+            "group_id": str(group_id),
+            "marker": str(marker)[:120],
+            "attempts": attempts,
+            "reason": "attempts_exhausted",
+            "last_status": status or error_kind or "failed",
+            "failed_at": time.time(),
+        }
+        log.warning("%s delivery exhausted after %d attempts: g=%s marker=%s",
+                    kind, attempts, group_id, marker)
+        raise BiliDeliveryExhausted(
+            "{} delivery abandoned after {} attempts".format(kind, attempts))
     delay = min(900, 30 * (2 ** min(attempts - 1, 5)))
     retry_state[retry_key] = {
         "attempts": attempts,
@@ -505,7 +532,7 @@ async def download_mp4(dispatcher, url, bvid, max_bytes, timeout=120):
                         _remove_quiet(path)
                         log.info("bili download aborted at %d bytes", total)
                         return None
-                    f.write(chunk)
+                    await asyncio.to_thread(f.write, chunk)
         return path
     except Exception as e:
         log.warning("bili download error: %s", e)
@@ -817,6 +844,12 @@ async def poll_dynamics_once(dispatcher):
                     await asyncio.sleep(1)
                 except BiliDeliveryDeferred:
                     break
+                except BiliDeliveryExhausted:
+                    # Attempt cap hit: skip this marker so it stops blocking
+                    # later dynamics, but do not retry it forever.
+                    entry["dyn_seen"].append(d["id"])
+                    state_changed = True
+                    continue
                 except Exception as e:
                     log.warning("bili dynamic announce failed g=%s: %s", gid, e)
                     break
@@ -855,6 +888,11 @@ async def poll_dynamics_once(dispatcher):
                     await asyncio.sleep(1)
                 except BiliDeliveryDeferred:
                     break
+                except BiliDeliveryExhausted:
+                    # Mark as seen so the undeliverable video stops blocking
+                    # later uploads from the same UP主.
+                    announced_bvids.append(video["bvid"])
+                    continue
                 except Exception as e:
                     log.warning("bili announce failed g=%s: %s", gid, e)
                     break
@@ -955,6 +993,11 @@ async def poll_once(dispatcher):
                     await asyncio.sleep(1)
                 except BiliDeliveryDeferred:
                     break
+                except BiliDeliveryExhausted:
+                    # Mark as seen so the undeliverable video stops blocking
+                    # later uploads from the same UP主.
+                    announced_bvids.append(video["bvid"])
+                    continue
                 except Exception as e:
                     log.warning("bili announce failed g=%s: %s", gid, e)
                     break

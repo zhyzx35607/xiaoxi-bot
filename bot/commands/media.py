@@ -278,8 +278,10 @@ async def handle_music_search(d, group_id, user_id, raw_text, sender_card):
         except Exception as e:
             log.error("Music parse error: %s", e)
     from ..ai import deepseek_chat
+    from ..ai.reply import strip_command_prefix
     reply = await deepseek_chat(d, "用户想点歌「" + keyword + "」，请用1行推荐一首歌（格式：推荐「歌名 - 歌手」）。不确定就诚实说。")
-    await d.client.send_group_msg(group_id, reply)
+    # 点歌关键词由用户控制，兜底推荐语外发前中和行首命令前缀（message_sent 回环）
+    await d.client.send_group_msg(group_id, strip_command_prefix(reply))
     return True
 
 async def cmd_forward_msg(d, group_id, user_id, args, role, sender_card, message):

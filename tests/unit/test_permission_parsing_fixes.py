@@ -83,6 +83,7 @@ class _Dispatcher:
         self.replies = []
         self._daily_fortunes = {}
         self.save_runtime_state = Mock()
+        self.save_runtime_state_async = AsyncMock()
 
     def _extract_mentions(self, message):
         return _extract_mentions(message)

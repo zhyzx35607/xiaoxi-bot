@@ -81,6 +81,30 @@ class HealthLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.cancelled())
         self.assertEqual(dispatcher._background_tasks, set())
 
+    async def test_uncancellable_background_tasks_are_dropped_from_tracking(self):
+        class Task:
+            def done(self):
+                return False
+
+            def cancel(self):
+                pass
+
+        class Stub(HealthServiceMixin):
+            pass
+
+        task = Task()
+        dispatcher = Stub()
+        dispatcher._background_tasks = {task}
+        with patch(
+            "bot.services.health.asyncio.wait",
+            new=AsyncMock(side_effect=[(set(), {task}), (set(), {task})]),
+        ):
+            with self.assertLogs("qqbot", level="ERROR"):
+                await dispatcher.stop_background_tasks()
+
+        # Tasks that ignore cancellation must not occupy backlog slots forever.
+        self.assertEqual(dispatcher._background_tasks, set())
+
 
 if __name__ == "__main__":
     unittest.main()

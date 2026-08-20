@@ -50,9 +50,11 @@ fi
 
 id -u qqbot >/dev/null 2>&1 || useradd --system --home-dir /var/lib/qqbot --shell /usr/sbin/nologin qqbot
 install -d -m 0700 -o qqbot -g qqbot /var/lib/qqbot /var/log/qqbot /run/qqbot
-install -d -m 0700 -o qqbot -g qqbot \
-  "${project_root}/data/tmp" \
-  "${project_root}/data/diagnostics"
+# data/tmp holds shareable media temp files that the separate napcat user reads
+# via file://; data/ gets o+x (traverse, no listing), the rest stays 0700.
+install -d -m 0751 -o qqbot -g qqbot "${project_root}/data"
+install -d -m 0755 -o qqbot -g qqbot "${project_root}/data/tmp"
+install -d -m 0700 -o qqbot -g qqbot "${project_root}/data/diagnostics"
 chown root:root "${project_root}"
 chmod 0755 "${project_root}"
 
@@ -98,8 +100,11 @@ fi
 chown qqbot:qqbot /var/lib/qqbot/config.json /var/lib/qqbot/config.json.last-good
 chmod 0600 /var/lib/qqbot/config.json /var/lib/qqbot/config.json.last-good
 chown -R qqbot:qqbot "${project_root}/data"
-find "${project_root}/data" -type d -exec chmod 0700 {} +
+find "${project_root}/data" -mindepth 1 -type d -exec chmod 0700 {} +
 find "${project_root}/data" -type f -exec chmod 0600 {} +
+# Restore the shareable media path after the blanket 0700 pass above.
+chmod 0751 "${project_root}/data"
+chmod 0755 "${project_root}/data/tmp"
 install -d -m 0755 /etc/systemd/system/qqbot.service.d
 rm -f /etc/systemd/system/qqbot.service.d/20-security.conf
 rmdir /etc/systemd/system/qqbot.service.d 2>/dev/null || true

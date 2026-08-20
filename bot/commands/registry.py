@@ -91,11 +91,11 @@ def register_all(d):
     d.register("安全", cmd_security, "安全功能 /安全 status|log|url on/off|gray on/off",
                admin_only=True)
     # Admin commands (require bot to be admin/owner)
-    d.register("kick", cmd_kick, "踢出成员 /kick @用户",
+    d.register("kick", cmd_kick, "踢出成员 /kick @用户或QQ（可多个）",
                admin_only=True, bot_admin_required=True)
-    d.register("ban", cmd_ban, "禁言成员 /ban @用户 [分钟]",
+    d.register("ban", cmd_ban, "禁言成员 /ban @用户或QQ（可多个） [分钟]",
                admin_only=True, bot_admin_required=True)
-    d.register("unban", cmd_unban, "解除禁言 /unban @用户",
+    d.register("unban", cmd_unban, "解除禁言 /unban @用户或QQ（可多个）",
                admin_only=True, bot_admin_required=True)
     d.register("allban", cmd_allban, "全员禁言开关 /allban on/off",
                admin_only=True, bot_admin_required=True)
@@ -111,14 +111,14 @@ def register_all(d):
                admin_only=True, bot_admin_required=True)
     d.register("clearai", cmd_clear_ai, "清除本群机器人数据",
                bot_owner=True)
-    d.register("admin", cmd_admin_mgr, "设置或取消群管理员 /admin add/del @用户",
+    d.register("admin", cmd_admin_mgr, "设置或取消群管理员 /admin add/del @用户或QQ（可多个）",
                admin_only=True, bot_admin_required=True)
-    d.register("title", cmd_special_title, "设置专属头衔 /title @用户 头衔",
+    d.register("title", cmd_special_title, "设置专属头衔 /title @用户或QQ 头衔",
                admin_only=True, bot_owner_required=True)
-    d.register("头衔", cmd_special_title, "设置专属头衔 /头衔 @用户 头衔",
+    d.register("头衔", cmd_special_title, "设置专属头衔 /头衔 @用户或QQ 头衔",
                admin_only=True, bot_owner_required=True)
     # Master management (bot_owner only)
-    d.register("master", cmd_master, "管理群主人 /master add/del/list",
+    d.register("master", cmd_master, "管理群主人 /master add/del @用户或QQ（可多个）|list",
                bot_owner_only=True)
     d.register("approve", cmd_approve_request, "同意好友/入群请求",
                bot_owner_only=True)

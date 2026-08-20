@@ -30,7 +30,8 @@ def should_suppress_reply(
         if callable(checker) and checker(reply):
             log.info("Owner anti-echo skipped repetitive reply")
             return True
-    elif not is_owner_tier and _is_repetitive(user_id, reply):
+    elif not is_owner_tier and _is_repetitive(
+            user_id, reply, scope=str(group_id) if group_id else "private_{}".format(user_id)):
         log.info("Anti-echo skipped repetitive reply for user=%s", user_id)
         return True
     return False
